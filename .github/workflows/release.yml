@@ -66,6 +66,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Checkout atl-core
+        uses: actions/checkout@v4
+        with:
+          repository: evidentum-io/atl-core
+          path: ../atl-core
+          token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Get version
         id: version
         shell: bash
