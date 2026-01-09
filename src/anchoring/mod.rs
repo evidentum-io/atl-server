@@ -6,8 +6,9 @@ mod rfc3161;
 #[cfg(feature = "ots")]
 mod ots;
 
-#[cfg(feature = "rfc3161")]
-pub use rfc3161::*;
+// Re-exports will be added when modules are implemented
+// #[cfg(feature = "rfc3161")]
+// pub use rfc3161::*;
 
-#[cfg(feature = "ots")]
-pub use ots::*;
+// #[cfg(feature = "ots")]
+// pub use ots::*;

@@ -3,5 +3,6 @@
 #[cfg(feature = "sqlite")]
 mod sqlite;
 
-#[cfg(feature = "sqlite")]
-pub use sqlite::*;
+// Re-exports will be added when module is implemented
+// #[cfg(feature = "sqlite")]
+// pub use sqlite::*;

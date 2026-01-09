@@ -1,7 +1,8 @@
 //! Trait definitions for storage and anchoring
 
-mod storage;
 mod anchor;
+mod storage;
 
-pub use storage::*;
-pub use anchor::*;
+// Re-exports will be added when modules are implemented
+// pub use anchor::*;
+// pub use storage::*;

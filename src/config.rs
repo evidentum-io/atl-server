@@ -1,6 +1,7 @@
 //! Server configuration
 
 /// Server configuration
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Config {
     pub host: String,
@@ -15,6 +16,7 @@ pub struct Config {
 }
 
 /// TSA (RFC 3161) configuration for Tier-1 evidence
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct TsaConfig {
     /// List of TSA URLs to try in order (fallback on failure)
@@ -38,6 +40,7 @@ impl Default for TsaConfig {
 
 impl TsaConfig {
     /// Load from environment variables
+    #[allow(dead_code)]
     pub fn from_env() -> Self {
         let urls = std::env::var("ATL_TSA_URLS")
             .ok()
@@ -54,10 +57,15 @@ impl TsaConfig {
             .map(|s| s == "true" || s == "1")
             .unwrap_or(true);
 
-        Self { urls, timeout_ms, strict }
+        Self {
+            urls,
+            timeout_ms,
+            strict,
+        }
     }
 
     /// Check if TSA is configured
+    #[allow(dead_code)]
     pub fn is_enabled(&self) -> bool {
         !self.urls.is_empty()
     }

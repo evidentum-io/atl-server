@@ -3,10 +3,10 @@
 use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+mod api;
 mod config;
 mod error;
 mod traits;
-mod api;
 
 #[cfg(feature = "sqlite")]
 mod storage;

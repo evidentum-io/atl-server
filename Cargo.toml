@@ -1,8 +1,8 @@
 [package]
 name = "atl-server"
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.75.0"
+edition = "2024"
+rust-version = "1.85.0"
 authors = ["Dmitrii Zatona <dmitrii@zatona.dev>"]
 description = "Autonomous notarization primitive - HTTP server for ATL Protocol v1"
 license = "Apache-2.0"
