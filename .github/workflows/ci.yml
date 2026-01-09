@@ -19,7 +19,7 @@ jobs:
         with:
           repository: evidentum-io/atl-core
           path: atl-core
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.ATL_CORE_TOKEN }}
       - run: ln -s $GITHUB_WORKSPACE/atl-core ../atl-core
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -35,7 +35,7 @@ jobs:
         with:
           repository: evidentum-io/atl-core
           path: atl-core
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.ATL_CORE_TOKEN }}
       - run: ln -s $GITHUB_WORKSPACE/atl-core ../atl-core
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -52,7 +52,7 @@ jobs:
         with:
           repository: evidentum-io/atl-core
           path: atl-core
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.ATL_CORE_TOKEN }}
       - run: ln -s $GITHUB_WORKSPACE/atl-core ../atl-core
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -67,7 +67,7 @@ jobs:
         with:
           repository: evidentum-io/atl-core
           path: atl-core
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.ATL_CORE_TOKEN }}
       - run: ln -s $GITHUB_WORKSPACE/atl-core ../atl-core
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -85,7 +85,7 @@ jobs:
         with:
           repository: evidentum-io/atl-core
           path: atl-core
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.ATL_CORE_TOKEN }}
       - run: ln -s $GITHUB_WORKSPACE/atl-core ../atl-core
       - uses: dtolnay/rust-toolchain@1.85.0
       - uses: Swatinem/rust-cache@v2

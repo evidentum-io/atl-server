@@ -19,7 +19,7 @@ jobs:
         with:
           repository: evidentum-io/atl-core
           path: atl-core
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.ATL_CORE_TOKEN }}
       - run: ln -s $GITHUB_WORKSPACE/atl-core ../atl-core
       - uses: rustsec/audit-check@v2
         with:
