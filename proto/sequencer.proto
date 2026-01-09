@@ -1,0 +1,437 @@
+// ATL Server - Sequencer gRPC Protocol
+// Version: 1.0
+//
+// This file defines the gRPC interface between NODE and SEQUENCER roles.
+// NODEs use this protocol to forward hashed entries to the master Sequencer.
+
+syntax = "proto3";
+
+package atl.sequencer.v1;
+
+option java_multiple_files = true;
+option java_package = "io.evidentum.atl.sequencer.v1";
+
+// ============================================================
+// Service Definition
+// ============================================================
+
+// SequencerService handles all operations between NODE and SEQUENCER.
+// NODEs connect to this service to submit entries and query receipts.
+// All requests must include x-sequencer-token header for authentication.
+service SequencerService {
+  // Submit a single entry and wait for signed checkpoint.
+  // Used for low-latency individual requests.
+  rpc AnchorEntry(AnchorRequest) returns (AnchorResponse);
+
+  // Submit a batch of entries for maximum throughput.
+  // Used when NODE accumulates multiple requests.
+  rpc AnchorBatch(AnchorBatchRequest) returns (AnchorBatchResponse);
+
+  // Get receipt by entry UUID.
+  // NODE proxies GET /v1/receipts/{id} through this method.
+  rpc GetReceipt(GetReceiptRequest) returns (ReceiptResponse);
+
+  // Get current tree head.
+  // NODE proxies GET /v1/tree/head through this method.
+  rpc GetTreeHead(GetTreeHeadRequest) returns (TreeHeadResponse);
+
+  // Get public keys for verification.
+  // NODE proxies GET /v1/keys through this method.
+  rpc GetPublicKeys(GetPublicKeysRequest) returns (PublicKeysResponse);
+
+  // Trigger external anchoring (TSA/OTS).
+  // NODE proxies POST /v1/anchors through this method.
+  rpc TriggerAnchoring(TriggerAnchoringRequest) returns (TriggerAnchoringResponse);
+
+  // Upgrade receipt with Bitcoin proof (Tier-2 evidence).
+  // NODE proxies GET /v1/receipts/{id}/upgrade through this method.
+  rpc UpgradeReceipt(UpgradeReceiptRequest) returns (UpgradeReceiptResponse);
+
+  // Health check for connection monitoring.
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// ============================================================
+// Entry Submission Messages
+// ============================================================
+
+// Request to anchor a single entry.
+message AnchorRequest {
+  // SHA-256 hash of the payload (32 bytes).
+  // Computed by NODE from streaming file/JSON content.
+  bytes payload_hash = 1;
+
+  // SHA-256 hash of the metadata (32 bytes).
+  // Computed by NODE from JCS-canonicalized metadata JSON.
+  bytes metadata_hash = 2;
+
+  // Cleartext metadata JSON (optional).
+  // Included in receipt for client convenience.
+  string metadata_json = 3;
+
+  // Client-provided external ID (optional).
+  // Preserved for client's reference tracking.
+  string external_id = 4;
+}
+
+// Response for single entry submission.
+message AnchorResponse {
+  // Generated entry UUID.
+  string entry_id = 1;
+
+  // Leaf index in Merkle tree (0-based).
+  uint64 leaf_index = 2;
+
+  // Inclusion proof path (list of 32-byte sibling hashes).
+  repeated bytes inclusion_path = 3;
+
+  // Signed checkpoint covering this entry.
+  Checkpoint checkpoint = 4;
+
+  // Consistency proof for split-view protection (optional).
+  // Proves tree grew consistently from the last anchored tree size.
+  // Allows clients to verify the log hasn't forked since the last external anchor.
+  repeated bytes consistency_proof = 5;
+
+  // Tree size from which consistency is proven (matches last anchor's tree_size).
+  uint64 consistency_from = 6;
+
+  // TSA anchor (Tier-1 evidence) - included synchronously.
+  // Present when TSA is configured and successful.
+  TsaAnchor tsa_anchor = 7;
+}
+
+// TSA (RFC 3161) anchor for Tier-1 evidence.
+// Provides immediate legal timestamp from a trusted third party.
+message TsaAnchor {
+  // URL of the TSA that signed this timestamp.
+  // Allows client to identify which TSA was used for verification.
+  string tsa_url = 1;
+
+  // Raw RFC 3161 TimeStampResp (DER encoded).
+  // Contains the full signed timestamp token for verification.
+  bytes tsa_response = 2;
+
+  // Parsed timestamp from TSA (nanoseconds since Unix epoch).
+  // Extracted for convenience; authoritative value is in tsa_response.
+  uint64 timestamp = 3;
+}
+
+// Request to anchor multiple entries in one roundtrip.
+message AnchorBatchRequest {
+  // List of entries to anchor (max 10,000).
+  repeated AnchorRequest entries = 1;
+}
+
+// Response for batch submission.
+message AnchorBatchResponse {
+  // Results for each entry (same order as request).
+  repeated AnchorEntryResult results = 1;
+
+  // Single checkpoint covering the entire batch.
+  Checkpoint checkpoint = 2;
+}
+
+// Individual entry result within a batch.
+message AnchorEntryResult {
+  // Generated entry UUID.
+  string entry_id = 1;
+
+  // Leaf index in Merkle tree.
+  uint64 leaf_index = 2;
+
+  // Inclusion proof path.
+  repeated bytes inclusion_path = 3;
+}
+
+// ============================================================
+// Checkpoint (Signed Tree Head)
+// ============================================================
+
+// Checkpoint represents a signed snapshot of the Merkle tree state.
+// This is the cryptographic commitment from the Sequencer.
+message Checkpoint {
+  // Origin ID - SHA-256 hash of the log's public key (32 bytes).
+  // Uniquely identifies this log instance.
+  bytes origin = 1;
+
+  // Tree size at checkpoint time.
+  // Number of leaves in the tree when signed.
+  uint64 tree_size = 2;
+
+  // Timestamp in nanoseconds since Unix epoch.
+  uint64 timestamp = 3;
+
+  // Root hash of the Merkle tree (32 bytes).
+  bytes root_hash = 4;
+
+  // Ed25519 signature over (origin || tree_size || timestamp || root_hash).
+  // 64 bytes.
+  bytes signature = 5;
+
+  // Key ID - SHA-256 hash of the signing public key (32 bytes).
+  // Allows verification against published keys.
+  bytes key_id = 6;
+}
+
+// ============================================================
+// Receipt Retrieval Messages
+// ============================================================
+
+// Request to retrieve a receipt by entry UUID.
+message GetReceiptRequest {
+  // Entry UUID (standard UUID format).
+  string entry_id = 1;
+
+  // Whether to include external anchor attestations.
+  bool include_anchors = 2;
+}
+
+// Full receipt response.
+message ReceiptResponse {
+  // Entry metadata.
+  Entry entry = 1;
+
+  // Inclusion proof path (sibling hashes).
+  repeated bytes inclusion_path = 2;
+
+  // Signed checkpoint.
+  Checkpoint checkpoint = 3;
+
+  // Consistency proof for split-view protection (optional).
+  // Proves tree grew consistently from last anchored size.
+  ConsistencyProof consistency_proof = 4;
+
+  // External anchor attestations.
+  repeated ExternalAnchor anchors = 5;
+}
+
+// Entry metadata stored in the log.
+message Entry {
+  // Entry UUID.
+  string id = 1;
+
+  // SHA-256 hash of the original payload (32 bytes).
+  bytes payload_hash = 2;
+
+  // SHA-256 hash of the metadata (32 bytes).
+  bytes metadata_hash = 3;
+
+  // Cleartext metadata JSON (if was provided at anchor time).
+  string metadata_json = 4;
+
+  // Leaf index in Merkle tree.
+  uint64 leaf_index = 5;
+
+  // Creation timestamp (nanoseconds since Unix epoch).
+  uint64 created_at = 6;
+
+  // Client-provided external ID.
+  string external_id = 7;
+}
+
+// Consistency proof between two tree sizes.
+message ConsistencyProof {
+  // Starting tree size (older).
+  uint64 from_tree_size = 1;
+
+  // Proof path (intermediate hashes).
+  repeated bytes path = 2;
+}
+
+// External anchor attestation (RFC 3161, OpenTimestamps, etc.).
+message ExternalAnchor {
+  // Anchor type: "rfc3161", "ots", etc.
+  string anchor_type = 1;
+
+  // Hash that was anchored (typically root_hash).
+  bytes anchored_hash = 2;
+
+  // Anchor timestamp (nanoseconds since Unix epoch).
+  uint64 timestamp = 3;
+
+  // Raw anchor token (DER for RFC 3161, binary for OTS).
+  bytes token = 4;
+
+  // Additional metadata as JSON.
+  string metadata_json = 5;
+}
+
+// ============================================================
+// Tree Operations Messages
+// ============================================================
+
+// Request for current tree head.
+message GetTreeHeadRequest {
+  // Empty - no parameters needed.
+}
+
+// Tree head response.
+message TreeHeadResponse {
+  // Current tree size (number of leaves).
+  uint64 tree_size = 1;
+
+  // Current root hash (32 bytes).
+  bytes root_hash = 2;
+
+  // Origin ID (32 bytes).
+  bytes origin = 3;
+
+  // Latest signed checkpoint (if any).
+  Checkpoint latest_checkpoint = 4;
+}
+
+// ============================================================
+// Public Keys Messages
+// ============================================================
+
+// Request for public keys.
+message GetPublicKeysRequest {
+  // Empty - returns all active keys.
+}
+
+// Public keys response.
+message PublicKeysResponse {
+  // List of public keys (current and historical).
+  repeated PublicKey keys = 1;
+}
+
+// Public key information.
+message PublicKey {
+  // Key ID - SHA-256 hash of the public key (32 bytes).
+  bytes key_id = 1;
+
+  // Raw public key bytes (32 bytes for Ed25519).
+  bytes public_key = 2;
+
+  // Algorithm name (e.g., "ed25519").
+  string algorithm = 3;
+
+  // Key creation timestamp (nanoseconds since Unix epoch).
+  uint64 created_at = 4;
+}
+
+// ============================================================
+// External Anchoring Messages
+// ============================================================
+
+// Request to trigger external anchoring.
+message TriggerAnchoringRequest {
+  // Anchor types to request: "rfc3161", "ots", etc.
+  repeated string anchor_types = 1;
+}
+
+// Anchoring trigger response.
+message TriggerAnchoringResponse {
+  // Tree size that was anchored.
+  uint64 tree_size = 1;
+
+  // Root hash that was anchored.
+  bytes root_hash = 2;
+
+  // Status for each requested anchor type.
+  repeated AnchoringStatus statuses = 3;
+}
+
+// Status of an anchoring operation.
+message AnchoringStatus {
+  // Anchor type.
+  string anchor_type = 1;
+
+  // Status: "completed", "pending", "failed".
+  string status = 2;
+
+  // Completion timestamp (if completed).
+  uint64 timestamp = 3;
+
+  // Estimated time to finality in seconds (for pending).
+  // e.g., ~3600 for Bitcoin OTS.
+  uint64 estimated_finality_secs = 4;
+
+  // Error message (if failed).
+  string error_message = 5;
+}
+
+// ============================================================
+// Receipt Upgrade Messages (Tier-2 Evidence)
+// ============================================================
+
+// Request to upgrade a receipt with Bitcoin proof.
+message UpgradeReceiptRequest {
+  // Entry UUID to upgrade.
+  string entry_id = 1;
+}
+
+// Response for receipt upgrade.
+message UpgradeReceiptResponse {
+  // Upgrade status.
+  UpgradeStatus status = 1;
+
+  // Full upgraded receipt as JSON (only if status == UPGRADED).
+  // Contains the complete receipt with consistency_proof and Bitcoin anchor.
+  bytes upgraded_receipt_json = 2;
+
+  // Tree size in the original receipt (only if status == PENDING).
+  // Indicates what tree state the receipt was created at.
+  uint64 receipt_tree_size = 3;
+
+  // Most recent Bitcoin anchor's tree_size (only if status == PENDING).
+  // Null/0 if no Bitcoin anchors exist yet.
+  uint64 last_anchor_tree_size = 4;
+
+  // Estimated completion time (nanoseconds since Unix epoch, only if status == PENDING).
+  // When the next Bitcoin anchor is expected to cover this receipt.
+  uint64 estimated_completion_unix = 5;
+}
+
+// Status of a receipt upgrade operation.
+enum UpgradeStatus {
+  // Bitcoin anchor doesn't cover this receipt yet.
+  // Client should retry later or poll estimated_completion.
+  PENDING = 0;
+
+  // Receipt successfully upgraded with Bitcoin proof.
+  // upgraded_receipt_json contains the full receipt.
+  UPGRADED = 1;
+}
+
+// Bitcoin OTS anchor for Tier-2 evidence.
+// Provides permanent, immutable proof via Bitcoin blockchain.
+message BitcoinAnchor {
+  // Bitcoin block height containing the commitment.
+  uint64 block_height = 1;
+
+  // Block timestamp (ISO 8601 format).
+  string block_time = 2;
+
+  // Tree size at the time of Bitcoin anchoring.
+  // Used to build consistency_proof in upgraded receipt.
+  uint64 tree_size = 3;
+
+  // OpenTimestamps proof (binary format).
+  bytes ots_proof = 4;
+}
+
+// ============================================================
+// Health Check Messages
+// ============================================================
+
+// Health check request.
+message HealthCheckRequest {
+  // Empty.
+}
+
+// Health check response.
+message HealthCheckResponse {
+  // Whether the service is healthy.
+  bool healthy = 1;
+
+  // Human-readable status message.
+  string message = 2;
+
+  // Current tree size (for monitoring).
+  uint64 tree_size = 3;
+
+  // Server uptime in seconds.
+  uint64 uptime_secs = 4;
+}

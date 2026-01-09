@@ -1,0 +1,81 @@
+[package]
+name = "atl-server"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75.0"
+authors = ["Dmitrii Zatona <dmitrii@zatona.dev>"]
+description = "Autonomous notarization primitive - HTTP server for ATL Protocol v1"
+license = "Apache-2.0"
+repository = "https://github.com/evidentum-io/atl-server"
+keywords = ["transparency-log", "merkle-tree", "timestamping", "notarization"]
+categories = ["cryptography", "web-programming"]
+
+[dependencies]
+# Core ATL library
+atl-core = { path = "../atl-core", version = "0.5" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures = "0.3"
+
+# HTTP server
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace", "limit"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Database
+rusqlite = { version = "0.31", features = ["bundled"], optional = true }
+
+# Anchoring
+rasn = { version = "0.18", optional = true }
+reqwest = { version = "0.12", features = ["blocking", "json"], optional = true }
+
+# Monitoring (optional - disabled by default)
+betteruptime-heartbeat = { git = "https://github.com/thunderwind-io/rust-betteruptime-heartbeat", optional = true }
+
+# Utilities
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "1"
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4"
+base64 = "0.22"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Crypto (for Ed25519 key handling)
+ed25519-dalek = "2"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
+tokio-test = "0.4"
+tower = { version = "0.4", features = ["util"] }
+hyper = "1"
+
+[features]
+default = ["sqlite", "rfc3161"]
+sqlite = ["rusqlite"]
+rfc3161 = ["rasn", "reqwest"]
+ots = []  # Uses atl_core::ots (no external deps needed)
+monitoring = ["betteruptime-heartbeat"]  # Optional Better Uptime heartbeats
+full = ["sqlite", "rfc3161", "ots", "monitoring"]
+
+[[bin]]
+name = "atl-server"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
