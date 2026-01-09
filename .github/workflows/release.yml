@@ -70,8 +70,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: evidentum-io/atl-core
-          path: ../atl-core
+          path: atl-core
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Symlink atl-core
+        run: ln -s $GITHUB_WORKSPACE/atl-core ../atl-core
 
       - name: Get version
         id: version

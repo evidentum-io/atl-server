@@ -18,8 +18,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: evidentum-io/atl-core
-          path: ../atl-core
+          path: atl-core
           token: ${{ secrets.GITHUB_TOKEN }}
+      - run: ln -s $GITHUB_WORKSPACE/atl-core ../atl-core
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
