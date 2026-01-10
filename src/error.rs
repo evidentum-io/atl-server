@@ -67,12 +67,16 @@ pub enum ServerError {
     // ========== Anchoring Errors ==========
     /// Anchoring operation failed
     #[error("anchoring error: {0}")]
-    Anchoring(#[from] AnchorError),
+    Anchoring(AnchorError),
 
     // ========== Server Errors ==========
     /// Operation not supported
     #[error("not supported: {0}")]
     NotSupported(String),
+
+    /// Service unavailable (e.g., sequencer buffer full)
+    #[error("service unavailable: {0}")]
+    ServiceUnavailable(String),
 
     /// Internal error
     #[error("internal error: {0}")]
@@ -130,42 +134,15 @@ pub enum StorageError {
     Sqlite(#[from] rusqlite::Error),
 }
 
-/// Anchoring-specific errors
-#[allow(dead_code)]
+// Re-export AnchorError from anchoring module
+#[cfg(any(feature = "rfc3161", feature = "ots"))]
+pub use crate::anchoring::error::AnchorError;
+
+// Placeholder for when anchoring features are disabled
+#[cfg(not(any(feature = "rfc3161", feature = "ots")))]
 #[derive(Debug, Error)]
-pub enum AnchorError {
-    /// Network error
-    #[error("network error: {0}")]
-    Network(String),
-
-    /// Service returned error
-    #[error("service error: {0}")]
-    ServiceError(String),
-
-    /// Invalid response from service
-    #[error("invalid response: {0}")]
-    InvalidResponse(String),
-
-    /// Token verification failed
-    #[error("token invalid: {0}")]
-    TokenInvalid(String),
-
-    /// Request timeout
-    #[error("timeout after {0} seconds")]
-    Timeout(u64),
-
-    /// Untrusted TSA
-    #[error("untrusted TSA: {0}")]
-    UntrustedTsa(String),
-
-    /// Bitcoin block not confirmed
-    #[error("block not confirmed: height {0}")]
-    BlockNotConfirmed(u64),
-
-    /// Feature not enabled
-    #[error("feature not enabled: {0}")]
-    FeatureNotEnabled(String),
-}
+#[error("anchoring not available")]
+pub struct AnchorError;
 
 /// Server result type alias
 pub type ServerResult<T> = Result<T, ServerError>;
@@ -199,7 +176,8 @@ impl ServerError {
             ServerError::NotSupported(_) => StatusCode::NOT_IMPLEMENTED,
 
             // 503 Service Unavailable
-            ServerError::Anchoring(AnchorError::Network(_))
+            ServerError::ServiceUnavailable(_)
+            | ServerError::Anchoring(AnchorError::Network(_))
             | ServerError::Anchoring(AnchorError::Timeout(_))
             | ServerError::Anchoring(AnchorError::ServiceError(_)) => {
                 StatusCode::SERVICE_UNAVAILABLE
@@ -232,6 +210,7 @@ impl ServerError {
             ServerError::Storage(_) => "STORAGE_ERROR",
             ServerError::Anchoring(_) => "ANCHORING_ERROR",
             ServerError::NotSupported(_) => "NOT_SUPPORTED",
+            ServerError::ServiceUnavailable(_) => "SERVICE_UNAVAILABLE",
             ServerError::Internal(_) => "INTERNAL_ERROR",
             ServerError::Config(_) => "CONFIG_ERROR",
             ServerError::Core(_) => "CORE_ERROR",
@@ -296,6 +275,14 @@ impl From<reqwest::Error> for AnchorError {
     }
 }
 
+// Conversion from AnchorError to ServerError
+#[cfg(any(feature = "rfc3161", feature = "ots"))]
+impl From<AnchorError> for ServerError {
+    fn from(e: AnchorError) -> Self {
+        ServerError::Anchoring(e)
+    }
+}
+
 #[cfg(feature = "rfc3161")]
 impl From<reqwest::Error> for ServerError {
     fn from(e: reqwest::Error) -> Self {
@@ -326,6 +313,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(feature = "rfc3161", feature = "ots"))]
     fn test_is_recoverable() {
         assert!(ServerError::Anchoring(AnchorError::Timeout(30)).is_recoverable());
         assert!(!ServerError::EntryNotFound("x".into()).is_recoverable());

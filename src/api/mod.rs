@@ -1,11 +1,14 @@
 //! HTTP API
 
-mod dto;
+pub mod dto;
 pub mod error;
-mod handlers;
-mod routes;
-mod streaming;
+pub mod handlers;
+pub mod middleware;
+pub mod router;
+pub mod state;
+pub mod streaming;
 
-// Re-exports will be added when modules are implemented
-// pub use dto::*;
-// pub use routes::*;
+#[allow(unused_imports)]
+pub use router::create_router;
+#[allow(unused_imports)]
+pub use state::AppState;

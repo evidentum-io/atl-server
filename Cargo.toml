@@ -1,6 +1,6 @@
 [package]
 name = "atl-server"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.85.0"
 authors = ["Dmitrii Zatona <dmitrii@zatona.dev>"]
@@ -12,7 +12,7 @@ categories = ["cryptography", "web-programming"]
 
 [dependencies]
 # Core ATL library
-atl-core = { path = "../atl-core", version = "0.5" }
+atl-core = { path = "../atl-core", version = "0.5", features = ["bitcoin-ots"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -63,6 +63,7 @@ tempfile = "3"
 tokio-test = "0.4"
 tower = { version = "0.4", features = ["util"] }
 hyper = "1"
+sha2 = "0.10"
 
 [features]
 default = ["sqlite", "rfc3161"]
