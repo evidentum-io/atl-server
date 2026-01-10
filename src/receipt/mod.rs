@@ -1,6 +1,23 @@
-//! Receipt generation
+//! Receipt generation module
+//!
+//! This module provides receipt generation functionality for atl-server.
+//! It bridges atl-core (receipt structures) with Storage (data access).
 
+mod consistency;
+mod convert;
+mod format;
 mod generator;
+mod options;
+mod upgrade;
 
-// Re-exports will be added when module is implemented
-// pub use generator::*;
+// Re-export public API
+#[allow(unused_imports)]
+pub use generator::{
+    CheckpointSigner, ReceiptGenerator, generate_receipt, generate_receipt_simple,
+};
+#[allow(unused_imports)]
+pub use options::ReceiptOptions;
+#[allow(unused_imports)]
+pub use upgrade::{UpgradeResult, upgrade_receipt};
+
+// Internal helpers are not exported (format, convert, consistency)

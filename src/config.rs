@@ -1,5 +1,30 @@
 //! Server configuration
 
+/// Server operating mode
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerMode {
+    /// Standalone mode - local storage + local dispatcher
+    Standalone,
+    /// Node mode - no local storage, uses gRPC dispatcher
+    Node,
+    /// Sequencer mode - master storage + local dispatcher
+    Sequencer,
+}
+
+impl ServerMode {
+    /// Check if this mode should expose /health endpoint
+    pub fn has_health_endpoint(&self) -> bool {
+        matches!(self, ServerMode::Node | ServerMode::Sequencer)
+    }
+
+    /// Check if this mode has local storage
+    #[allow(dead_code)]
+    pub fn has_local_storage(&self) -> bool {
+        matches!(self, ServerMode::Standalone | ServerMode::Sequencer)
+    }
+}
+
 /// Server configuration
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
@@ -13,6 +38,10 @@ pub struct Config {
     pub access_tokens: Option<Vec<String>>,
     /// TSA configuration (Tiered Evidence - Tier 1)
     pub tsa: TsaConfig,
+    /// Server mode
+    pub mode: ServerMode,
+    /// Base URL for upgrade_url generation (required)
+    pub base_url: String,
 }
 
 /// TSA (RFC 3161) configuration for Tier-1 evidence
@@ -81,6 +110,8 @@ impl Default for Config {
             log_level: "info".to_string(),
             access_tokens: None,
             tsa: TsaConfig::default(),
+            mode: ServerMode::Standalone,
+            base_url: "http://localhost:3000".to_string(),
         }
     }
 }

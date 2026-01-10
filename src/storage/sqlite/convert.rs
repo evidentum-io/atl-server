@@ -70,7 +70,7 @@ pub fn row_to_checkpoint(row: &Row) -> rusqlite::Result<atl_core::Checkpoint> {
 /// Convert a database row to Anchor
 pub fn row_to_anchor(row: &Row) -> rusqlite::Result<Anchor> {
     let _id: i64 = row.get(0)?;
-    let _tree_size: i64 = row.get(1)?;
+    let tree_size: i64 = row.get(1)?;
     let anchor_type: String = row.get(2)?;
     let anchored_hash: Vec<u8> = row.get(3)?;
     let timestamp: i64 = row.get(4)?;
@@ -92,6 +92,7 @@ pub fn row_to_anchor(row: &Row) -> rusqlite::Result<Anchor> {
                 rusqlite::types::Type::Blob,
             )
         })?,
+        tree_size: tree_size as u64,
         timestamp: timestamp as u64,
         token,
         metadata: metadata
@@ -104,7 +105,7 @@ pub fn row_to_anchor(row: &Row) -> rusqlite::Result<Anchor> {
 #[allow(dead_code)]
 pub(super) fn row_to_anchor_with_id(row: &Row) -> rusqlite::Result<AnchorWithId> {
     let id: i64 = row.get(0)?;
-    let _tree_size: i64 = row.get(1)?;
+    let tree_size: i64 = row.get(1)?;
     let anchor_type: String = row.get(2)?;
     let anchored_hash: Vec<u8> = row.get(3)?;
     let timestamp: i64 = row.get(4)?;
@@ -129,6 +130,7 @@ pub(super) fn row_to_anchor_with_id(row: &Row) -> rusqlite::Result<AnchorWithId>
                     rusqlite::types::Type::Blob,
                 )
             })?,
+            tree_size: tree_size as u64,
             timestamp: timestamp as u64,
             token,
             metadata: metadata

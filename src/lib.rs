@@ -13,6 +13,9 @@ pub mod anchoring;
 
 pub mod receipt;
 
+#[cfg(feature = "sqlite")]
+pub mod background;
+
 // Re-export key types at crate root
 pub use error::{ServerError, ServerResult};
 

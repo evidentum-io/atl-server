@@ -47,6 +47,9 @@ pub struct Anchor {
     /// Hash that was anchored (tree root)
     pub anchored_hash: [u8; 32],
 
+    /// Tree size at the time of anchoring
+    pub tree_size: u64,
+
     /// Timestamp (nanoseconds since Unix epoch)
     pub timestamp: u64,
 
