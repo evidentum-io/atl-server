@@ -111,10 +111,7 @@ jobs:
         run: strip target/${{ matrix.target }}/release/atl-server
 
       - name: Create distribution directory
-        shell: bash
-        run: |
-          mkdir -p dist
-          cp README.md dist/
+        run: mkdir -p dist
 
       - name: Copy binary
         run: cp target/${{ matrix.target }}/release/atl-server dist/
