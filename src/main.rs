@@ -72,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Start active monitoring (if feature enabled and HEARTBEAT_URL is configured)
     #[cfg(feature = "monitoring")]
-    betteruptime_heartbeat::spawn_from_env();
+    let _ = betteruptime_heartbeat::spawn_from_env();
 
     tracing::info!("Starting atl-server v{}", env!("CARGO_PKG_VERSION"));
     tracing::info!("Privacy by Design: Server NEVER stores payload data");

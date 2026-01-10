@@ -102,8 +102,8 @@ async fn generate_and_return_receipt(
     let params = AppendParams {
         payload_hash,
         metadata_hash,
-        metadata_cleartext: metadata,
-        external_id,
+        metadata_cleartext: metadata.clone(),
+        external_id: external_id.clone(),
     };
 
     // Dispatch to Sequencer (either local or gRPC)
@@ -114,7 +114,7 @@ async fn generate_and_return_receipt(
     let upgrade_url = format!("{}/v1/anchor/{}", state.base_url, entry_id);
 
     // Build receipt (STUB - will be replaced by RECEIPT-GEN-1)
-    let receipt = build_receipt_stub(&dispatch_result, &upgrade_url);
+    let receipt = build_receipt_stub(&dispatch_result, &upgrade_url, metadata, external_id);
 
     Ok((StatusCode::CREATED, Json(receipt)))
 }
@@ -150,25 +150,34 @@ pub async fn get_anchor(
 fn build_receipt_stub(
     dispatch_result: &crate::traits::DispatchResult,
     upgrade_url: &str,
+    metadata: Option<serde_json::Value>,
+    external_id: Option<String>,
 ) -> Receipt {
     use crate::api::handlers::helpers::{format_hash, format_signature};
 
     let result = &dispatch_result.result;
     let checkpoint = &dispatch_result.checkpoint;
 
+    let mut entry_json = serde_json::json!({
+        "id": result.id.to_string(),
+        "payload_hash": format_hash(&result.tree_head.root_hash), // STUB: should be entry's payload hash
+        "metadata_hash": format_hash(&result.tree_head.root_hash), // STUB: should be entry's metadata hash
+        "metadata": metadata.unwrap_or_else(|| serde_json::json!({}))
+    });
+
+    // Add external_id if present
+    if let Some(ext_id) = external_id {
+        entry_json["external_id"] = serde_json::json!(ext_id);
+    }
+
     serde_json::json!({
         "spec_version": "1.0.0",
         "upgrade_url": upgrade_url,
-        "entry": {
-            "id": result.id.to_string(),
-            "payload_hash": format_hash(&result.tree_head.root_hash), // STUB: should be entry's payload hash
-            "metadata_hash": format_hash(&result.tree_head.root_hash), // STUB: should be entry's metadata hash
-            "metadata": {} // STUB: should include actual metadata if present
-        },
+        "entry": entry_json,
         "proof": {
             "tree_size": checkpoint.tree_size,
             "root_hash": format_hash(&checkpoint.root_hash),
-            "inclusion_path": result.inclusion_proof.iter().map(format_hash).collect::<Vec<_>>(),
+            "path": result.inclusion_proof.iter().map(format_hash).collect::<Vec<_>>(),
             "leaf_index": result.leaf_index,
             "checkpoint": {
                 "origin": format_hash(&checkpoint.origin),
@@ -196,19 +205,26 @@ fn build_receipt_with_anchors_stub(
     let entry = &response.entry;
     let checkpoint = &response.checkpoint;
 
+    let mut entry_json = serde_json::json!({
+        "id": entry.id.to_string(),
+        "payload_hash": format_hash(&entry.payload_hash),
+        "metadata_hash": format_hash(&entry.metadata_hash),
+        "metadata": entry.metadata_cleartext.as_ref().unwrap_or(&serde_json::json!({}))
+    });
+
+    // Add external_id if present
+    if let Some(ref ext_id) = entry.external_id {
+        entry_json["external_id"] = serde_json::json!(ext_id);
+    }
+
     serde_json::json!({
         "spec_version": "1.0.0",
         "upgrade_url": upgrade_url,
-        "entry": {
-            "id": entry.id.to_string(),
-            "payload_hash": format_hash(&entry.payload_hash),
-            "metadata_hash": format_hash(&entry.metadata_hash),
-            "metadata": entry.metadata_cleartext.as_ref().unwrap_or(&serde_json::json!({}))
-        },
+        "entry": entry_json,
         "proof": {
             "tree_size": checkpoint.tree_size,
             "root_hash": format_hash(&checkpoint.root_hash),
-            "inclusion_path": response.inclusion_proof.iter().map(format_hash).collect::<Vec<_>>(),
+            "path": response.inclusion_proof.iter().map(format_hash).collect::<Vec<_>>(),
             "leaf_index": entry.leaf_index.unwrap_or(0),
             "checkpoint": {
                 "origin": format_hash(&checkpoint.origin),
