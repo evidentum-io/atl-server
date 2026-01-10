@@ -8,7 +8,19 @@ pub const SCHEMA_VERSION: u32 = 2;
 
 /// Create all tables (idempotent)
 pub fn create_tables(conn: &Connection) -> ServerResult<()> {
+    // Create base schema
     conn.execute_batch(SCHEMA_SQL)?;
+
+    // Create trees and anchors tables (schema v2)
+    conn.execute_batch(TREES_TABLE_SQL)?;
+
+    // Set schema version
+    let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+    conn.execute(
+        "INSERT OR REPLACE INTO atl_config (key, value, updated_at) VALUES ('schema_version', ?1, ?2)",
+        rusqlite::params![SCHEMA_VERSION.to_string(), now],
+    )?;
+
     Ok(())
 }
 

@@ -131,6 +131,7 @@ dependencies = [
  "axum",
  "base64",
  "betteruptime-heartbeat",
+ "bytes",
  "chrono",
  "clap",
  "ed25519-dalek",
