@@ -10,6 +10,8 @@
 //! All jobs run continuously and discover pending work by querying the database.
 //! Jobs never block the HTTP request path - anchoring is fully asynchronous.
 
+#![allow(dead_code)]
+
 pub mod config;
 pub mod ots_poll_job;
 pub mod tree_closer;

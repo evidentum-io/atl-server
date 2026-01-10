@@ -51,7 +51,7 @@ pub enum UpgradeResult {
 /// # Errors
 /// Returns error if entry not found or storage operation fails
 #[allow(dead_code)]
-pub fn upgrade_receipt<S: Storage>(
+pub fn upgrade_receipt<S: Storage + ?Sized>(
     entry_id: &Uuid,
     storage: &S,
     signer: &CheckpointSigner,
@@ -118,7 +118,7 @@ pub fn upgrade_receipt<S: Storage>(
 ///
 /// Returns the first anchor where anchor.tree_size >= target_tree_size.
 #[allow(dead_code)]
-fn find_bitcoin_anchor_covering<S: Storage>(
+fn find_bitcoin_anchor_covering<S: Storage + ?Sized>(
     storage: &S,
     target_tree_size: u64,
 ) -> ServerResult<Option<crate::traits::anchor::Anchor>> {
@@ -141,7 +141,7 @@ fn find_bitcoin_anchor_covering<S: Storage>(
 
 /// Get the latest Bitcoin anchor from storage
 #[allow(dead_code)]
-fn get_latest_bitcoin_anchor<S: Storage>(
+fn get_latest_bitcoin_anchor<S: Storage + ?Sized>(
     storage: &S,
 ) -> ServerResult<Option<crate::traits::anchor::Anchor>> {
     let tree_head = storage.get_tree_head()?;

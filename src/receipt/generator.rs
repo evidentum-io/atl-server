@@ -1,5 +1,7 @@
 //! Receipt generation implementation
 
+#![allow(dead_code)]
+
 use atl_core::{
     Checkpoint, CheckpointJson, RECEIPT_SPEC_VERSION, Receipt, ReceiptEntry, ReceiptProof,
 };
@@ -49,6 +51,27 @@ impl CheckpointSigner {
         Self::new(signing_key)
     }
 
+    /// Create signer from file containing Ed25519 seed
+    ///
+    /// # Arguments
+    /// * `path` - Path to file containing 32-byte seed
+    ///
+    /// # Errors
+    /// Returns error if file cannot be read or seed is invalid
+    pub fn from_file(path: &str) -> Result<Self, std::io::Error> {
+        let seed_bytes = std::fs::read(path)?;
+        if seed_bytes.len() != 32 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("signing key must be 32 bytes, got {}", seed_bytes.len()),
+            ));
+        }
+
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(&seed_bytes);
+        Ok(Self::from_bytes(&seed))
+    }
+
     /// Get the key ID (SHA256 of public key)
     #[must_use]
     pub const fn key_id(&self) -> &[u8; 32] {
@@ -60,6 +83,54 @@ impl CheckpointSigner {
     #[allow(dead_code)]
     pub fn public_key_bytes(&self) -> [u8; 32] {
         self.signing_key.verifying_key().to_bytes()
+    }
+
+    /// Get public key info for external verification
+    ///
+    /// Returns (key_id, public_key) tuple
+    #[must_use]
+    pub fn public_key_info(&self) -> ([u8; 32], [u8; 32]) {
+        (self.key_id, self.public_key_bytes())
+    }
+
+    /// Sign a checkpoint and return complete Checkpoint structure
+    ///
+    /// # Arguments
+    /// * `origin` - Origin ID (hash of log's identity)
+    /// * `tree_size` - Tree size at checkpoint
+    /// * `root_hash` - Merkle tree root hash
+    ///
+    /// # Returns
+    /// * Signed `atl_core::Checkpoint`
+    #[must_use]
+    pub fn sign_checkpoint_struct(
+        &self,
+        origin: [u8; 32],
+        tree_size: u64,
+        root_hash: &[u8; 32],
+    ) -> atl_core::Checkpoint {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+
+        let mut blob = [0u8; 98];
+        blob[0..32].copy_from_slice(&origin);
+        blob[32..40].copy_from_slice(&tree_size.to_be_bytes());
+        blob[40..48].copy_from_slice(&timestamp.to_be_bytes());
+        blob[48..80].copy_from_slice(root_hash);
+        blob[80..98].copy_from_slice(&atl_core::compute_key_id(&self.public_key_bytes()));
+
+        let signature = self.sign_checkpoint(&blob);
+
+        atl_core::Checkpoint {
+            origin,
+            tree_size,
+            timestamp,
+            root_hash: *root_hash,
+            signature,
+            key_id: self.key_id,
+        }
     }
 
     /// Sign a checkpoint
@@ -151,7 +222,7 @@ impl<'a, S: Storage> ReceiptGenerator<'a, S> {
 /// * `ServerError::EntryNotFound` if entry doesn't exist
 /// * `ServerError::EntryNotInTree` if entry not yet indexed
 /// * `ServerError::Storage` for storage errors
-pub fn generate_receipt<S: Storage>(
+pub fn generate_receipt<S: Storage + ?Sized>(
     entry_id: &Uuid,
     storage: &S,
     signer: &CheckpointSigner,
@@ -244,7 +315,7 @@ pub fn generate_receipt<S: Storage>(
 /// # Errors
 /// Returns error if entry not found or proof generation fails
 #[allow(dead_code)]
-pub fn generate_receipt_simple<S: Storage>(
+pub fn generate_receipt_simple<S: Storage + ?Sized>(
     entry_id: &Uuid,
     storage: &S,
     signer: &CheckpointSigner,
