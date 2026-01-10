@@ -129,6 +129,8 @@ fn append_single(
         tree_head,
         inclusion_proof,
         timestamp,
+        #[cfg(feature = "rfc3161")]
+        tsa_anchor: None,
     })
 }
 
@@ -216,6 +218,8 @@ fn append_batch_inner(
                 tree_head: tree_head.clone(),
                 inclusion_proof,
                 timestamp,
+                #[cfg(feature = "rfc3161")]
+                tsa_anchor: None,
             })
         })
         .collect()

@@ -70,6 +70,10 @@ pub struct AppendResult {
 
     /// Timestamp of append
     pub timestamp: DateTime<Utc>,
+
+    /// Optional TSA anchor (when batch includes RFC 3161 timestamp)
+    #[cfg(feature = "rfc3161")]
+    pub tsa_anchor: Option<crate::anchoring::rfc3161::TsaAnchor>,
 }
 
 /// Current state of the Merkle tree

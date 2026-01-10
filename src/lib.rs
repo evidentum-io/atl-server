@@ -16,6 +16,8 @@ pub mod receipt;
 #[cfg(feature = "sqlite")]
 pub mod background;
 
+pub mod sequencer;
+
 // Re-export key types at crate root
 pub use error::{ServerError, ServerResult};
 
