@@ -114,23 +114,23 @@ impl CheckpointSigner {
             .unwrap()
             .as_nanos() as u64;
 
-        let mut blob = [0u8; 98];
-        blob[0..32].copy_from_slice(&origin);
-        blob[32..40].copy_from_slice(&tree_size.to_be_bytes());
-        blob[40..48].copy_from_slice(&timestamp.to_be_bytes());
-        blob[48..80].copy_from_slice(root_hash);
-        blob[80..98].copy_from_slice(&atl_core::compute_key_id(&self.public_key_bytes()));
-
-        let signature = self.sign_checkpoint(&blob);
-
-        atl_core::Checkpoint {
+        // Create checkpoint struct with placeholder signature
+        let mut checkpoint = atl_core::Checkpoint::new(
             origin,
             tree_size,
             timestamp,
-            root_hash: *root_hash,
-            signature,
-            key_id: self.key_id,
-        }
+            *root_hash,
+            [0u8; 64], // placeholder signature
+            self.key_id,
+        );
+
+        // Generate correct 98-byte wire format using atl-core's implementation
+        let blob = checkpoint.to_bytes();
+
+        // Sign the correctly formatted blob
+        checkpoint.signature = self.sign_checkpoint(&blob);
+
+        checkpoint
     }
 
     /// Sign a checkpoint
@@ -348,4 +348,46 @@ fn create_signed_checkpoint(
     checkpoint.signature = signer.sign_checkpoint(&blob);
 
     checkpoint
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_checkpoint_blob_format() {
+        let signer = CheckpointSigner::from_bytes(&[42u8; 32]);
+        let origin = [0xAAu8; 32];
+        let root_hash = [0xBBu8; 32];
+
+        let checkpoint = signer.sign_checkpoint_struct(origin, 12345, &root_hash);
+        let blob = checkpoint.to_bytes();
+
+        // Verify Magic bytes
+        assert_eq!(&blob[0..18], b"ATL-Protocol-v1-CP");
+
+        // Verify origin
+        assert_eq!(&blob[18..50], &origin);
+
+        // Verify tree_size (Little-Endian)
+        assert_eq!(u64::from_le_bytes(blob[50..58].try_into().unwrap()), 12345);
+
+        // Verify root_hash
+        assert_eq!(&blob[66..98], &root_hash);
+    }
+
+    #[test]
+    fn test_checkpoint_signature_verification() {
+        let signer = CheckpointSigner::from_bytes(&[42u8; 32]);
+        let (key_id, public_key) = signer.public_key_info();
+
+        let checkpoint = signer.sign_checkpoint_struct([0u8; 32], 100, &[1u8; 32]);
+
+        // Verify key_id matches
+        assert_eq!(checkpoint.key_id, key_id);
+
+        // Verify signature can be verified
+        let verifier = atl_core::CheckpointVerifier::from_bytes(&public_key).unwrap();
+        assert!(checkpoint.verify(&verifier).is_ok());
+    }
 }
