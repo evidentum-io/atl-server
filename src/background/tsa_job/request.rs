@@ -15,36 +15,39 @@ pub async fn try_tsa_timestamp(
     tree: &TreeRecord,
     tsa_url: &str,
     storage: &SqliteStore,
-    _timeout_ms: u64,
+    timeout_ms: u64,
 ) -> ServerResult<i64> {
+    use crate::anchoring::rfc3161::{AsyncRfc3161Client, TsaClient};
+
     // Get root hash from tree
     let root_hash = tree
         .root_hash
         .ok_or_else(|| ServerError::Internal(format!("Tree {} has no root_hash", tree.id)))?;
 
-    // For now, return stub implementation
-    // ANCHOR-1 spec will implement the actual TSA client
-    tracing::warn!(
+    // Create TSA client and request timestamp
+    let client = AsyncRfc3161Client::new()
+        .map_err(|e| ServerError::Internal(format!("Failed to create TSA client: {}", e)))?;
+
+    let response = client
+        .timestamp(tsa_url, &root_hash, timeout_ms)
+        .await
+        .map_err(|e| ServerError::ServiceUnavailable(format!("TSA request failed: {}", e)))?;
+
+    tracing::info!(
         tree_id = tree.id,
         tsa_url = tsa_url,
-        "TSA client not implemented yet (ANCHOR-1 pending), using stub anchor"
+        timestamp = response.timestamp,
+        "TSA timestamp received"
     );
-
-    // Create stub TSA anchor
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as u64;
 
     let anchor = Anchor {
         anchor_type: AnchorType::Rfc3161,
         anchored_hash: root_hash,
         tree_size: tree.end_size.unwrap_or(tree.start_size),
-        timestamp,
-        token: create_stub_tsa_token(&root_hash, timestamp),
+        timestamp: response.timestamp,
+        token: response.token_der,
         metadata: serde_json::json!({
             "tsa_url": tsa_url,
-            "stub": true,
         }),
     };
 
@@ -59,15 +62,4 @@ pub async fn try_tsa_timestamp(
     storage.update_tree_tsa_anchor(tree.id, anchor_id)?;
 
     Ok(anchor_id)
-}
-
-/// Create stub TSA token for testing
-///
-/// In production, this will be replaced with actual RFC 3161 TimeStampToken.
-fn create_stub_tsa_token(hash: &[u8; 32], timestamp: u64) -> Vec<u8> {
-    let mut token = Vec::new();
-    token.extend_from_slice(b"TSA-STUB-");
-    token.extend_from_slice(&timestamp.to_be_bytes());
-    token.extend_from_slice(hash);
-    token
 }

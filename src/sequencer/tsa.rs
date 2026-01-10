@@ -56,32 +56,15 @@ pub async fn get_tsa_timestamp(
         }
     }
 
+    // When rfc3161 feature is disabled, TSA is not supported
     #[cfg(not(feature = "rfc3161"))]
     {
-        // Stub implementation for when RFC 3161 feature is disabled
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-
-        return Ok(TsaAnchor {
-            tsa_url: config.tsa_urls[0].clone(),
-            tsa_response: create_stub_tsa_token(&root_hash, timestamp),
-            timestamp,
-        });
+        return Err(ServerError::NotSupported(
+            "TSA requires 'rfc3161' feature to be enabled".into(),
+        ));
     }
 
     Err(ServerError::ServiceUnavailable(
         "all TSA servers failed".into(),
     ))
-}
-
-/// Create stub TSA token for testing
-#[cfg(not(feature = "rfc3161"))]
-fn create_stub_tsa_token(hash: &[u8; 32], timestamp: u64) -> Vec<u8> {
-    let mut token = Vec::new();
-    token.extend_from_slice(b"TSA-STUB-");
-    token.extend_from_slice(&timestamp.to_be_bytes());
-    token.extend_from_slice(hash);
-    token
 }
