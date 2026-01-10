@@ -14,7 +14,6 @@ use crate::traits::anchor::{Anchor, AnchorType};
 /// # Returns
 /// * `ReceiptAnchor` ready for inclusion in receipt JSON
 #[must_use]
-#[allow(dead_code)]
 pub fn convert_anchor_to_receipt(anchor: &Anchor) -> ReceiptAnchor {
     match anchor.anchor_type {
         AnchorType::Rfc3161 => ReceiptAnchor::Rfc3161 {
