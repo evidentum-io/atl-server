@@ -23,4 +23,5 @@ pub use rfc3161::{
 };
 
 #[cfg(feature = "ots")]
+#[allow(unused_imports)]
 pub use ots::{OpenTimestampsClient, OtsConfig, OtsStatus};

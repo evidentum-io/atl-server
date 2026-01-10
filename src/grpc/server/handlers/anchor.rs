@@ -175,6 +175,7 @@ pub async fn handle_anchor_batch(
 }
 
 /// Sign a checkpoint for the given tree state
+#[allow(clippy::result_large_err)]
 fn sign_checkpoint(
     server: &SequencerGrpcServer,
     tree_size: u64,
@@ -198,6 +199,7 @@ fn sign_checkpoint(
 /// Get consistency proof from the last anchored tree size to current.
 ///
 /// This provides split-view protection for fresh receipts.
+#[allow(clippy::result_large_err)]
 fn get_consistency_proof_from_anchor(
     server: &SequencerGrpcServer,
     current_tree_size: u64,

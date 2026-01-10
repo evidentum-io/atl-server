@@ -9,6 +9,7 @@ use tonic::{Request, Status};
 ///
 /// Validates that incoming requests contain a valid `x-sequencer-token` header
 /// matching the expected shared secret.
+#[allow(dead_code)]
 pub struct AuthInterceptor {
     /// Expected token value
     expected_token: String,
@@ -20,6 +21,7 @@ impl AuthInterceptor {
     /// # Arguments
     ///
     /// * `expected_token` - The shared secret that clients must provide
+    #[allow(dead_code)]
     pub fn new(expected_token: String) -> Self {
         Self { expected_token }
     }
@@ -32,6 +34,8 @@ impl AuthInterceptor {
     /// - The `x-sequencer-token` header is missing
     /// - The token value doesn't match the expected token
     /// - The token value contains invalid characters
+    #[allow(clippy::result_large_err)]
+    #[allow(dead_code)]
     pub fn check<T>(&self, req: &Request<T>) -> Result<(), Status> {
         match req.metadata().get("x-sequencer-token") {
             Some(token) => {

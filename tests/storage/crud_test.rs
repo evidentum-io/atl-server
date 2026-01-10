@@ -4,15 +4,15 @@ use atl_server::SqliteStore;
 use atl_server::traits::storage::{AppendParams, Storage};
 
 fn create_test_storage() -> SqliteStore {
-    let mut store = SqliteStore::in_memory().expect("Failed to create in-memory storage");
-    SqliteStore::initialize(&mut store).expect("Failed to initialize storage");
+    let store = SqliteStore::in_memory().expect("Failed to create in-memory storage");
+    SqliteStore::initialize(&store).expect("Failed to initialize storage");
     store
 }
 
 #[test]
 fn test_initialize_creates_tables() {
-    let mut store = SqliteStore::in_memory().expect("Failed to create in-memory storage");
-    SqliteStore::initialize(&mut store).expect("Failed to initialize storage");
+    let store = SqliteStore::in_memory().expect("Failed to create in-memory storage");
+    SqliteStore::initialize(&store).expect("Failed to initialize storage");
     assert!(store.is_initialized());
 }
 

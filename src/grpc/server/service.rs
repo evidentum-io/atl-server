@@ -77,6 +77,7 @@ impl SequencerGrpcServer {
     /// Returns `Status::Unauthenticated` if:
     /// - Authentication is required but `x-sequencer-token` header is missing
     /// - Token value doesn't match the expected token
+    #[allow(clippy::result_large_err)]
     pub fn check_auth<T>(&self, request: &Request<T>) -> Result<(), Status> {
         if let Some(expected) = &self.expected_token {
             let token = request

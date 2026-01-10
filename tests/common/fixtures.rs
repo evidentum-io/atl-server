@@ -11,9 +11,9 @@ use std::sync::{Arc, Mutex};
 
 /// Create a test app with in-memory storage and no authentication
 pub async fn test_app() -> Router {
-    let mut storage = SqliteStore::in_memory().expect("Failed to create in-memory storage");
+    let storage = SqliteStore::in_memory().expect("Failed to create in-memory storage");
     // Call inherent method (not trait method) - must be called before Arc::new
-    SqliteStore::initialize(&mut storage).expect("Failed to initialize storage");
+    SqliteStore::initialize(&storage).expect("Failed to initialize storage");
     let storage = Arc::new(storage);
 
     let dispatcher = Arc::new(LocalDispatcher::new(storage.clone() as Arc<dyn Storage>));
@@ -31,9 +31,9 @@ pub async fn test_app() -> Router {
 
 /// Create a test app with authentication enabled
 pub async fn test_app_with_auth(tokens: Vec<String>) -> Router {
-    let mut storage = SqliteStore::in_memory().expect("Failed to create in-memory storage");
+    let storage = SqliteStore::in_memory().expect("Failed to create in-memory storage");
     // Call inherent method (not trait method) - must be called before Arc::new
-    SqliteStore::initialize(&mut storage).expect("Failed to initialize storage");
+    SqliteStore::initialize(&storage).expect("Failed to initialize storage");
     let storage = Arc::new(storage);
 
     let dispatcher = Arc::new(LocalDispatcher::new(storage.clone() as Arc<dyn Storage>));

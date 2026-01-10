@@ -9,7 +9,7 @@ async fn test_app_sequencer() -> axum::Router {
     use atl_server::SqliteStore;
     use atl_server::api::{AppState, create_router};
 
-    let mut storage = SqliteStore::in_memory().expect("Failed to create in-memory storage");
+    let storage = SqliteStore::in_memory().expect("Failed to create in-memory storage");
     storage.initialize().expect("Failed to initialize storage");
     let storage = Arc::new(storage);
 

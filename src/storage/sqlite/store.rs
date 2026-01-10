@@ -5,7 +5,7 @@ use super::schema;
 use crate::error::{ServerError, ServerResult, StorageError};
 use rusqlite::Connection;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// SQLite implementation of the Storage trait
 ///
@@ -18,8 +18,8 @@ pub struct SqliteStore {
     #[allow(dead_code)]
     config: SqliteConfig,
 
-    /// Cached origin ID
-    origin: [u8; 32],
+    /// Cached origin ID (initialized once)
+    origin: OnceLock<[u8; 32]>,
 }
 
 impl SqliteStore {
@@ -48,7 +48,7 @@ impl SqliteStore {
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
             config,
-            origin: [0u8; 32], // Will be set by initialize()
+            origin: OnceLock::new(), // Will be set by initialize()
         };
 
         Ok(store)
@@ -92,14 +92,14 @@ impl SqliteStore {
     ///
     /// Must be called once before appending entries.
     /// Generates a new origin UUID.
-    pub fn initialize(&mut self) -> ServerResult<uuid::Uuid> {
+    pub fn initialize(&self) -> ServerResult<uuid::Uuid> {
         let uuid = uuid::Uuid::new_v4();
         self.initialize_with_uuid(uuid)?;
         Ok(uuid)
     }
 
     /// Initialize with a specific UUID (for testing/migration)
-    pub fn initialize_with_uuid(&mut self, uuid: uuid::Uuid) -> ServerResult<()> {
+    pub fn initialize_with_uuid(&self, uuid: uuid::Uuid) -> ServerResult<()> {
         let conn = self.conn.lock().map_err(|_| {
             ServerError::Storage(StorageError::ConnectionFailed("lock poisoned".into()))
         })?;
@@ -124,7 +124,9 @@ impl SqliteStore {
         use sha2::Digest;
         let origin = sha2::Sha256::digest(uuid.as_bytes());
         drop(conn);
-        self.origin = origin.into();
+
+        // Set origin once (idempotent - will fail silently if already set)
+        let _ = self.origin.set(origin.into());
 
         Ok(())
     }
@@ -187,7 +189,7 @@ impl SqliteStore {
 
     /// Get cached origin ID
     pub(crate) fn get_origin(&self) -> [u8; 32] {
-        self.origin
+        *self.origin.get().unwrap_or(&[0u8; 32])
     }
 }
 
@@ -208,7 +210,7 @@ impl Storage for SqliteStore {
     }
 
     fn origin_id(&self) -> [u8; 32] {
-        self.origin
+        *self.origin.get().unwrap_or(&[0u8; 32])
     }
 
     fn append(&self, params: AppendParams) -> ServerResult<AppendResult> {

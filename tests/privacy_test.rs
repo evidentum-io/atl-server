@@ -6,8 +6,8 @@ use atl_server::traits::storage::{AppendParams, Storage};
 use sha2::Digest;
 
 fn create_test_storage() -> SqliteStore {
-    let mut store = SqliteStore::in_memory().expect("Failed to create in-memory storage");
-    SqliteStore::initialize(&mut store).expect("Failed to initialize storage");
+    let store = SqliteStore::in_memory().expect("Failed to create in-memory storage");
+    SqliteStore::initialize(&store).expect("Failed to initialize storage");
     store
 }
 
