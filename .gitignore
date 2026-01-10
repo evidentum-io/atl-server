@@ -1,2 +1,14 @@
 /target
 /docs-md
+
+# Environment and secrets
+.env
+.env.local
+*.key
+signing.key
+
+# Database
+*.db
+*.db-wal
+*.db-shm
+/.env.example

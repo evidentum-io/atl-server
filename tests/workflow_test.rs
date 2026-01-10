@@ -7,8 +7,8 @@ use sha2::Digest;
 use std::sync::Arc;
 
 fn create_test_storage() -> Arc<SqliteStore> {
-    let mut store = SqliteStore::in_memory().expect("Failed to create in-memory storage");
-    SqliteStore::initialize(&mut store).expect("Failed to initialize storage");
+    let store = SqliteStore::in_memory().expect("Failed to create in-memory storage");
+    SqliteStore::initialize(&store).expect("Failed to initialize storage");
     Arc::new(store)
 }
 

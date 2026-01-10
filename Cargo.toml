@@ -1,6 +1,6 @@
 [package]
 name = "atl-server"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2024"
 rust-version = "1.85.0"
 authors = ["Dmitrii Zatona <dmitrii@zatona.dev>"]
