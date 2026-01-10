@@ -59,6 +59,7 @@ impl SequencerHandle {
     }
 
     /// Get current buffer utilization (0.0 - 1.0)
+    #[allow(dead_code)]
     pub fn buffer_utilization(&self) -> f64 {
         let capacity = self.tx.max_capacity();
         let available = self.tx.capacity();

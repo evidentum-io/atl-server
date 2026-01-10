@@ -9,6 +9,10 @@ mod config;
 mod core;
 mod tsa;
 
-pub use buffer::{AppendRequest, SequencerHandle};
+pub use buffer::SequencerHandle;
+
+// AppendRequest is used only internally by the sequencer
+#[allow(unused_imports)]
+pub(crate) use buffer::AppendRequest;
 pub use config::SequencerConfig;
 pub use core::Sequencer;

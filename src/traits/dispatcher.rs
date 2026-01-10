@@ -189,10 +189,98 @@ pub trait SequencerClient: Send + Sync {
 /// Local dispatcher for STANDALONE and SEQUENCER modes
 ///
 /// Sends entries directly to the local SequencerCore via mpsc channel.
-/// Implementation will be added in SEQUENCER-1.
-#[allow(dead_code)]
 pub struct LocalDispatcher {
-    // Implementation details will be added in SEQUENCER-1
+    /// Handle to the sequencer for sending append requests
+    handle: crate::sequencer::SequencerHandle,
+}
+
+impl LocalDispatcher {
+    /// Create a new local dispatcher with a sequencer handle
+    pub fn new(handle: crate::sequencer::SequencerHandle) -> Self {
+        Self { handle }
+    }
+}
+
+#[async_trait]
+impl SequencerClient for LocalDispatcher {
+    async fn dispatch(&self, params: AppendParams) -> ServerResult<DispatchResult> {
+        // Send append request through the sequencer handle
+        let result = self.handle.append(params).await?;
+
+        // Create checkpoint (TODO: implement proper signing in checkpoint module)
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+
+        let checkpoint = atl_core::Checkpoint {
+            origin: result.tree_head.origin,
+            tree_size: result.tree_head.tree_size,
+            root_hash: result.tree_head.root_hash,
+            timestamp,
+            signature: [0u8; 64], // TODO: implement signing
+            key_id: [0u8; 32],    // TODO: derive from signing key
+        };
+
+        Ok(DispatchResult { result, checkpoint })
+    }
+
+    async fn dispatch_batch(
+        &self,
+        _params: Vec<AppendParams>,
+    ) -> ServerResult<BatchDispatchResult> {
+        Err(crate::error::ServerError::NotSupported(
+            "batch dispatch not yet implemented".into(),
+        ))
+    }
+
+    async fn get_receipt(&self, _request: GetReceiptRequest) -> ServerResult<ReceiptResponse> {
+        Err(crate::error::ServerError::NotSupported(
+            "get_receipt not yet implemented".into(),
+        ))
+    }
+
+    async fn get_tree_head(&self) -> ServerResult<TreeHead> {
+        Err(crate::error::ServerError::NotSupported(
+            "get_tree_head not yet implemented".into(),
+        ))
+    }
+
+    async fn get_consistency_proof(
+        &self,
+        _from_size: u64,
+        _to_size: u64,
+    ) -> ServerResult<ConsistencyProofResponse> {
+        Err(crate::error::ServerError::NotSupported(
+            "get_consistency_proof not yet implemented".into(),
+        ))
+    }
+
+    async fn get_public_keys(&self) -> ServerResult<Vec<PublicKeyInfo>> {
+        Err(crate::error::ServerError::NotSupported(
+            "get_public_keys not yet implemented".into(),
+        ))
+    }
+
+    async fn trigger_anchoring(
+        &self,
+        _request: TriggerAnchoringRequest,
+    ) -> ServerResult<Vec<AnchoringStatus>> {
+        Err(crate::error::ServerError::NotSupported(
+            "trigger_anchoring not yet implemented".into(),
+        ))
+    }
+
+    async fn health_check(&self) -> ServerResult<()> {
+        // Check if sequencer handle has capacity
+        if self.handle.has_capacity() {
+            Ok(())
+        } else {
+            Err(crate::error::ServerError::ServiceUnavailable(
+                "sequencer buffer full".into(),
+            ))
+        }
+    }
 }
 
 /// gRPC dispatcher for NODE mode

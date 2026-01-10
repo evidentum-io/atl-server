@@ -19,6 +19,7 @@ pub struct SequencerConfig {
     pub retry_base_ms: u64,
 
     /// Sync mode (bypass sequencer, direct writes)
+    #[allow(dead_code)]
     pub sync_mode: bool,
 
     /// TSA URLs for batch timestamping
