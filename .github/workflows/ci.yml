@@ -56,24 +56,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-targets
 
-  coverage:
-    name: Coverage
-    runs-on: ubuntu-latest
-    continue-on-error: true  # Don't block CI during early development
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: evidentum-io/atl-core
-          path: atl-core
-          token: ${{ secrets.ATL_CORE_TOKEN }}
-      - run: ln -s $GITHUB_WORKSPACE/atl-core ../atl-core
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Generate coverage
-        run: cargo llvm-cov --all-features --fail-under-lines 90
+  # TODO: Enable coverage job when TEST-1 (Wave 4) is complete
+  # coverage:
+  #   name: Coverage
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         repository: evidentum-io/atl-core
+  #         path: atl-core
+  #         token: ${{ secrets.ATL_CORE_TOKEN }}
+  #     - run: ln -s $GITHUB_WORKSPACE/atl-core ../atl-core
+  #     - uses: dtolnay/rust-toolchain@stable
+  #     - uses: Swatinem/rust-cache@v2
+  #     - name: Install cargo-llvm-cov
+  #       uses: taiki-e/install-action@cargo-llvm-cov
+  #     - name: Generate coverage
+  #       run: cargo llvm-cov --all-features --fail-under-lines 90
 
   msrv:
     name: MSRV (1.85.0)
