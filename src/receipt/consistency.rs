@@ -24,7 +24,7 @@ use crate::traits::Storage;
 /// # Errors
 /// Returns error if proof generation fails
 #[allow(dead_code)]
-pub fn determine_consistency_proof<S: Storage>(
+pub fn determine_consistency_proof<S: Storage + ?Sized>(
     storage: &S,
     current_tree_size: u64,
     options: &ReceiptOptions,

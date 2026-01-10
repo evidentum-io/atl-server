@@ -1,6 +1,6 @@
 //! atl-server - Autonomous notarization primitive for ATL Protocol v1
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod api;
@@ -17,10 +17,31 @@ mod anchoring;
 mod receipt;
 mod sequencer;
 
+#[cfg(feature = "sqlite")]
+mod background;
+
+#[cfg(feature = "grpc")]
+mod grpc;
+
+/// Server role for distributed architecture
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ServerRole {
+    /// Standalone mode: HTTP + SequencerCore + Storage + Signing
+    Standalone,
+    /// Node mode: HTTP only, forwards to SEQUENCER via gRPC
+    Node,
+    /// Sequencer mode: gRPC server + SequencerCore + Storage + Signing
+    Sequencer,
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "atl-server")]
 #[command(about = "Autonomous notarization primitive for ATL Protocol v1")]
 struct Args {
+    /// Server role
+    #[arg(long, env = "ATL_ROLE", default_value = "standalone")]
+    role: ServerRole,
+
     /// Host to bind to
     #[arg(long, env = "ATL_SERVER_HOST", default_value = "127.0.0.1")]
     host: String,
@@ -28,6 +49,10 @@ struct Args {
     /// Port to bind to
     #[arg(long, env = "ATL_SERVER_PORT", default_value = "3000")]
     port: u16,
+
+    /// gRPC port (for SEQUENCER role)
+    #[arg(long, env = "ATL_GRPC_PORT", default_value = "50051")]
+    grpc_port: u16,
 
     /// Path to SQLite database
     #[arg(long, env = "ATL_DATABASE_PATH", default_value = "./atl.db")]
@@ -37,7 +62,7 @@ struct Args {
     #[arg(long, env = "ATL_SIGNING_KEY_PATH")]
     signing_key: Option<String>,
 
-    /// Comma-separated list of RFC 3161 TSA URLs (tried in order with fallback)
+    /// Comma-separated list of RFC 3161 TSA URLs
     #[arg(long, env = "ATL_TSA_URLS")]
     tsa_urls: Option<String>,
 
@@ -45,8 +70,7 @@ struct Args {
     #[arg(long, env = "ATL_TSA_TIMEOUT_MS", default_value = "500")]
     tsa_timeout_ms: u64,
 
-    /// Strict TSA mode: if true, return 503 if all TSAs fail
-    /// If false, return receipt without TSA anchor (client can /upgrade later)
+    /// Strict TSA mode
     #[arg(long, env = "ATL_STRICT_TSA", default_value = "true")]
     strict_tsa: bool,
 
@@ -54,15 +78,13 @@ struct Args {
     #[arg(long, env = "ATL_LOG_LEVEL", default_value = "info")]
     log_level: String,
 
-    /// Comma-separated list of Bearer tokens for access control (optional)
-    /// If not set, server operates in open mode
+    /// Comma-separated list of Bearer tokens for access control
     #[arg(long, env = "ATL_ACCESS_TOKENS")]
     access_tokens: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Parse CLI args
     let args = Args::parse();
 
     // Initialize logging
@@ -71,56 +93,170 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // Start active monitoring (if feature enabled and HEARTBEAT_URL is configured)
+    // Start active monitoring
     #[cfg(feature = "monitoring")]
     let _ = betteruptime_heartbeat::spawn_from_env();
 
     tracing::info!("Starting atl-server v{}", env!("CARGO_PKG_VERSION"));
     tracing::info!("Privacy by Design: Server NEVER stores payload data");
 
-    // Initialize storage backend
-    #[cfg(feature = "sqlite")]
-    let storage = {
-        use std::sync::Arc;
-        use storage::SqliteStore;
+    // Run based on role
+    match args.role {
+        ServerRole::Standalone => run_standalone(args).await,
+        ServerRole::Node => run_node(args).await,
+        ServerRole::Sequencer => run_sequencer(args).await,
+    }
+}
 
-        tracing::info!("Initializing SQLite storage at: {}", args.database);
-        let store = SqliteStore::new(&args.database)?;
+/// Run in STANDALONE mode
+#[cfg(feature = "sqlite")]
+async fn run_standalone(args: Args) -> anyhow::Result<()> {
+    use std::sync::Arc;
+    use storage::SqliteStore;
+    use traits::Storage;
 
-        // Initialize schema and origin key
-        use traits::Storage;
-        store.initialize()?;
+    tracing::info!("Starting in STANDALONE mode");
 
-        Arc::new(store) as Arc<dyn traits::Storage>
-    };
+    // Initialize storage
+    tracing::info!("Initializing SQLite storage at: {}", args.database);
+    let store = SqliteStore::new(&args.database)?;
+    store.initialize()?;
+    let storage = Arc::new(store) as Arc<dyn Storage>;
 
-    #[cfg(not(feature = "sqlite"))]
-    let storage = {
-        anyhow::bail!("No storage backend enabled. Compile with --features sqlite");
-    };
-
-    // Load Sequencer configuration
+    // Create sequencer
     let sequencer_config = sequencer::SequencerConfig::from_env();
-
-    tracing::info!(
-        batch_size = sequencer_config.batch_size,
-        batch_timeout_ms = sequencer_config.batch_timeout_ms,
-        buffer_size = sequencer_config.buffer_size,
-        "Sequencer configuration loaded"
-    );
-
-    // Create Sequencer and get handle
     let (sequencer_instance, sequencer_handle) =
         sequencer::Sequencer::new(storage.clone(), sequencer_config);
 
-    // Spawn sequencer as background task
     let sequencer_task = tokio::spawn(async move {
         sequencer_instance.run().await;
     });
 
-    // Create LocalDispatcher with sequencer handle
-    let dispatcher = std::sync::Arc::new(traits::LocalDispatcher::new(sequencer_handle))
-        as std::sync::Arc<dyn traits::SequencerClient>;
+    // Create dispatcher
+    let dispatcher = Arc::new(traits::LocalDispatcher::new(sequencer_handle))
+        as Arc<dyn traits::SequencerClient>;
+
+    // Start HTTP server
+    start_http_server(
+        args,
+        config::ServerMode::Standalone,
+        dispatcher,
+        Some(storage),
+    )
+    .await?;
+
+    // Wait for sequencer
+    tracing::info!("Waiting for sequencer to shut down...");
+    sequencer_task.await?;
+
+    Ok(())
+}
+
+/// Run in NODE mode
+#[cfg(feature = "grpc")]
+async fn run_node(args: Args) -> anyhow::Result<()> {
+    use std::sync::Arc;
+
+    tracing::info!("Starting in NODE mode");
+
+    // Create gRPC dispatcher
+    let grpc_config = grpc::GrpcClientConfig::from_env();
+    tracing::info!("Connecting to Sequencer at: {}", grpc_config.sequencer_url);
+
+    let dispatcher =
+        Arc::new(grpc::GrpcDispatcher::new(grpc_config).await?) as Arc<dyn traits::SequencerClient>;
+
+    // Start HTTP server (no storage)
+    start_http_server(args, config::ServerMode::Node, dispatcher, None).await?;
+
+    Ok(())
+}
+
+/// Run in SEQUENCER mode
+#[cfg(all(feature = "grpc", feature = "sqlite"))]
+async fn run_sequencer(args: Args) -> anyhow::Result<()> {
+    use std::sync::Arc;
+    use storage::SqliteStore;
+    use traits::Storage;
+
+    tracing::info!("Starting in SEQUENCER mode");
+
+    // Initialize storage
+    tracing::info!("Initializing SQLite storage at: {}", args.database);
+    let store = SqliteStore::new(&args.database)?;
+    store.initialize()?;
+    let storage = Arc::new(store) as Arc<dyn Storage>;
+
+    // Load signing key
+    let signing_key_path = args
+        .signing_key
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("ATL_SIGNING_KEY_PATH required for SEQUENCER mode"))?;
+    let signer = Arc::new(receipt::CheckpointSigner::from_file(signing_key_path)?);
+
+    // Create sequencer
+    let sequencer_config = sequencer::SequencerConfig::from_env();
+    let (sequencer_instance, sequencer_handle) =
+        sequencer::Sequencer::new(storage.clone(), sequencer_config);
+
+    let sequencer_task = tokio::spawn(async move {
+        sequencer_instance.run().await;
+    });
+
+    // Create gRPC server
+    let grpc_server =
+        grpc::SequencerGrpcServer::new(sequencer_handle.clone(), storage.clone(), signer.clone());
+
+    let token = std::env::var("ATL_SEQUENCER_TOKEN").ok();
+    let grpc_service = grpc_server.into_service(token);
+
+    // Start gRPC server
+    let grpc_addr = format!("0.0.0.0:{}", args.grpc_port);
+    tracing::info!("Starting gRPC server on {}", grpc_addr);
+
+    let grpc_handle = tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(grpc_service)
+            .serve(grpc_addr.parse().unwrap())
+            .await
+    });
+
+    // Create dispatcher for HTTP admin endpoints
+    let dispatcher = Arc::new(traits::LocalDispatcher::new(sequencer_handle))
+        as Arc<dyn traits::SequencerClient>;
+
+    // Start HTTP admin server
+    let http_handle = tokio::spawn(async move {
+        start_http_server(
+            args,
+            config::ServerMode::Sequencer,
+            dispatcher,
+            Some(storage),
+        )
+        .await
+    });
+
+    // Wait for both servers
+    tokio::select! {
+        r = grpc_handle => r??,
+        r = http_handle => r??,
+    }
+
+    // Wait for sequencer
+    tracing::info!("Waiting for sequencer to shut down...");
+    sequencer_task.await?;
+
+    Ok(())
+}
+
+/// Start HTTP server
+async fn start_http_server(
+    args: Args,
+    mode: config::ServerMode,
+    dispatcher: std::sync::Arc<dyn traits::SequencerClient>,
+    storage: Option<std::sync::Arc<dyn traits::Storage>>,
+) -> anyhow::Result<()> {
+    use std::sync::Arc;
 
     // Parse access tokens
     let access_tokens = args.access_tokens.as_ref().map(|tokens| {
@@ -130,15 +266,15 @@ async fn main() -> anyhow::Result<()> {
             .collect::<Vec<_>>()
     });
 
-    // Get base URL from environment or build from host:port
+    // Get base URL
     let base_url = std::env::var("ATL_BASE_URL")
         .unwrap_or_else(|_| format!("http://{}:{}", args.host, args.port));
 
-    // Create application state
-    let app_state = std::sync::Arc::new(api::AppState {
-        mode: config::ServerMode::Standalone,
+    // Create app state
+    let app_state = Arc::new(api::AppState {
+        mode,
         dispatcher,
-        storage: Some(storage),
+        storage,
         access_tokens,
         base_url,
     });
@@ -146,23 +282,34 @@ async fn main() -> anyhow::Result<()> {
     // Create router
     let app = api::create_router(app_state);
 
-    // Start HTTP server
+    // Start server
     let bind_addr = format!("{}:{}", args.host, args.port);
     tracing::info!("Starting HTTP server on {}", bind_addr);
 
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
 
-    // Run server with graceful shutdown
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
-    // Wait for sequencer to finish
-    tracing::info!("Waiting for sequencer to shut down...");
-    sequencer_task.await?;
-
-    tracing::info!("Server shutdown complete");
+    tracing::info!("HTTP server shutdown complete");
     Ok(())
+}
+
+// Fallback stubs for when features are not enabled
+#[cfg(not(feature = "sqlite"))]
+async fn run_standalone(_args: Args) -> anyhow::Result<()> {
+    anyhow::bail!("STANDALONE mode requires --features sqlite")
+}
+
+#[cfg(not(feature = "grpc"))]
+async fn run_node(_args: Args) -> anyhow::Result<()> {
+    anyhow::bail!("NODE mode requires --features grpc")
+}
+
+#[cfg(not(all(feature = "grpc", feature = "sqlite")))]
+async fn run_sequencer(_args: Args) -> anyhow::Result<()> {
+    anyhow::bail!("SEQUENCER mode requires --features grpc,sqlite")
 }
 
 /// Wait for SIGTERM or SIGINT

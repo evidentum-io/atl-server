@@ -1,5 +1,7 @@
 //! Bounded channel buffer for append requests
 
+#![allow(dead_code)]
+
 use tokio::sync::oneshot;
 
 use crate::error::ServerError;
@@ -64,5 +66,46 @@ impl SequencerHandle {
         let capacity = self.tx.max_capacity();
         let available = self.tx.capacity();
         1.0 - (available as f64 / capacity as f64)
+    }
+
+    /// Submit a batch of append requests and wait for results
+    ///
+    /// Returns error if:
+    /// - Buffer is full (backpressure)
+    /// - Sequencer has shut down
+    /// - Database operation failed
+    pub async fn append_batch(
+        &self,
+        params_batch: Vec<AppendParams>,
+    ) -> Result<Vec<AppendResult>, ServerError> {
+        let mut result_rxs = Vec::with_capacity(params_batch.len());
+
+        // Submit all requests to the sequencer
+        for params in params_batch {
+            let (response_tx, response_rx) = oneshot::channel();
+
+            let request = AppendRequest {
+                params,
+                response_tx,
+            };
+
+            // Try to send, return 503 if buffer full
+            self.tx.send(request).await.map_err(|_| {
+                ServerError::ServiceUnavailable("sequencer buffer full, try again later".into())
+            })?;
+
+            result_rxs.push(response_rx);
+        }
+
+        // Wait for all results
+        let mut results = Vec::with_capacity(result_rxs.len());
+        for rx in result_rxs {
+            let result = rx.await.map_err(|_| {
+                ServerError::Internal("sequencer dropped response channel".into())
+            })??;
+            results.push(result);
+        }
+
+        Ok(results)
     }
 }

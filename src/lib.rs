@@ -18,6 +18,9 @@ pub mod background;
 
 pub mod sequencer;
 
+#[cfg(feature = "grpc")]
+pub mod grpc;
+
 // Re-export key types at crate root
 pub use error::{ServerError, ServerResult};
 
