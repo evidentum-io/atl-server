@@ -123,6 +123,13 @@ async fn run_standalone(args: Args) -> anyhow::Result<()> {
     store.initialize()?;
     let storage = Arc::new(store) as Arc<dyn Storage>;
 
+    // Load signing key
+    let signing_key_path = args
+        .signing_key
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("ATL_SIGNING_KEY_PATH required for STANDALONE mode"))?;
+    let signer = receipt::CheckpointSigner::from_file(signing_key_path)?;
+
     // Create sequencer
     let sequencer_config = sequencer::SequencerConfig::from_env();
     let (sequencer_instance, sequencer_handle) =
@@ -133,7 +140,7 @@ async fn run_standalone(args: Args) -> anyhow::Result<()> {
     });
 
     // Create dispatcher
-    let dispatcher = Arc::new(traits::LocalDispatcher::new(sequencer_handle))
+    let dispatcher = Arc::new(traits::LocalDispatcher::new(sequencer_handle, signer))
         as Arc<dyn traits::SequencerClient>;
 
     // Start HTTP server
@@ -226,8 +233,10 @@ async fn run_sequencer(args: Args) -> anyhow::Result<()> {
     });
 
     // Create dispatcher for HTTP admin endpoints
-    let dispatcher = Arc::new(traits::LocalDispatcher::new(sequencer_handle))
-        as Arc<dyn traits::SequencerClient>;
+    let dispatcher = Arc::new(traits::LocalDispatcher::new(
+        sequencer_handle,
+        signer.as_ref().clone(),
+    )) as Arc<dyn traits::SequencerClient>;
 
     // Start HTTP admin server
     let http_handle = tokio::spawn(async move {

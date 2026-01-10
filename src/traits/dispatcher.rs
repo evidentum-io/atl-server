@@ -192,12 +192,17 @@ pub trait SequencerClient: Send + Sync {
 pub struct LocalDispatcher {
     /// Handle to the sequencer for sending append requests
     handle: crate::sequencer::SequencerHandle,
+    /// Checkpoint signer for Ed25519 signatures
+    signer: crate::receipt::CheckpointSigner,
 }
 
 impl LocalDispatcher {
-    /// Create a new local dispatcher with a sequencer handle
-    pub fn new(handle: crate::sequencer::SequencerHandle) -> Self {
-        Self { handle }
+    /// Create a new local dispatcher with a sequencer handle and signer
+    pub fn new(
+        handle: crate::sequencer::SequencerHandle,
+        signer: crate::receipt::CheckpointSigner,
+    ) -> Self {
+        Self { handle, signer }
     }
 }
 
@@ -207,20 +212,12 @@ impl SequencerClient for LocalDispatcher {
         // Send append request through the sequencer handle
         let result = self.handle.append(params).await?;
 
-        // Create checkpoint (TODO: implement proper signing in checkpoint module)
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-
-        let checkpoint = atl_core::Checkpoint {
-            origin: result.tree_head.origin,
-            tree_size: result.tree_head.tree_size,
-            root_hash: result.tree_head.root_hash,
-            timestamp,
-            signature: [0u8; 64], // TODO: implement signing
-            key_id: [0u8; 32],    // TODO: derive from signing key
-        };
+        // Create and sign checkpoint
+        let checkpoint = self.signer.sign_checkpoint_struct(
+            result.tree_head.origin,
+            result.tree_head.tree_size,
+            &result.tree_head.root_hash,
+        );
 
         Ok(DispatchResult { result, checkpoint })
     }
