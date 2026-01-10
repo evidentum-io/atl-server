@@ -4,7 +4,7 @@
 
 use crate::anchoring::error::AnchorError;
 use crate::anchoring::rfc3161::types::TsaResponse;
-use rasn::types::{Integer, ObjectIdentifier, OctetString};
+use rasn::types::{Any, Integer, ObjectIdentifier, OctetString};
 use rasn::{AsnType, Decode, Encode};
 
 /// SHA-256 OID: 2.16.840.1.101.3.4.2.1
@@ -34,10 +34,14 @@ struct AlgorithmIdentifier {
 }
 
 /// TimeStampResp (simplified structure for decoding)
+///
+/// RFC 3161: `TimeStampResp ::= SEQUENCE { status PKIStatusInfo, timeStampToken TimeStampToken OPTIONAL }`
+/// where `TimeStampToken ::= ContentInfo` (CMS SignedData structure).
+/// We use `Any` to capture the raw DER bytes without parsing the full CMS structure.
 #[derive(AsnType, Decode)]
 struct TimeStampResp {
     status: PkiStatusInfo,
-    time_stamp_token: Option<OctetString>,
+    time_stamp_token: Option<Any>,
 }
 
 /// PKIStatusInfo structure
@@ -87,8 +91,11 @@ pub fn parse_timestamp_response(der: &[u8]) -> Result<TsaResponse, AnchorError> 
     // Extract timestamp from token (simplified - in real impl parse TSTInfo)
     let timestamp = extract_timestamp_from_token(&token)?;
 
+    // Store the raw DER bytes of the TimeStampToken (ContentInfo)
+    let token_der = rasn::der::encode(&token)?;
+
     Ok(TsaResponse {
-        token_der: der.to_vec(),
+        token_der,
         timestamp,
     })
 }
@@ -97,9 +104,9 @@ pub fn parse_timestamp_response(der: &[u8]) -> Result<TsaResponse, AnchorError> 
 ///
 /// NOTE: This is a simplified implementation. Full implementation would parse
 /// the CMS SignedData structure and extract TSTInfo.genTime.
-fn extract_timestamp_from_token(_token: &OctetString) -> Result<u64, AnchorError> {
+fn extract_timestamp_from_token(_token: &Any) -> Result<u64, AnchorError> {
     // For now, use current time
-    // TODO: Implement full TSTInfo parsing
+    // TODO: Implement full TSTInfo parsing from CMS ContentInfo
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| AnchorError::InvalidResponse(format!("system time error: {}", e)))?;
