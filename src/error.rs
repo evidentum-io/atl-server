@@ -275,6 +275,13 @@ impl From<base64::DecodeError> for ServerError {
     }
 }
 
+#[cfg(feature = "sqlite")]
+impl From<rusqlite::Error> for ServerError {
+    fn from(e: rusqlite::Error) -> Self {
+        ServerError::Storage(StorageError::Sqlite(e))
+    }
+}
+
 // HTTP client errors (for anchoring)
 #[cfg(feature = "rfc3161")]
 impl From<reqwest::Error> for AnchorError {
