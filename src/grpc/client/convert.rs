@@ -110,6 +110,13 @@ pub fn proto_receipt_to_trait(response: proto::ReceiptResponse) -> ServerResult<
 
 /// Convert proto ExternalAnchor to trait Anchor
 fn proto_external_anchor_to_trait(a: proto::ExternalAnchor) -> Anchor {
+    let metadata: serde_json::Value = serde_json::from_str(&a.metadata_json).unwrap_or_default();
+
+    let tree_size = metadata
+        .get("tree_size")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
     Anchor {
         anchor_type: match a.anchor_type.as_str() {
             "rfc3161" => AnchorType::Rfc3161,
@@ -117,9 +124,9 @@ fn proto_external_anchor_to_trait(a: proto::ExternalAnchor) -> Anchor {
             _ => AnchorType::Other,
         },
         anchored_hash: a.anchored_hash.try_into().unwrap_or([0u8; 32]),
-        tree_size: 0, // TODO: Get tree_size from metadata_json
+        tree_size,
         timestamp: a.timestamp,
         token: a.token,
-        metadata: serde_json::from_str(&a.metadata_json).unwrap_or_default(),
+        metadata,
     }
 }

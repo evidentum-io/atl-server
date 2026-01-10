@@ -284,6 +284,24 @@ fn get_entry_by_ext_id(conn: &Connection, external_id: &str) -> ServerResult<Ent
     Ok(row)
 }
 
+/// Get the database file size in bytes
+///
+/// Returns 0 for in-memory databases or if size cannot be determined.
+fn get_database_file_size(conn: &Connection) -> u64 {
+    let path: Result<String, _> = conn.query_row(
+        "SELECT file FROM pragma_database_list WHERE name = 'main'",
+        [],
+        |row| row.get(0),
+    );
+
+    match path {
+        Ok(path) if !path.is_empty() && path != ":memory:" => {
+            std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+        }
+        _ => 0,
+    }
+}
+
 /// Get database statistics
 pub fn get_stats(conn: &Connection) -> ServerResult<StorageStats> {
     let entry_count: u64 = conn.query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))?;
@@ -305,6 +323,6 @@ pub fn get_stats(conn: &Connection) -> ServerResult<StorageStats> {
         node_count,
         checkpoint_count,
         anchor_count,
-        file_size: 0, // TODO: implement
+        file_size: get_database_file_size(conn),
     })
 }
