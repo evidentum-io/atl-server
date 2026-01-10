@@ -1,0 +1,233 @@
+// File: src/storage/sqlite/lifecycle.rs
+
+use super::convert;
+use super::store::SqliteStore;
+use crate::error::{ServerError, ServerResult};
+use crate::traits::Anchor;
+use rusqlite::params;
+
+/// Tree record from database
+#[derive(Debug, Clone)]
+pub struct TreeRecord {
+    pub id: i64,
+    pub origin_id: [u8; 32],
+    pub status: TreeStatus,
+    pub start_size: u64,
+    pub end_size: Option<u64>,
+    pub root_hash: Option<[u8; 32]>,
+    pub created_at: i64,
+    pub first_entry_at: Option<i64>,
+    pub closed_at: Option<i64>,
+    pub tsa_anchor_id: Option<i64>,
+    pub bitcoin_anchor_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeStatus {
+    Active,
+    PendingBitcoin,
+    Closed,
+}
+
+impl TreeStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TreeStatus::Active => "active",
+            TreeStatus::PendingBitcoin => "pending_bitcoin",
+            TreeStatus::Closed => "closed",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "active" => Some(TreeStatus::Active),
+            "pending_bitcoin" => Some(TreeStatus::PendingBitcoin),
+            "closed" => Some(TreeStatus::Closed),
+            _ => None,
+        }
+    }
+}
+
+/// Anchor with ID (for OTS poll job)
+#[derive(Debug, Clone)]
+pub struct AnchorWithId {
+    pub id: i64,
+    pub anchor: Anchor,
+}
+
+impl SqliteStore {
+    /// Get the currently active tree
+    pub fn get_active_tree(&self) -> ServerResult<Option<TreeRecord>> {
+        let conn = self.get_conn()?;
+
+        let result = conn.query_row(
+            "SELECT id, origin_id, status, start_size, end_size, root_hash, created_at, first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id
+             FROM trees WHERE status = 'active' LIMIT 1",
+            [],
+            convert::row_to_tree,
+        );
+
+        match result {
+            Ok(tree) => Ok(Some(tree)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Create a new active tree
+    pub fn create_active_tree(&self, start_size: u64) -> ServerResult<i64> {
+        let conn = self.get_conn()?;
+        let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+
+        conn.execute(
+            "INSERT INTO trees (origin_id, status, start_size, created_at)
+             VALUES (?1, 'active', ?2, ?3)",
+            params![self.get_origin().as_slice(), start_size as i64, now],
+        )?;
+
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Close the active tree and create a new one atomically
+    pub fn close_tree_and_create_new(
+        &self,
+        end_size: u64,
+        root_hash: &[u8; 32],
+        bitcoin_anchor_id: i64,
+    ) -> ServerResult<(i64, i64)> {
+        let mut conn = self.get_conn()?;
+        let tx = conn.transaction()?;
+        let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+
+        // Get current active tree ID
+        let active_tree_id: i64 = tx
+            .query_row("SELECT id FROM trees WHERE status = 'active'", [], |row| {
+                row.get(0)
+            })
+            .map_err(|_| ServerError::Internal("No active tree found".into()))?;
+
+        // Update active tree to pending_bitcoin
+        tx.execute(
+            "UPDATE trees SET status = 'pending_bitcoin', end_size = ?1, root_hash = ?2, closed_at = ?3, bitcoin_anchor_id = ?4
+             WHERE id = ?5",
+            params![
+                end_size as i64,
+                root_hash.as_slice(),
+                now,
+                bitcoin_anchor_id,
+                active_tree_id,
+            ],
+        )?;
+
+        // Create new active tree
+        tx.execute(
+            "INSERT INTO trees (origin_id, status, start_size, created_at)
+             VALUES (?1, 'active', ?2, ?3)",
+            params![self.get_origin().as_slice(), end_size as i64, now],
+        )?;
+
+        let new_tree_id = tx.last_insert_rowid();
+
+        tx.commit()?;
+
+        Ok((active_tree_id, new_tree_id))
+    }
+
+    /// Get trees pending TSA anchoring
+    pub fn get_trees_pending_tsa(&self) -> ServerResult<Vec<TreeRecord>> {
+        let conn = self.get_conn()?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, origin_id, status, start_size, end_size, root_hash, created_at, first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id
+             FROM trees WHERE status IN ('pending_bitcoin', 'closed') AND tsa_anchor_id IS NULL ORDER BY created_at ASC"
+        )?;
+
+        let rows = stmt.query_map([], convert::row_to_tree)?;
+        rows.map(|r| r.map_err(|e| e.into())).collect()
+    }
+
+    /// Get trees pending Bitcoin confirmation
+    pub fn get_trees_pending_bitcoin_confirmation(&self) -> ServerResult<Vec<TreeRecord>> {
+        let conn = self.get_conn()?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, origin_id, status, start_size, end_size, root_hash, created_at, first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id
+             FROM trees WHERE status = 'pending_bitcoin' ORDER BY created_at ASC"
+        )?;
+
+        let rows = stmt.query_map([], convert::row_to_tree)?;
+        rows.map(|r| r.map_err(|e| e.into())).collect()
+    }
+
+    /// Mark tree as closed after Bitcoin confirmation
+    pub fn mark_tree_closed(&self, tree_id: i64) -> ServerResult<()> {
+        let conn = self.get_conn()?;
+        conn.execute(
+            "UPDATE trees SET status = 'closed' WHERE id = ?1 AND status = 'pending_bitcoin'",
+            params![tree_id],
+        )?;
+        Ok(())
+    }
+
+    /// Update tree TSA anchor
+    pub fn update_tree_tsa_anchor(&self, tree_id: i64, anchor_id: i64) -> ServerResult<()> {
+        let conn = self.get_conn()?;
+        conn.execute(
+            "UPDATE trees SET tsa_anchor_id = ?1 WHERE id = ?2",
+            params![anchor_id, tree_id],
+        )?;
+        Ok(())
+    }
+
+    /// Get tree covering a specific entry
+    pub fn get_tree_covering_entry(&self, leaf_index: u64) -> ServerResult<Option<TreeRecord>> {
+        let conn = self.get_conn()?;
+
+        let result = conn.query_row(
+            "SELECT id, origin_id, status, start_size, end_size, root_hash, created_at, first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id
+             FROM trees WHERE start_size <= ?1 AND end_size > ?1 AND status IN ('pending_bitcoin', 'closed') LIMIT 1",
+            params![leaf_index as i64],
+            convert::row_to_tree,
+        );
+
+        match result {
+            Ok(tree) => Ok(Some(tree)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Get tree by bitcoin anchor ID
+    pub fn get_tree_by_bitcoin_anchor_id(
+        &self,
+        anchor_id: i64,
+    ) -> ServerResult<Option<TreeRecord>> {
+        let conn = self.get_conn()?;
+
+        let result = conn.query_row(
+            "SELECT id, origin_id, status, start_size, end_size, root_hash, created_at, first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id
+             FROM trees WHERE bitcoin_anchor_id = ?1 LIMIT 1",
+            params![anchor_id],
+            convert::row_to_tree,
+        );
+
+        match result {
+            Ok(tree) => Ok(Some(tree)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Update tree first_entry_at (called on first entry append)
+    pub fn update_tree_first_entry_at(&self, tree_id: i64) -> ServerResult<()> {
+        let conn = self.get_conn()?;
+        let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+
+        conn.execute(
+            "UPDATE trees SET first_entry_at = ?1 WHERE id = ?2 AND first_entry_at IS NULL",
+            params![now, tree_id],
+        )?;
+
+        Ok(())
+    }
+}
