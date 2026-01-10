@@ -26,8 +26,6 @@ pub mod server;
 pub mod client;
 
 // Re-export key types for convenience
-pub use auth::AuthInterceptor;
-
 #[cfg(feature = "grpc")]
 pub use client::{GrpcClientConfig, GrpcDispatcher};
 

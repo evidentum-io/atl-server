@@ -17,6 +17,8 @@ pub async fn handle_get_receipt(
     server: &SequencerGrpcServer,
     request: Request<GetReceiptRequest>,
 ) -> Result<Response<ReceiptResponse>, Status> {
+    server.check_auth(&request)?;
+
     let req = request.into_inner();
 
     let entry_id: uuid::Uuid = req
@@ -117,6 +119,8 @@ pub async fn handle_upgrade_receipt(
     server: &SequencerGrpcServer,
     request: Request<UpgradeReceiptRequest>,
 ) -> Result<Response<UpgradeReceiptResponse>, Status> {
+    server.check_auth(&request)?;
+
     let req = request.into_inner();
 
     let entry_id: uuid::Uuid = req

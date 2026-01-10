@@ -18,6 +18,8 @@ pub async fn handle_anchor_entry(
     server: &SequencerGrpcServer,
     request: Request<AnchorRequest>,
 ) -> Result<Response<AnchorResponse>, Status> {
+    server.check_auth(&request)?;
+
     let req = request.into_inner();
 
     // Validate hashes
@@ -93,6 +95,8 @@ pub async fn handle_anchor_batch(
     server: &SequencerGrpcServer,
     request: Request<AnchorBatchRequest>,
 ) -> Result<Response<AnchorBatchResponse>, Status> {
+    server.check_auth(&request)?;
+
     let req = request.into_inner();
 
     if req.entries.is_empty() {

@@ -14,8 +14,10 @@ use crate::grpc::server::service::SequencerGrpcServer;
 /// Returns the current health status of the server.
 pub async fn handle_health_check(
     server: &SequencerGrpcServer,
-    _request: Request<HealthCheckRequest>,
+    request: Request<HealthCheckRequest>,
 ) -> Result<Response<HealthCheckResponse>, Status> {
+    server.check_auth(&request)?;
+
     let head = server.storage().get_tree_head();
 
     match head {
@@ -42,6 +44,8 @@ pub async fn handle_trigger_anchoring(
     server: &SequencerGrpcServer,
     request: Request<TriggerAnchoringRequest>,
 ) -> Result<Response<TriggerAnchoringResponse>, Status> {
+    server.check_auth(&request)?;
+
     let req = request.into_inner();
 
     let head = server

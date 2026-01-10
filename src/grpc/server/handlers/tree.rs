@@ -14,8 +14,10 @@ use crate::grpc::server::service::SequencerGrpcServer;
 /// Returns the current state of the Merkle tree.
 pub async fn handle_get_tree_head(
     server: &SequencerGrpcServer,
-    _request: Request<GetTreeHeadRequest>,
+    request: Request<GetTreeHeadRequest>,
 ) -> Result<Response<TreeHeadResponse>, Status> {
+    server.check_auth(&request)?;
+
     let head = server
         .storage()
         .get_tree_head()
@@ -46,8 +48,10 @@ pub async fn handle_get_tree_head(
 /// Returns the public keys used for checkpoint signing.
 pub async fn handle_get_public_keys(
     server: &SequencerGrpcServer,
-    _request: Request<GetPublicKeysRequest>,
+    request: Request<GetPublicKeysRequest>,
 ) -> Result<Response<PublicKeysResponse>, Status> {
+    server.check_auth(&request)?;
+
     let (key_id, public_key_bytes) = server.signer().public_key_info();
 
     Ok(Response::new(PublicKeysResponse {

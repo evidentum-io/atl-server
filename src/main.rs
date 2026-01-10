@@ -204,11 +204,15 @@ async fn run_sequencer(args: Args) -> anyhow::Result<()> {
     });
 
     // Create gRPC server
-    let grpc_server =
-        grpc::SequencerGrpcServer::new(sequencer_handle.clone(), storage.clone(), signer.clone());
-
     let token = std::env::var("ATL_SEQUENCER_TOKEN").ok();
-    let grpc_service = grpc_server.into_service(token);
+    let grpc_server = grpc::SequencerGrpcServer::new(
+        sequencer_handle.clone(),
+        storage.clone(),
+        signer.clone(),
+        token,
+    );
+
+    let grpc_service = grpc_server.into_service();
 
     // Start gRPC server
     let grpc_addr = format!("0.0.0.0:{}", args.grpc_port);

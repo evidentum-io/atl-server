@@ -26,6 +26,9 @@ pub struct SequencerGrpcServer {
 
     /// Server start time (for uptime)
     start_time: Instant,
+
+    /// Expected authentication token (None = no auth required)
+    expected_token: Option<String>,
 }
 
 impl SequencerGrpcServer {
@@ -36,38 +39,59 @@ impl SequencerGrpcServer {
     /// * `sequencer_handle` - Handle to the SequencerCore for submitting requests
     /// * `storage` - Storage backend for queries
     /// * `signer` - Checkpoint signer for creating signed tree heads
+    /// * `expected_token` - Optional shared secret for authentication
     pub fn new(
         sequencer_handle: SequencerHandle,
         storage: Arc<dyn Storage>,
         signer: Arc<CheckpointSigner>,
+        expected_token: Option<String>,
     ) -> Self {
         Self {
             sequencer_handle,
             storage,
             signer,
             start_time: Instant::now(),
+            expected_token,
         }
     }
 
-    /// Create tonic service with optional authentication interceptor
-    ///
-    /// # Arguments
-    ///
-    /// * `token` - Optional shared secret for authentication. If None, no auth is required.
+    /// Create tonic service
     ///
     /// # Returns
     ///
     /// A configured `SequencerServiceServer` ready to be served by tonic.
-    pub fn into_service(self, token: Option<String>) -> SequencerServiceServer<Self> {
-        if token.is_some() {
+    pub fn into_service(self) -> SequencerServiceServer<Self> {
+        if self.expected_token.is_some() {
             info!("gRPC server configured with authentication");
         } else {
             info!("gRPC server running without authentication (for dev/testing only)");
         }
 
-        // TODO: Implement proper interceptor when tonic supports it
-        // For now, authentication must be done inside handler methods
         SequencerServiceServer::new(self)
+    }
+
+    /// Check authentication on a request
+    ///
+    /// # Errors
+    ///
+    /// Returns `Status::Unauthenticated` if:
+    /// - Authentication is required but `x-sequencer-token` header is missing
+    /// - Token value doesn't match the expected token
+    pub fn check_auth<T>(&self, request: &Request<T>) -> Result<(), Status> {
+        if let Some(expected) = &self.expected_token {
+            let token = request
+                .metadata()
+                .get("x-sequencer-token")
+                .and_then(|v| v.to_str().ok());
+
+            match token {
+                Some(t) if t == expected => Ok(()),
+                Some(_) => Err(Status::unauthenticated("invalid token")),
+                None => Err(Status::unauthenticated("missing x-sequencer-token")),
+            }
+        } else {
+            Ok(()) // No auth required
+        }
     }
 
     /// Helper: Get the sequencer handle
