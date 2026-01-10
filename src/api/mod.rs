@@ -1,6 +1,7 @@
 //! HTTP API
 
 mod dto;
+pub mod error;
 mod handlers;
 mod routes;
 mod streaming;

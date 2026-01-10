@@ -13,8 +13,8 @@ pub mod anchoring;
 
 pub mod receipt;
 
-// Re-exports will be added when modules are implemented
-// pub use error::{ServerError, ServerResult};
-// pub use traits::{Anchor, Anchorer, Entry, Storage};
-// #[cfg(feature = "sqlite")]
-// pub use storage::SqliteStore;
+// Re-export key types at crate root
+pub use error::{ServerError, ServerResult};
+
+#[cfg(feature = "sqlite")]
+pub use storage::SqliteStore;

@@ -1,8 +1,8 @@
 //! Storage implementations
 
 #[cfg(feature = "sqlite")]
-mod sqlite;
+pub mod sqlite;
 
-// Re-exports will be added when module is implemented
-// #[cfg(feature = "sqlite")]
-// pub use sqlite::*;
+#[cfg(feature = "sqlite")]
+#[allow(unused_imports)]
+pub use sqlite::SqliteStore;
