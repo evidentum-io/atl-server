@@ -114,7 +114,14 @@ async fn generate_and_return_receipt(
     let upgrade_url = format!("{}/v1/anchor/{}", state.base_url, entry_id);
 
     // Build receipt (STUB - will be replaced by RECEIPT-GEN-1)
-    let receipt = build_receipt_stub(&dispatch_result, &upgrade_url, metadata, external_id);
+    let receipt = build_receipt_stub(
+        &dispatch_result,
+        &upgrade_url,
+        &payload_hash,
+        &metadata_hash,
+        metadata,
+        external_id,
+    );
 
     Ok((StatusCode::CREATED, Json(receipt)))
 }
@@ -150,6 +157,8 @@ pub async fn get_anchor(
 fn build_receipt_stub(
     dispatch_result: &crate::traits::DispatchResult,
     upgrade_url: &str,
+    payload_hash: &[u8; 32],
+    metadata_hash: &[u8; 32],
     metadata: Option<serde_json::Value>,
     external_id: Option<String>,
 ) -> Receipt {
@@ -160,8 +169,8 @@ fn build_receipt_stub(
 
     let mut entry_json = serde_json::json!({
         "id": result.id.to_string(),
-        "payload_hash": format_hash(&result.tree_head.root_hash), // STUB: should be entry's payload hash
-        "metadata_hash": format_hash(&result.tree_head.root_hash), // STUB: should be entry's metadata hash
+        "payload_hash": format_hash(payload_hash),
+        "metadata_hash": format_hash(metadata_hash),
         "metadata": metadata.unwrap_or_else(|| serde_json::json!({}))
     });
 
@@ -185,7 +194,7 @@ fn build_receipt_stub(
                 "root_hash": format_hash(&checkpoint.root_hash),
                 "timestamp": checkpoint.timestamp,
                 "signature": format_signature(&checkpoint.signature),
-                "key_id": format_hash(&checkpoint.origin), // STUB: should be key_id
+                "key_id": format_hash(&checkpoint.key_id),
             }
         },
         "anchors": []
@@ -217,6 +226,16 @@ fn build_receipt_with_anchors_stub(
         entry_json["external_id"] = serde_json::json!(ext_id);
     }
 
+    // Convert anchors to receipt format
+    let anchors: Vec<serde_json::Value> = response
+        .anchors
+        .iter()
+        .map(|anchor| {
+            let receipt_anchor = crate::receipt::convert_anchor_to_receipt(anchor);
+            serde_json::to_value(receipt_anchor).unwrap_or_else(|_| serde_json::json!({}))
+        })
+        .collect();
+
     serde_json::json!({
         "spec_version": "1.0.0",
         "upgrade_url": upgrade_url,
@@ -232,9 +251,9 @@ fn build_receipt_with_anchors_stub(
                 "root_hash": format_hash(&checkpoint.root_hash),
                 "timestamp": checkpoint.timestamp,
                 "signature": format_signature(&checkpoint.signature),
-                "key_id": format_hash(&checkpoint.origin),
+                "key_id": format_hash(&checkpoint.key_id),
             }
         },
-        "anchors": [] // STUB: will be populated from response.anchors
+        "anchors": anchors
     })
 }

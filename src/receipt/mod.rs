@@ -12,6 +12,8 @@ mod upgrade;
 
 // Re-export public API
 #[allow(unused_imports)]
+pub use convert::convert_anchor_to_receipt;
+#[allow(unused_imports)]
 pub use generator::{
     CheckpointSigner, ReceiptGenerator, generate_receipt, generate_receipt_simple,
 };
@@ -19,5 +21,3 @@ pub use generator::{
 pub use options::ReceiptOptions;
 #[allow(unused_imports)]
 pub use upgrade::{UpgradeResult, upgrade_receipt};
-
-// Internal helpers are not exported (format, convert, consistency)
