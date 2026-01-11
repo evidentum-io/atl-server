@@ -5,11 +5,14 @@
 
 #![allow(dead_code)]
 
+mod async_client;
 mod calendar;
 mod client;
 mod proof;
 mod types;
 
+#[allow(unused_imports)]
+pub use async_client::{AsyncOtsClient, OtsClient, UpgradeResult};
 #[allow(unused_imports)]
 pub use client::OpenTimestampsClient;
 #[allow(unused_imports)]
