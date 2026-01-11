@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use axum::{Router, middleware, routing::get, routing::post};
+use axum::{middleware, routing::get, routing::post, Router};
 
 use crate::api::handlers;
 use crate::api::middleware::auth_middleware;

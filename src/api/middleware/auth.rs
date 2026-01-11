@@ -5,7 +5,7 @@ use std::sync::Arc;
 use axum::{
     body::Body,
     extract::State,
-    http::{Request, StatusCode, header::AUTHORIZATION},
+    http::{header::AUTHORIZATION, Request, StatusCode},
     middleware::Next,
     response::Response,
 };

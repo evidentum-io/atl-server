@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio::time::{Instant, interval};
+use tokio::time::{interval, Instant};
 use tracing::{debug, info};
 
 use crate::traits::Storage;

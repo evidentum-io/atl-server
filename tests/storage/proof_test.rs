@@ -1,8 +1,8 @@
 //! Storage proof tests (inclusion and consistency)
 
 use atl_core::core::merkle;
-use atl_server::SqliteStore;
 use atl_server::traits::storage::{AppendParams, Storage};
+use atl_server::SqliteStore;
 
 fn create_test_storage() -> SqliteStore {
     let store = SqliteStore::in_memory().expect("Failed to create in-memory storage");
