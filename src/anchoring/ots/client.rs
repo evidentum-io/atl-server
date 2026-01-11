@@ -2,10 +2,8 @@
 
 use crate::anchoring::error::AnchorError;
 use crate::anchoring::ots::calendar::CalendarClient;
-use crate::anchoring::ots::proof::{detect_status, is_finalized, parse_proof, verify_timestamp};
+use crate::anchoring::ots::proof::{detect_status, is_finalized};
 use crate::anchoring::ots::types::{OtsConfig, OtsStatus};
-use crate::error::ServerResult;
-use crate::traits::anchor::{Anchor, AnchorRequest, AnchorResult, AnchorType, Anchorer};
 use atl_core::ots::DetachedTimestampFile;
 
 /// OpenTimestamps client
@@ -34,12 +32,12 @@ impl OpenTimestampsClient {
     }
 
     /// Submit hash to calendar and build initial timestamp
-    fn submit_to_calendar(
+    async fn submit_to_calendar(
         &self,
         hash: &[u8; 32],
         calendar_url: &str,
     ) -> Result<DetachedTimestampFile, AnchorError> {
-        let response_bytes = self.calendar.submit(calendar_url, hash)?;
+        let response_bytes = self.calendar.submit(calendar_url, hash).await?;
 
         DetachedTimestampFile::from_calendar_response(*hash, &response_bytes).map_err(|e| {
             AnchorError::InvalidResponse(format!("failed to parse calendar response: {}", e))
@@ -47,7 +45,7 @@ impl OpenTimestampsClient {
     }
 
     /// Try to get timestamp with fallback to multiple calendars
-    pub fn timestamp_with_fallback(
+    pub async fn timestamp_with_fallback(
         &self,
         hash: &[u8; 32],
     ) -> Result<(String, DetachedTimestampFile), AnchorError> {
@@ -60,7 +58,7 @@ impl OpenTimestampsClient {
         let mut last_error = None;
 
         for calendar_url in &self.config.calendar_urls {
-            match self.submit_to_calendar(hash, calendar_url) {
+            match self.submit_to_calendar(hash, calendar_url).await {
                 Ok(timestamp) => return Ok((calendar_url.clone(), timestamp)),
                 Err(e) => {
                     tracing::warn!(
@@ -77,7 +75,7 @@ impl OpenTimestampsClient {
     }
 
     /// Upgrade a pending proof by querying calendar
-    pub fn upgrade_proof(
+    pub async fn upgrade_proof(
         &self,
         file: &DetachedTimestampFile,
     ) -> Result<Option<DetachedTimestampFile>, AnchorError> {
@@ -96,7 +94,9 @@ impl OpenTimestampsClient {
                 .to_bytes()
                 .map_err(|e| AnchorError::InvalidResponse(e.to_string()))?;
 
-            if let Some(upgraded_bytes) = self.calendar.upgrade(&calendar_url, &current_bytes)? {
+            if let Some(upgraded_bytes) =
+                self.calendar.upgrade(&calendar_url, &current_bytes).await?
+            {
                 let upgraded = DetachedTimestampFile::from_bytes(&upgraded_bytes)
                     .map_err(|e| AnchorError::InvalidResponse(e.to_string()))?;
 
@@ -114,79 +114,6 @@ impl Default for OpenTimestampsClient {
     }
 }
 
-impl Anchorer for OpenTimestampsClient {
-    fn anchor_type(&self) -> AnchorType {
-        AnchorType::BitcoinOts
-    }
-
-    fn anchor(&self, request: &AnchorRequest) -> ServerResult<AnchorResult> {
-        let (calendar_url, file) = self.timestamp_with_fallback(&request.hash)?;
-
-        let status = detect_status(&file.timestamp);
-
-        let (is_final, block_height, block_time) = match &status {
-            OtsStatus::Confirmed {
-                block_height,
-                block_time,
-            } => (true, Some(*block_height), Some(*block_time)),
-            OtsStatus::Pending { .. } => (false, None, None),
-        };
-
-        let proof_bytes = file
-            .to_bytes()
-            .map_err(|e| AnchorError::InvalidResponse(e.to_string()))?;
-
-        let timestamp_nanos = block_time.unwrap_or_else(|| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos() as u64
-        });
-
-        Ok(AnchorResult {
-            anchor: Anchor {
-                anchor_type: AnchorType::BitcoinOts,
-                anchored_hash: request.hash,
-                tree_size: request.tree_size,
-                timestamp: timestamp_nanos,
-                token: proof_bytes,
-                metadata: serde_json::json!({
-                    "calendar_url": calendar_url,
-                    "status": if is_final { "confirmed" } else { "pending" },
-                    "bitcoin_block_height": block_height,
-                    "bitcoin_block_time": block_time,
-                }),
-            },
-            is_final,
-            estimated_finality_secs: if is_final { None } else { Some(3600) },
-        })
-    }
-
-    fn verify(&self, anchor: &Anchor) -> ServerResult<()> {
-        if anchor.anchor_type != AnchorType::BitcoinOts {
-            return Err(AnchorError::TokenInvalid("not an OTS anchor".into()).into());
-        }
-
-        let file = parse_proof(&anchor.token)?;
-
-        verify_timestamp(&file.timestamp, &anchor.anchored_hash)?;
-
-        Ok(())
-    }
-
-    fn is_final(&self, anchor: &Anchor) -> ServerResult<bool> {
-        let file = parse_proof(&anchor.token)?;
-
-        let status = detect_status(&file.timestamp);
-
-        Ok(is_finalized(&status))
-    }
-
-    fn service_id(&self) -> &str {
-        "opentimestamps"
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,18 +126,22 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
-    fn test_ots_submit() {
+    fn test_client_creation_in_tokio() {
+        // Verify creation works inside tokio runtime
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let result = OpenTimestampsClient::new();
+            assert!(result.is_ok());
+        });
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires network
+    async fn test_ots_submit() {
         let client = OpenTimestampsClient::new().unwrap();
         let hash = sha2::Sha256::digest(b"test ots data").into();
 
-        let request = AnchorRequest {
-            hash,
-            tree_size: 1,
-            metadata: None,
-        };
-
-        let result = client.anchor(&request);
+        let result = client.timestamp_with_fallback(&hash).await;
         assert!(result.is_ok());
     }
 }

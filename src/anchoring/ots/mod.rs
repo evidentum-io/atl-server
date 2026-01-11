@@ -26,4 +26,6 @@ pub use client::OpenTimestampsClient;
 
 // Test utilities (available in tests)
 #[cfg(test)]
+pub mod fixtures;
+#[cfg(test)]
 pub mod mock;
