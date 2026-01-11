@@ -260,8 +260,8 @@ impl SqliteStore {
             None => return Ok(None),
         };
 
-        // Get current tree size from entries table (active tree has no checkpoints yet)
-        let current_tree_size: i64 = conn
+        // Get local entry count for this tree (active tree has no checkpoints yet)
+        let local_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM entries WHERE tree_id = ?1",
                 params![active_tree.id],
@@ -269,10 +269,13 @@ impl SqliteStore {
             )
             .unwrap_or(0);
 
-        // If tree is empty, no anchor needed
-        if current_tree_size == 0 {
+        // If no new entries in this tree, no anchor needed
+        if local_count == 0 {
             return Ok(None);
         }
+
+        // Calculate GLOBAL tree size (start_size + local entries)
+        let current_tree_size = active_tree.start_size as i64 + local_count;
 
         // Get last anchor info (tree_size and time)
         let last_anchor: Option<(i64, i64)> = conn
