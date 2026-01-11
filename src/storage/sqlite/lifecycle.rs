@@ -341,14 +341,15 @@ impl SqliteStore {
 
         // Insert anchor
         tx.execute(
-            "INSERT INTO anchors (anchor_type, anchored_hash, tree_size, timestamp, token, metadata, status)
-             VALUES ('bitcoin_ots', ?1, ?2, ?3, ?4, ?5, 'pending')",
+            "INSERT INTO anchors (anchor_type, anchored_hash, tree_size, timestamp, token, metadata, status, created_at)
+             VALUES ('bitcoin_ots', ?1, ?2, ?3, ?4, ?5, 'pending', ?6)",
             params![
                 root_hash.as_slice(),
                 tree_size as i64,
                 now,
                 proof,
                 serde_json::json!({"calendar_url": calendar_url}).to_string(),
+                now,
             ],
         )?;
         let anchor_id = tx.last_insert_rowid();

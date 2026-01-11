@@ -11,3 +11,11 @@ pub mod submit;
 pub use config::OtsJobConfig;
 #[cfg(feature = "ots")]
 pub use job::OtsJob;
+
+// Re-export for integration tests
+#[cfg(all(feature = "sqlite", feature = "ots"))]
+#[allow(unused_imports)]
+pub use poll::poll_pending_anchors;
+#[cfg(all(feature = "sqlite", feature = "ots"))]
+#[allow(unused_imports)]
+pub use submit::submit_unanchored_trees;
