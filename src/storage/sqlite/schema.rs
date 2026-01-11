@@ -4,7 +4,7 @@ use crate::error::ServerResult;
 use rusqlite::Connection;
 
 /// Current schema version
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Create all tables (idempotent)
 pub fn create_tables(conn: &Connection) -> ServerResult<()> {
@@ -39,6 +39,11 @@ pub fn migrate(conn: &Connection) -> ServerResult<()> {
         migrate_v1_to_v2(conn)?;
     }
 
+    if current < 3 {
+        // Migration from v2 to v3: remove FK constraint from anchors table
+        migrate_v2_to_v3(conn)?;
+    }
+
     // Update schema version
     let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
     conn.execute(
@@ -52,6 +57,50 @@ pub fn migrate(conn: &Connection) -> ServerResult<()> {
 fn migrate_v1_to_v2(conn: &Connection) -> ServerResult<()> {
     // Add trees table and related indices
     conn.execute_batch(TREES_TABLE_SQL)?;
+    Ok(())
+}
+
+fn migrate_v2_to_v3(conn: &Connection) -> ServerResult<()> {
+    // Remove FK constraint from anchors table (anchors are independent per ATL-IETF)
+
+    // Step 1: Create new anchors table without FK constraint
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS anchors_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tree_size INTEGER NOT NULL,
+            anchor_type TEXT NOT NULL,
+            anchored_hash BLOB NOT NULL,
+            timestamp INTEGER NOT NULL,
+            token BLOB NOT NULL,
+            metadata TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at INTEGER NOT NULL
+        );
+    "#,
+    )?;
+
+    // Step 2: Copy existing data
+    conn.execute_batch(r#"
+        INSERT INTO anchors_new (id, tree_size, anchor_type, anchored_hash, timestamp, token, metadata, status, created_at)
+        SELECT id, tree_size, anchor_type, anchored_hash, timestamp, token, metadata, status, created_at
+        FROM anchors;
+    "#)?;
+
+    // Step 3: Drop old table
+    conn.execute_batch("DROP TABLE IF EXISTS anchors;")?;
+
+    // Step 4: Rename new table
+    conn.execute_batch("ALTER TABLE anchors_new RENAME TO anchors;")?;
+
+    // Step 5: Recreate indices
+    conn.execute_batch(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_anchors_tree_size ON anchors(tree_size);
+        CREATE INDEX IF NOT EXISTS idx_anchors_status ON anchors(status);
+    "#,
+    )?;
+
     Ok(())
 }
 
@@ -123,17 +172,17 @@ CREATE TABLE IF NOT EXISTS trees (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_trees_active ON trees(status) WHERE status = 'active';
 
 -- Anchor attestations
+-- No FK constraint: anchors are independent of checkpoints per ATL-IETF
 CREATE TABLE IF NOT EXISTS anchors (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tree_size INTEGER NOT NULL,             -- References checkpoint
+    tree_size INTEGER NOT NULL,             -- References checkpoint (no FK)
     anchor_type TEXT NOT NULL,              -- 'rfc3161', 'bitcoin_ots'
     anchored_hash BLOB NOT NULL,            -- Should match root_hash
     timestamp INTEGER NOT NULL,             -- Unix nanoseconds
     token BLOB NOT NULL,                    -- Raw anchor data
     metadata TEXT,                          -- JSON metadata
     status TEXT NOT NULL DEFAULT 'pending', -- 'pending', 'confirmed'
-    created_at INTEGER NOT NULL,
-    FOREIGN KEY (tree_size) REFERENCES checkpoints(tree_size)
+    created_at INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_entries_tree_id ON entries(tree_id);
