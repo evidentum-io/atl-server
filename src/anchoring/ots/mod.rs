@@ -3,6 +3,7 @@
 //! Bitcoin-backed timestamping using the OpenTimestamps protocol.
 //! Uses atl_core::ots for proof serialization and verification.
 
+// Allow dead_code for public API functions that may be used by external consumers
 #![allow(dead_code)]
 
 mod async_client;
@@ -11,13 +12,14 @@ mod client;
 mod proof;
 mod types;
 
-#[allow(unused_imports)]
-pub use async_client::{AsyncOtsClient, OtsClient, UpgradeResult};
-#[allow(unused_imports)]
-pub use client::OpenTimestampsClient;
-#[allow(unused_imports)]
+pub use async_client::{AsyncOtsClient, OtsClient};
 pub use types::{OtsConfig, OtsStatus};
 
-// Re-export proof utilities for advanced use cases
+// Re-exported for integration tests in tests/ (not used in src/)
 #[allow(unused_imports)]
-pub use proof::{detect_status, is_finalized, parse_proof, verify_timestamp};
+pub use async_client::UpgradeResult;
+
+// Internal use only - not part of public API
+#[doc(hidden)]
+#[allow(unused_imports)]
+pub use client::OpenTimestampsClient;

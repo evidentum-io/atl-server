@@ -12,10 +12,11 @@ pub mod rfc3161;
 #[cfg(feature = "ots")]
 pub mod ots;
 
-// Re-export commonly used types
+// Re-exported for external API and tests (not used in src/, internal code uses anchoring::error::AnchorError)
 #[allow(unused_imports)]
 pub use error::AnchorError;
 
+// Re-exported for integration tests in tests/ (not used in src/)
 #[cfg(feature = "rfc3161")]
 #[allow(unused_imports)]
 pub use rfc3161::{
@@ -24,4 +25,4 @@ pub use rfc3161::{
 
 #[cfg(feature = "ots")]
 #[allow(unused_imports)]
-pub use ots::{OpenTimestampsClient, OtsConfig, OtsStatus};
+pub use ots::{OtsConfig, OtsStatus};

@@ -12,7 +12,7 @@ pub use config::OtsJobConfig;
 #[cfg(feature = "ots")]
 pub use job::OtsJob;
 
-// Re-export for integration tests
+// Re-exported for integration tests in tests/ (not used in src/)
 #[cfg(all(feature = "sqlite", feature = "ots"))]
 #[allow(unused_imports)]
 pub use poll::poll_pending_anchors;
