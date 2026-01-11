@@ -48,9 +48,19 @@ impl BackgroundJobRunner {
         let (shutdown_tx, _) = broadcast::channel(1);
 
         #[cfg(feature = "ots")]
-        let ots_client: Arc<dyn crate::anchoring::ots::OtsClient> = Arc::new(
-            crate::anchoring::ots::AsyncOtsClient::new().expect("failed to create OTS client"),
-        );
+        let ots_client: Arc<dyn crate::anchoring::ots::OtsClient> = {
+            let ots_config = crate::anchoring::ots::OtsConfig::from_env();
+            tracing::info!(
+                calendar_urls = ?ots_config.calendar_urls,
+                timeout_secs = ots_config.timeout_secs,
+                min_confirmations = ots_config.min_confirmations,
+                "OTS client configuration loaded"
+            );
+            Arc::new(
+                crate::anchoring::ots::AsyncOtsClient::with_config(ots_config)
+                    .expect("failed to create OTS client"),
+            )
+        };
 
         Self {
             storage,

@@ -54,4 +54,71 @@ impl OtsConfig {
             min_confirmations: 6,
         }
     }
+
+    /// Create config from environment variables
+    ///
+    /// Environment variables:
+    /// - `ATL_OTS_CALENDAR_URLS`: Comma-separated list of calendar URLs
+    /// - `ATL_OTS_TIMEOUT_SECS`: HTTP timeout in seconds (default: 30)
+    /// - `ATL_OTS_MIN_CONFIRMATIONS`: Minimum Bitcoin confirmations (default: 6)
+    #[must_use]
+    pub fn from_env() -> Self {
+        let calendar_urls = std::env::var("ATL_OTS_CALENDAR_URLS")
+            .map(|s| {
+                s.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_else(|_| {
+                vec![
+                    "https://a.pool.opentimestamps.org".to_string(),
+                    "https://b.pool.opentimestamps.org".to_string(),
+                ]
+            });
+
+        let timeout_secs = std::env::var("ATL_OTS_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(30);
+
+        let min_confirmations = std::env::var("ATL_OTS_MIN_CONFIRMATIONS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(6);
+
+        Self {
+            calendar_urls,
+            timeout_secs,
+            min_confirmations,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ots_config_default() {
+        let config = OtsConfig::default();
+        assert_eq!(config.calendar_urls.len(), 2);
+        assert_eq!(config.timeout_secs, 30);
+        assert_eq!(config.min_confirmations, 6);
+    }
+
+    #[test]
+    fn test_ots_config_from_env_defaults() {
+        // Clear any existing env vars
+        std::env::remove_var("ATL_OTS_CALENDAR_URLS");
+        std::env::remove_var("ATL_OTS_TIMEOUT_SECS");
+        std::env::remove_var("ATL_OTS_MIN_CONFIRMATIONS");
+
+        let config = OtsConfig::from_env();
+
+        assert_eq!(config.calendar_urls.len(), 2);
+        assert!(config.calendar_urls[0].contains("opentimestamps.org"));
+        assert_eq!(config.timeout_secs, 30);
+        assert_eq!(config.min_confirmations, 6);
+    }
 }
