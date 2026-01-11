@@ -5,6 +5,7 @@ use super::store::SqliteStore;
 use crate::error::{ServerError, ServerResult};
 use crate::traits::Anchor;
 use rusqlite::params;
+use rusqlite::OptionalExtension;
 
 /// Tree record from database
 #[derive(Debug, Clone)]
@@ -408,5 +409,18 @@ impl SqliteStore {
 
         tx.commit()?;
         Ok(())
+    }
+
+    /// Get existing TSA anchor ID for a root hash (if any)
+    pub fn get_tsa_anchor_for_hash(&self, root_hash: &[u8; 32]) -> ServerResult<Option<i64>> {
+        let conn = self.get_conn()?;
+        let result: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM anchors WHERE anchored_hash = ?1 AND anchor_type = 'rfc3161' LIMIT 1",
+                [root_hash.as_slice()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(result)
     }
 }

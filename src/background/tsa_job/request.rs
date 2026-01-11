@@ -24,6 +24,17 @@ pub async fn try_tsa_timestamp(
         .root_hash
         .ok_or_else(|| ServerError::Internal(format!("Tree {} has no root_hash", tree.id)))?;
 
+    // Check if TSA anchor already exists for this root_hash
+    if let Some(existing_id) = storage.get_tsa_anchor_for_hash(&root_hash)? {
+        tracing::info!(
+            tree_id = tree.id,
+            anchor_id = existing_id,
+            "TSA anchor already exists, linking to tree"
+        );
+        storage.update_tree_tsa_anchor(tree.id, existing_id)?;
+        return Ok(existing_id);
+    }
+
     // Create TSA client and request timestamp
     let client = AsyncRfc3161Client::new()
         .map_err(|e| ServerError::Internal(format!("Failed to create TSA client: {}", e)))?;
