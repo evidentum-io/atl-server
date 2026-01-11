@@ -12,7 +12,7 @@ categories = ["cryptography", "web-programming"]
 
 [dependencies]
 # Core ATL library
-atl-core = { path = "../atl-core", version = "0.5", features = ["bitcoin-ots"] }
+atl-core = { path = "../atl-core", version = "0.6", features = ["bitcoin-ots"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
