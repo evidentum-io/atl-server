@@ -216,4 +216,19 @@ pub trait Storage: Send + Sync {
 
     /// Get the most recent anchored tree size
     fn get_latest_anchored_size(&self) -> ServerResult<Option<u64>>;
+
+    /// Get anchors that cover a specific tree size
+    ///
+    /// Returns anchors where anchor.tree_size >= target_tree_size,
+    /// ordered by tree_size ascending (closest first).
+    /// Only returns 'confirmed' status anchors.
+    ///
+    /// # Arguments
+    /// * `target_tree_size` - The tree_size to find covering anchors for
+    /// * `limit` - Maximum number of anchors to return
+    fn get_anchors_covering(
+        &self,
+        target_tree_size: u64,
+        limit: usize,
+    ) -> ServerResult<Vec<Anchor>>;
 }

@@ -258,19 +258,30 @@ impl SequencerClient for LocalDispatcher {
     async fn get_receipt(&self, request: GetReceiptRequest) -> ServerResult<ReceiptResponse> {
         let entry_id = request.entry_id;
 
+        // Get entry to find its leaf_index
         let entry = self.storage.get_entry(&entry_id)?;
+
+        // Entry's tree_size = leaf_index + 1
+        let entry_tree_size = entry.leaf_index.ok_or_else(|| {
+            crate::error::ServerError::Internal(format!("Entry {} has no leaf_index", entry_id))
+        })? + 1;
+
+        // Get inclusion proof for entry
         let proof = self.storage.get_inclusion_proof(&entry_id, None)?;
+
+        // Get current tree head (for checkpoint)
         let tree_head = self.storage.get_tree_head()?;
 
+        // Sign checkpoint at current tree size
         let checkpoint = self.signer.sign_checkpoint_struct(
             tree_head.origin,
             tree_head.tree_size,
             &tree_head.root_hash,
         );
 
-        // Get anchors if requested
+        // Get anchors that COVER this entry (tree_size >= entry_tree_size)
         let anchors = if request.include_anchors {
-            self.storage.get_anchors(tree_head.tree_size)?
+            self.storage.get_anchors_covering(entry_tree_size, 10)?
         } else {
             vec![]
         };
@@ -279,7 +290,7 @@ impl SequencerClient for LocalDispatcher {
             entry,
             inclusion_proof: proof.path,
             checkpoint,
-            consistency_proof: None,
+            consistency_proof: None, // Will be added in ANCHOR-FIX-3
             anchors,
         })
     }

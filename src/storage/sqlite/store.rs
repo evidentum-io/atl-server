@@ -283,4 +283,12 @@ impl Storage for SqliteStore {
     fn get_latest_anchored_size(&self) -> ServerResult<Option<u64>> {
         self.get_latest_anchored_size_impl()
     }
+
+    fn get_anchors_covering(
+        &self,
+        target_tree_size: u64,
+        limit: usize,
+    ) -> ServerResult<Vec<Anchor>> {
+        self.get_anchors_covering_impl(target_tree_size, limit)
+    }
 }

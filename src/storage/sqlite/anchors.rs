@@ -140,4 +140,32 @@ impl SqliteStore {
         )?;
         Ok(())
     }
+
+    /// Get anchors that cover a specific tree size
+    ///
+    /// Returns anchors where tree_size >= target_tree_size,
+    /// ordered by tree_size ascending (closest first).
+    /// Only returns 'confirmed' status anchors.
+    pub(crate) fn get_anchors_covering_impl(
+        &self,
+        target_tree_size: u64,
+        limit: usize,
+    ) -> ServerResult<Vec<Anchor>> {
+        let conn = self.get_conn()?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, tree_size, anchor_type, anchored_hash, timestamp, token, metadata
+             FROM anchors
+             WHERE tree_size >= ?1 AND status = 'confirmed'
+             ORDER BY tree_size ASC
+             LIMIT ?2",
+        )?;
+
+        let rows = stmt.query_map(
+            params![target_tree_size as i64, limit as i64],
+            row_to_anchor,
+        )?;
+
+        rows.map(|r| r.map_err(|e| e.into())).collect()
+    }
 }
