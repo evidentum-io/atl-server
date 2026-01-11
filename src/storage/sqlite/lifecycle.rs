@@ -56,10 +56,11 @@ pub struct AnchorWithId {
 }
 
 impl SqliteStore {
-    /// Get the currently active tree
-    pub fn get_active_tree(&self) -> ServerResult<Option<TreeRecord>> {
-        let conn = self.get_conn()?;
-
+    /// Private helper: queries active tree using existing connection
+    fn get_active_tree_impl(
+        &self,
+        conn: &rusqlite::Connection,
+    ) -> ServerResult<Option<TreeRecord>> {
         let result = conn.query_row(
             "SELECT id, origin_id, status, start_size, end_size, root_hash, created_at, first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id
              FROM trees WHERE status = 'active' LIMIT 1",
@@ -72,6 +73,12 @@ impl SqliteStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Get the currently active tree
+    pub fn get_active_tree(&self) -> ServerResult<Option<TreeRecord>> {
+        let conn = self.get_conn()?;
+        self.get_active_tree_impl(&conn)
     }
 
     /// Create a new active tree
@@ -243,7 +250,7 @@ impl SqliteStore {
         let conn = self.get_conn()?;
 
         // First check if active tree exists
-        let active_tree = match self.get_active_tree()? {
+        let active_tree = match self.get_active_tree_impl(&conn)? {
             Some(tree) => tree,
             None => return Ok(None),
         };
