@@ -310,4 +310,102 @@ impl SqliteStore {
             Ok(None)
         }
     }
+
+    /// Get trees that need OTS submission (pending_bitcoin but no anchor)
+    pub fn get_trees_without_bitcoin_anchor(&self) -> ServerResult<Vec<TreeRecord>> {
+        let conn = self.get_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, origin_id, status, start_size, end_size, root_hash, created_at,
+                    first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id
+             FROM trees
+             WHERE status = 'pending_bitcoin' AND bitcoin_anchor_id IS NULL
+             ORDER BY closed_at ASC",
+        )?;
+
+        let rows = stmt.query_map([], convert::row_to_tree)?;
+        rows.map(|r| r.map_err(|e| e.into())).collect()
+    }
+
+    /// Create OTS anchor and link to tree atomically
+    pub fn submit_ots_anchor_atomic(
+        &self,
+        tree_id: i64,
+        proof: &[u8],
+        calendar_url: &str,
+        root_hash: &[u8; 32],
+        tree_size: u64,
+    ) -> ServerResult<i64> {
+        let mut conn = self.get_conn()?;
+        let tx = conn.transaction()?;
+        let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+
+        // Insert anchor
+        tx.execute(
+            "INSERT INTO anchors (anchor_type, anchored_hash, tree_size, timestamp, token, metadata, status)
+             VALUES ('bitcoin_ots', ?1, ?2, ?3, ?4, ?5, 'pending')",
+            params![
+                root_hash.as_slice(),
+                tree_size as i64,
+                now,
+                proof,
+                serde_json::json!({"calendar_url": calendar_url}).to_string(),
+            ],
+        )?;
+        let anchor_id = tx.last_insert_rowid();
+
+        // Link to tree
+        tx.execute(
+            "UPDATE trees SET bitcoin_anchor_id = ?1 WHERE id = ?2",
+            params![anchor_id, tree_id],
+        )?;
+
+        tx.commit()?;
+        Ok(anchor_id)
+    }
+
+    /// Confirm OTS anchor and update tree status atomically
+    ///
+    /// All updates in ONE transaction
+    pub fn confirm_ots_anchor_atomic(
+        &self,
+        anchor_id: i64,
+        upgraded_proof: &[u8],
+        block_height: u64,
+        block_time: u64,
+    ) -> ServerResult<()> {
+        let mut conn = self.get_conn()?;
+        let tx = conn.transaction()?;
+
+        // Update anchor token
+        tx.execute(
+            "UPDATE anchors SET token = ?1 WHERE id = ?2",
+            params![upgraded_proof, anchor_id],
+        )?;
+
+        // Update anchor status
+        tx.execute(
+            "UPDATE anchors SET status = 'confirmed' WHERE id = ?1",
+            params![anchor_id],
+        )?;
+
+        // Update anchor metadata with Bitcoin block info
+        tx.execute(
+            "UPDATE anchors SET metadata = json_set(metadata,
+                '$.bitcoin_block_height', ?1,
+                '$.bitcoin_block_time', ?2,
+                '$.status', 'confirmed')
+             WHERE id = ?3",
+            params![block_height as i64, block_time as i64, anchor_id],
+        )?;
+
+        // Update tree status
+        tx.execute(
+            "UPDATE trees SET status = 'closed'
+             WHERE bitcoin_anchor_id = ?1 AND status = 'pending_bitcoin'",
+            params![anchor_id],
+        )?;
+
+        tx.commit()?;
+        Ok(())
+    }
 }
