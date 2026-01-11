@@ -7,7 +7,6 @@ mod batch;
 mod buffer;
 mod config;
 mod core;
-mod tsa;
 
 pub use buffer::SequencerHandle;
 
