@@ -260,11 +260,11 @@ impl SqliteStore {
             None => return Ok(None),
         };
 
-        // Get current tree size from checkpoints
+        // Get current tree size from entries table (active tree has no checkpoints yet)
         let current_tree_size: i64 = conn
             .query_row(
-                "SELECT COALESCE(MAX(tree_size), 0) FROM checkpoints",
-                [],
+                "SELECT COUNT(*) FROM entries WHERE tree_id = ?1",
+                params![active_tree.id],
                 |row| row.get(0),
             )
             .unwrap_or(0);
