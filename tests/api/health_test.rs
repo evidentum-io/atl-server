@@ -6,8 +6,8 @@ use serde_json::Value;
 
 /// Helper to create app in SEQUENCER mode
 async fn test_app_sequencer() -> axum::Router {
+    use atl_server::api::{create_router, AppState};
     use atl_server::SqliteStore;
-    use atl_server::api::{AppState, create_router};
 
     let storage = SqliteStore::in_memory().expect("Failed to create in-memory storage");
     storage.initialize().expect("Failed to initialize storage");

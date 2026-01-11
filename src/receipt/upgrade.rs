@@ -6,11 +6,11 @@ use uuid::Uuid;
 use crate::error::{ServerError, ServerResult};
 use crate::receipt::convert::convert_anchor_to_receipt;
 use crate::receipt::format::{current_timestamp_nanos, format_hash};
-use crate::receipt::generator::{CheckpointSigner, generate_receipt};
+use crate::receipt::generator::{generate_receipt, CheckpointSigner};
 use crate::receipt::options::ReceiptOptions;
-use crate::traits::Storage;
 use crate::traits::anchor::AnchorType;
 use crate::traits::storage::ConsistencyProof;
+use crate::traits::Storage;
 
 /// Result of upgrade_receipt operation
 #[allow(dead_code)]

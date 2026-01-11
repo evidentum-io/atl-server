@@ -6,7 +6,7 @@ use super::store::SqliteStore;
 use super::tree;
 use crate::error::{ServerError, ServerResult};
 use crate::traits::{AppendParams, AppendResult, Entry};
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{params, Connection, Transaction};
 use uuid::Uuid;
 
 impl SqliteStore {

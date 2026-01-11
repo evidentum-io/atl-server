@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use axum::{Json, extract::State, http::StatusCode};
+use axum::{extract::State, http::StatusCode, Json};
 
 use crate::api::dto::HealthResponse;
 use crate::api::state::AppState;

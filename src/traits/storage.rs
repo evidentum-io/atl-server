@@ -187,7 +187,7 @@ pub trait Storage: Send + Sync {
 
     /// Get consistency proof between two tree sizes
     fn get_consistency_proof(&self, from_size: u64, to_size: u64)
-    -> ServerResult<ConsistencyProof>;
+        -> ServerResult<ConsistencyProof>;
 
     // ========== Checkpoint Operations ==========
 

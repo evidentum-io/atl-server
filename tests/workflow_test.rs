@@ -1,8 +1,8 @@
 //! End-to-end workflow tests
 
 use atl_core::core::merkle;
-use atl_server::SqliteStore;
 use atl_server::traits::storage::{AppendParams, Storage};
+use atl_server::SqliteStore;
 use sha2::Digest;
 use std::sync::Arc;
 

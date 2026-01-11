@@ -2,8 +2,8 @@
 
 use crate::error::ServerError;
 use axum::{
-    Json,
     response::{IntoResponse, Response},
+    Json,
 };
 
 /// API error response body

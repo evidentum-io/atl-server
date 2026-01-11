@@ -1,8 +1,8 @@
 //! Privacy by Design verification tests
 
-use atl_server::SqliteStore;
 use atl_server::api::streaming::hash_json_payload;
 use atl_server::traits::storage::{AppendParams, Storage};
+use atl_server::SqliteStore;
 use sha2::Digest;
 
 fn create_test_storage() -> SqliteStore {

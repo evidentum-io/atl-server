@@ -3,7 +3,7 @@
 use super::store::SqliteStore;
 use crate::error::{ServerError, ServerResult, StorageError};
 use crate::traits::{ConsistencyProof, InclusionProof, TreeHead};
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{params, Connection, Transaction};
 
 impl SqliteStore {
     /// Get current tree head
@@ -105,7 +105,11 @@ pub fn update_tree_nodes(
 
     while idx > 0 || level == 0 {
         let parent_idx = idx / 2;
-        let sibling_idx = if idx % 2 == 0 { idx + 1 } else { idx - 1 };
+        let sibling_idx = if idx.is_multiple_of(2) {
+            idx + 1
+        } else {
+            idx - 1
+        };
 
         // Get current node
         let current_hash: Vec<u8> = tx.query_row(
@@ -124,7 +128,7 @@ pub fn update_tree_nodes(
             .ok();
 
         let parent_hash = if let Some(sibling) = sibling_hash {
-            let (left, right) = if idx % 2 == 0 {
+            let (left, right) = if idx.is_multiple_of(2) {
                 (current_hash, sibling)
             } else {
                 (sibling, current_hash)

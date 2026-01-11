@@ -1,7 +1,7 @@
 //! Test fixtures and app setup utilities
 
 use async_trait::async_trait;
-use atl_server::api::{AppState, create_router};
+use atl_server::api::{create_router, AppState};
 use atl_server::config::ServerMode;
 use atl_server::traits::dispatcher::SequencerClient;
 use atl_server::traits::storage::{AppendParams, Storage, TreeHead};

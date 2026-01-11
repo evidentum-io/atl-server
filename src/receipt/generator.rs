@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 
 use atl_core::{
-    Checkpoint, CheckpointJson, RECEIPT_SPEC_VERSION, Receipt, ReceiptEntry, ReceiptProof,
+    Checkpoint, CheckpointJson, Receipt, ReceiptEntry, ReceiptProof, RECEIPT_SPEC_VERSION,
 };
 use ed25519_dalek::{Signer, SigningKey};
 use uuid::Uuid;
