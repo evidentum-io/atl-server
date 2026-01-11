@@ -119,9 +119,10 @@ async fn run_standalone(args: Args) -> anyhow::Result<()> {
 
     // Initialize storage
     tracing::info!("Initializing SQLite storage at: {}", args.database);
-    let store = SqliteStore::new(&args.database)?;
+    let store: Arc<SqliteStore> = Arc::new(SqliteStore::new(&args.database)?);
     store.initialize()?;
-    let storage = Arc::new(store) as Arc<dyn Storage>;
+    let store_for_background = Arc::clone(&store);
+    let storage: Arc<dyn Storage> = store;
 
     // Load signing key
     let signing_key_path = args
@@ -139,6 +140,12 @@ async fn run_standalone(args: Args) -> anyhow::Result<()> {
         sequencer_instance.run().await;
     });
 
+    // Start background jobs
+    let background_config = background::BackgroundConfig::from_env();
+    let background_runner =
+        background::BackgroundJobRunner::new(store_for_background, background_config);
+    let background_handles = background_runner.start().await?;
+
     // Create dispatcher
     let dispatcher = Arc::new(traits::LocalDispatcher::new(
         sequencer_handle,
@@ -154,6 +161,13 @@ async fn run_standalone(args: Args) -> anyhow::Result<()> {
         Some(storage),
     )
     .await?;
+
+    // Shutdown background jobs first
+    tracing::info!("Shutting down background jobs...");
+    background_runner.shutdown();
+    for handle in background_handles {
+        let _ = handle.await;
+    }
 
     // Wait for sequencer
     tracing::info!("Waiting for sequencer to shut down...");
@@ -193,9 +207,10 @@ async fn run_sequencer(args: Args) -> anyhow::Result<()> {
 
     // Initialize storage
     tracing::info!("Initializing SQLite storage at: {}", args.database);
-    let store = SqliteStore::new(&args.database)?;
+    let store: Arc<SqliteStore> = Arc::new(SqliteStore::new(&args.database)?);
     store.initialize()?;
-    let storage = Arc::new(store) as Arc<dyn Storage>;
+    let store_for_background = Arc::clone(&store);
+    let storage: Arc<dyn Storage> = store;
 
     // Load signing key
     let signing_key_path = args
@@ -212,6 +227,12 @@ async fn run_sequencer(args: Args) -> anyhow::Result<()> {
     let sequencer_task = tokio::spawn(async move {
         sequencer_instance.run().await;
     });
+
+    // Start background jobs
+    let background_config = background::BackgroundConfig::from_env();
+    let background_runner =
+        background::BackgroundJobRunner::new(store_for_background, background_config);
+    let background_handles = background_runner.start().await?;
 
     // Create gRPC server
     let token = std::env::var("ATL_SEQUENCER_TOKEN").ok();
@@ -257,6 +278,13 @@ async fn run_sequencer(args: Args) -> anyhow::Result<()> {
     tokio::select! {
         r = grpc_handle => r??,
         r = http_handle => r??,
+    }
+
+    // Shutdown background jobs first
+    tracing::info!("Shutting down background jobs...");
+    background_runner.shutdown();
+    for handle in background_handles {
+        let _ = handle.await;
     }
 
     // Wait for sequencer
