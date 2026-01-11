@@ -258,39 +258,51 @@ impl SequencerClient for LocalDispatcher {
     async fn get_receipt(&self, request: GetReceiptRequest) -> ServerResult<ReceiptResponse> {
         let entry_id = request.entry_id;
 
-        // Get entry to find its leaf_index
+        // 1. Get entry to find its leaf_index
         let entry = self.storage.get_entry(&entry_id)?;
 
-        // Entry's tree_size = leaf_index + 1
-        let entry_tree_size = entry.leaf_index.ok_or_else(|| {
+        let leaf_index = entry.leaf_index.ok_or_else(|| {
             crate::error::ServerError::Internal(format!("Entry {} has no leaf_index", entry_id))
-        })? + 1;
+        })?;
 
-        // Get inclusion proof for entry
-        let proof = self.storage.get_inclusion_proof(&entry_id, None)?;
-
-        // Get current tree head (for checkpoint)
-        let tree_head = self.storage.get_tree_head()?;
-
-        // Sign checkpoint at current tree size
-        let checkpoint = self.signer.sign_checkpoint_struct(
-            tree_head.origin,
-            tree_head.tree_size,
-            &tree_head.root_hash,
-        );
-
-        // Get anchors that COVER this entry (tree_size >= entry_tree_size)
+        // 2. Get covering anchors (from ANCHOR-FIX-2)
+        let entry_tree_size = leaf_index + 1;
         let anchors = if request.include_anchors {
             self.storage.get_anchors_covering(entry_tree_size, 10)?
         } else {
             vec![]
         };
 
+        // 3. Determine target tree_size for receipt
+        //    - If anchors exist: use closest anchor's tree_size
+        //    - If no anchors: use current tree_size (fallback)
+        let (target_tree_size, target_root_hash) = if let Some(anchor) = anchors.first() {
+            // Build receipt at anchor's tree_size
+            let root = self.storage.get_root_at_size(anchor.tree_size)?;
+            (anchor.tree_size, root)
+        } else {
+            // No anchors - use current tree state
+            let tree_head = self.storage.get_tree_head()?;
+            (tree_head.tree_size, tree_head.root_hash)
+        };
+
+        // 4. Generate inclusion proof at target tree_size
+        let proof = self
+            .storage
+            .get_inclusion_proof(&entry_id, Some(target_tree_size))?;
+
+        // 5. Sign checkpoint at target tree_size with target root
+        let origin = self.storage.origin_id();
+        let checkpoint =
+            self.signer
+                .sign_checkpoint_struct(origin, target_tree_size, &target_root_hash);
+
+        // 6. No consistency proof needed (receipt tree_size == anchor tree_size)
         Ok(ReceiptResponse {
             entry,
             inclusion_proof: proof.path,
             checkpoint,
-            consistency_proof: None, // Will be added in ANCHOR-FIX-3
+            consistency_proof: None,
             anchors,
         })
     }

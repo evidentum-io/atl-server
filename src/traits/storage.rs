@@ -231,4 +231,17 @@ pub trait Storage: Send + Sync {
         target_tree_size: u64,
         limit: usize,
     ) -> ServerResult<Vec<Anchor>>;
+
+    /// Get root hash at a specific tree size
+    ///
+    /// Computes the Merkle root for the tree at the given size.
+    /// Used for building receipts against historical tree states.
+    ///
+    /// # Arguments
+    /// * `tree_size` - The tree size to compute root for
+    ///
+    /// # Returns
+    /// * Root hash at the specified tree size
+    /// * Error if tree_size > current tree size
+    fn get_root_at_size(&self, tree_size: u64) -> ServerResult<[u8; 32]>;
 }

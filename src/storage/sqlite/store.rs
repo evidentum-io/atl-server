@@ -291,4 +291,8 @@ impl Storage for SqliteStore {
     ) -> ServerResult<Vec<Anchor>> {
         self.get_anchors_covering_impl(target_tree_size, limit)
     }
+
+    fn get_root_at_size(&self, tree_size: u64) -> ServerResult<[u8; 32]> {
+        self.get_root_at_size_impl(tree_size)
+    }
 }
