@@ -93,4 +93,9 @@ impl RoundRobinSelector {
     pub fn update_last_index(&self, index: usize) {
         self.last_index.store(index, Ordering::Relaxed);
     }
+
+    /// Get current last_index value
+    pub fn last_index(&self) -> usize {
+        self.last_index.load(Ordering::Relaxed)
+    }
 }

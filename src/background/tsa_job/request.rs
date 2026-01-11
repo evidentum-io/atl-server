@@ -93,13 +93,17 @@ pub async fn try_tsa_timestamp_active(
         return Err(ServerError::Internal("No TSA URLs configured".into()));
     }
 
+    // Start from last_index + 1 for true round-robin
+    let start_index = (selector.last_index() + 1) % num_servers;
+
     let client = AsyncRfc3161Client::new()
         .map_err(|e| ServerError::Internal(format!("Failed to create TSA client: {}", e)))?;
 
     let mut last_error: Option<ServerError> = None;
 
     for i in 0..num_servers {
-        let tsa_url = selector.get_url(i);
+        let current_index = (start_index + i) % num_servers;
+        let tsa_url = selector.get_url(current_index);
 
         tracing::debug!(
             tree_id = tree.id,
@@ -135,7 +139,7 @@ pub async fn try_tsa_timestamp_active(
                 let anchor_id =
                     storage.store_anchor_returning_id(tree_size, &anchor, "confirmed")?;
 
-                selector.update_last_index(i);
+                selector.update_last_index(current_index);
                 return Ok(anchor_id);
             }
             Err(e) => {
