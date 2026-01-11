@@ -23,3 +23,7 @@ pub use async_client::UpgradeResult;
 #[doc(hidden)]
 #[allow(unused_imports)]
 pub use client::OpenTimestampsClient;
+
+// Test utilities (available in tests)
+#[cfg(test)]
+pub mod mock;
