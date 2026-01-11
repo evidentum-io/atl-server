@@ -13,7 +13,7 @@
 #![allow(dead_code)]
 
 pub mod config;
-pub mod ots_poll_job;
+pub mod ots_job;
 pub mod tree_closer;
 pub mod tsa_job;
 
@@ -25,7 +25,8 @@ use tokio::sync::broadcast;
 use crate::storage::SqliteStore;
 
 pub use config::BackgroundConfig;
-pub use ots_poll_job::OtsPollJob;
+#[cfg(feature = "ots")]
+pub use ots_job::OtsJob;
 pub use tree_closer::TreeCloser;
 pub use tsa_job::TsaAnchoringJob;
 
@@ -35,6 +36,8 @@ pub use tsa_job::TsaAnchoringJob;
 pub struct BackgroundJobRunner {
     #[cfg(feature = "sqlite")]
     storage: Arc<SqliteStore>,
+    #[cfg(feature = "ots")]
+    ots_client: Arc<dyn crate::anchoring::ots::OtsClient>,
     config: BackgroundConfig,
     shutdown_tx: broadcast::Sender<()>,
 }
@@ -44,8 +47,25 @@ impl BackgroundJobRunner {
     pub fn new(storage: Arc<SqliteStore>, config: BackgroundConfig) -> Self {
         let (shutdown_tx, _) = broadcast::channel(1);
 
+        #[cfg(feature = "ots")]
+        let ots_client: Arc<dyn crate::anchoring::ots::OtsClient> = {
+            let ots_config = crate::anchoring::ots::OtsConfig::from_env();
+            tracing::info!(
+                calendar_urls = ?ots_config.calendar_urls,
+                timeout_secs = ots_config.timeout_secs,
+                min_confirmations = ots_config.min_confirmations,
+                "OTS client configuration loaded"
+            );
+            Arc::new(
+                crate::anchoring::ots::AsyncOtsClient::with_config(ots_config)
+                    .expect("failed to create OTS client"),
+            )
+        };
+
         Self {
             storage,
+            #[cfg(feature = "ots")]
+            ots_client,
             config,
             shutdown_tx,
         }
@@ -95,17 +115,21 @@ impl BackgroundJobRunner {
             tracing::warn!("TSA Job disabled: no ATL_TSA_URLS configured");
         }
 
-        // 3. OTS Poll Job (checks for Bitcoin confirmation)
+        // 3. OTS Job (submit + poll)
+        #[cfg(feature = "ots")]
         {
-            let poll_job =
-                OtsPollJob::new(Arc::clone(&self.storage), self.config.ots_poll_job.clone());
+            let ots_job = OtsJob::new(
+                Arc::clone(&self.storage),
+                Arc::clone(&self.ots_client),
+                self.config.ots_job.clone(),
+            );
             let shutdown_rx = self.shutdown_tx.subscribe();
             handles.push(tokio::spawn(async move {
-                poll_job.run(shutdown_rx).await;
+                ots_job.run(shutdown_rx).await;
             }));
             tracing::info!(
-                interval_secs = self.config.ots_poll_job.interval_secs,
-                "OTS Poll Job started"
+                interval_secs = self.config.ots_job.interval_secs,
+                "OTS Job started (submit + poll)"
             );
         }
 

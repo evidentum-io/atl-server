@@ -46,7 +46,7 @@ impl OpenTimestampsClient {
     }
 
     /// Try to get timestamp with fallback to multiple calendars
-    fn timestamp_with_fallback(
+    pub fn timestamp_with_fallback(
         &self,
         hash: &[u8; 32],
     ) -> Result<(String, DetachedTimestampFile), AnchorError> {

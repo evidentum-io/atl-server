@@ -1,6 +1,6 @@
 // File: src/background/config.rs
 
-use super::ots_poll_job::OtsPollJobConfig;
+use super::ots_job::OtsJobConfig;
 use super::tree_closer::TreeCloserConfig;
 use super::tsa_job::TsaJobConfig;
 
@@ -12,7 +12,7 @@ pub struct BackgroundConfig {
 
     pub tree_closer: TreeCloserConfig,
     pub tsa_job: TsaJobConfig,
-    pub ots_poll_job: OtsPollJobConfig,
+    pub ots_job: OtsJobConfig,
 }
 
 impl BackgroundConfig {
@@ -24,7 +24,7 @@ impl BackgroundConfig {
                 .unwrap_or(false),
             tree_closer: TreeCloserConfig::from_env(),
             tsa_job: TsaJobConfig::from_env(),
-            ots_poll_job: OtsPollJobConfig::from_env(),
+            ots_job: OtsJobConfig::from_env(),
         }
     }
 }

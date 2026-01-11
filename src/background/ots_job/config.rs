@@ -1,8 +1,8 @@
 // File: src/background/ots_poll_job/config.rs
 
-/// OTS poll job configuration
+/// OTS job configuration
 #[derive(Debug, Clone)]
-pub struct OtsPollJobConfig {
+pub struct OtsJobConfig {
     /// How often to poll for confirmations (seconds)
     pub interval_secs: u64,
 
@@ -10,7 +10,7 @@ pub struct OtsPollJobConfig {
     pub max_batch_size: usize,
 }
 
-impl Default for OtsPollJobConfig {
+impl Default for OtsJobConfig {
     fn default() -> Self {
         Self {
             interval_secs: 600,  // Poll every 10 minutes
@@ -19,7 +19,7 @@ impl Default for OtsPollJobConfig {
     }
 }
 
-impl OtsPollJobConfig {
+impl OtsJobConfig {
     /// Create config from environment variables
     pub fn from_env() -> Self {
         Self {

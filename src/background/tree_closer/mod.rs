@@ -2,7 +2,7 @@
 
 //! Tree closer job
 //!
-//! Closes trees after their lifetime expires and submits them to OTS.
+//! Closes trees after their lifetime expires. OTS anchoring is handled by ots_job separately.
 
 pub mod config;
 pub mod job;
