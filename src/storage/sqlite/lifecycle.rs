@@ -240,9 +240,14 @@ impl SqliteStore {
 
     /// Check if active tree needs TSA anchoring
     ///
-    /// Returns the active tree if it exists AND either:
-    /// - Has no TSA anchors at all, OR
-    /// - Last TSA anchor was created more than `interval_secs` ago
+    /// Returns the active tree if it exists AND:
+    /// - Tree has grown (current size > last anchored size), AND
+    /// - Enough time has passed since last anchor (elapsed >= interval_secs)
+    ///
+    /// Special cases:
+    /// - No anchors at all → needs anchor (if tree not empty)
+    /// - Tree empty (size 0) → no anchor needed
+    /// - Tree hasn't grown since last anchor → no anchor needed
     pub fn get_active_tree_needing_tsa(
         &self,
         interval_secs: u64,
@@ -255,24 +260,39 @@ impl SqliteStore {
             None => return Ok(None),
         };
 
-        // Check last TSA anchor time for this tree's entries
-        // We query anchors table, not trees.tsa_anchor_id (which is only for final anchor)
-        let last_anchor_time: Option<i64> = conn
+        // Get current tree size from checkpoints
+        let current_tree_size: i64 = conn
             .query_row(
-                "SELECT MAX(created_at) FROM anchors WHERE anchor_type = 'rfc3161'",
+                "SELECT COALESCE(MAX(tree_size), 0) FROM checkpoints",
                 [],
                 |row| row.get(0),
             )
-            .ok()
-            .flatten();
+            .unwrap_or(0);
+
+        // If tree is empty, no anchor needed
+        if current_tree_size == 0 {
+            return Ok(None);
+        }
+
+        // Get last anchor info (tree_size and time)
+        let last_anchor: Option<(i64, i64)> = conn
+            .query_row(
+                "SELECT tree_size, created_at FROM anchors WHERE anchor_type = 'rfc3161' ORDER BY tree_size DESC, created_at DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .ok();
 
         let now = chrono::Utc::now().timestamp();
-        let threshold = now - (interval_secs as i64);
 
-        let needs_anchor = match last_anchor_time {
-            // Convert nanoseconds to seconds for comparison
-            Some(ts) => (ts / 1_000_000_000) < threshold,
-            None => true, // No anchors at all
+        let needs_anchor = match last_anchor {
+            None => true,                                                    // No anchors at all
+            Some((last_size, _)) if current_tree_size <= last_size => false, // Tree hasn't grown
+            Some((_, last_time)) => {
+                // Tree has grown, check if enough time passed
+                let elapsed = now - (last_time / 1_000_000_000);
+                elapsed >= interval_secs as i64
+            }
         };
 
         if needs_anchor {
