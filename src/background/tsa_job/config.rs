@@ -14,15 +14,20 @@ pub struct TsaJobConfig {
 
     /// Max trees to process per run
     pub max_batch_size: usize,
+
+    /// How often to anchor active tree (seconds)
+    /// Default: 60 (anchor every minute while tree is active)
+    pub active_tree_interval_secs: u64,
 }
 
 impl Default for TsaJobConfig {
     fn default() -> Self {
         Self {
             tsa_urls: vec!["https://freetsa.org/tsr".to_string()],
-            timeout_ms: 5000,    // 5 second timeout
-            interval_secs: 60,   // Check every minute
-            max_batch_size: 100, // Process up to 100 trees per run
+            timeout_ms: 5000,              // 5 second timeout
+            interval_secs: 60,             // Check every minute
+            max_batch_size: 100,           // Process up to 100 trees per run
+            active_tree_interval_secs: 60, // Anchor active tree every minute
         }
     }
 }
@@ -48,6 +53,10 @@ impl TsaJobConfig {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(100),
+            active_tree_interval_secs: std::env::var("ATL_TSA_ACTIVE_INTERVAL_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(60),
         }
     }
 }

@@ -9,7 +9,7 @@ use super::round_robin::RoundRobinSelector;
 use crate::error::ServerResult;
 
 #[cfg(feature = "sqlite")]
-use crate::storage::SqliteStore;
+use crate::storage::{SqliteStore, TreeRecord};
 
 /// TSA anchoring background job
 ///
@@ -62,6 +62,30 @@ impl TsaAnchoringJob {
     /// Process trees that don't have TSA anchors yet
     #[cfg(feature = "sqlite")]
     async fn process_pending_trees(&self) -> ServerResult<()> {
+        // PART 1: Anchor active tree if needed (periodic TSA)
+        if let Some(active_tree) = self
+            .storage
+            .get_active_tree_needing_tsa(self.config.active_tree_interval_secs)?
+        {
+            match self.anchor_active_tree(&active_tree).await {
+                Ok(anchor_id) => {
+                    tracing::info!(
+                        tree_id = active_tree.id,
+                        anchor_id = anchor_id,
+                        "Periodic TSA anchor created for active tree"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        tree_id = active_tree.id,
+                        error = %e,
+                        "Periodic TSA anchoring failed for active tree, will retry"
+                    );
+                }
+            }
+        }
+
+        // PART 2: Anchor closed trees that don't have final TSA anchor
         let pending_trees = self.storage.get_trees_pending_tsa()?;
 
         if pending_trees.is_empty() {
@@ -75,7 +99,7 @@ impl TsaAnchoringJob {
 
         tracing::info!(
             count = trees_to_process.len(),
-            "Processing trees for TSA anchoring"
+            "Processing closed trees for final TSA anchoring"
         );
 
         for tree in trees_to_process {
@@ -88,20 +112,31 @@ impl TsaAnchoringJob {
                     tracing::info!(
                         tree_id = tree.id,
                         anchor_id = anchor_id,
-                        "TSA anchor created for tree"
+                        "Final TSA anchor created for closed tree"
                     );
                 }
                 Err(e) => {
-                    // All TSA servers failed - leave pending, retry on next tick
                     tracing::warn!(
                         tree_id = tree.id,
                         error = %e,
-                        "TSA anchoring failed for tree (all servers), will retry next tick"
+                        "TSA anchoring failed for tree (all servers), will retry"
                     );
                 }
             }
         }
 
         Ok(())
+    }
+
+    /// Anchor active tree using current tree head
+    #[cfg(feature = "sqlite")]
+    async fn anchor_active_tree(&self, tree: &TreeRecord) -> ServerResult<i64> {
+        super::request::try_tsa_timestamp_active(
+            tree,
+            &self.selector,
+            &self.storage,
+            self.config.timeout_ms,
+        )
+        .await
     }
 }

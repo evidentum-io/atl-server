@@ -216,4 +216,32 @@ pub trait Storage: Send + Sync {
 
     /// Get the most recent anchored tree size
     fn get_latest_anchored_size(&self) -> ServerResult<Option<u64>>;
+
+    /// Get anchors that cover a specific tree size
+    ///
+    /// Returns anchors where anchor.tree_size >= target_tree_size,
+    /// ordered by tree_size ascending (closest first).
+    /// Only returns 'confirmed' status anchors.
+    ///
+    /// # Arguments
+    /// * `target_tree_size` - The tree_size to find covering anchors for
+    /// * `limit` - Maximum number of anchors to return
+    fn get_anchors_covering(
+        &self,
+        target_tree_size: u64,
+        limit: usize,
+    ) -> ServerResult<Vec<Anchor>>;
+
+    /// Get root hash at a specific tree size
+    ///
+    /// Computes the Merkle root for the tree at the given size.
+    /// Used for building receipts against historical tree states.
+    ///
+    /// # Arguments
+    /// * `tree_size` - The tree size to compute root for
+    ///
+    /// # Returns
+    /// * Root hash at the specified tree size
+    /// * Error if tree_size > current tree size
+    fn get_root_at_size(&self, tree_size: u64) -> ServerResult<[u8; 32]>;
 }

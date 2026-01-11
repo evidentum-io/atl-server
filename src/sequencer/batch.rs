@@ -1,4 +1,4 @@
-//! Batch flushing logic with retry and TSA integration
+//! Batch flushing logic with retry
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,7 +10,11 @@ use crate::traits::{AppendResult, Storage};
 use super::buffer::AppendRequest;
 use super::config::SequencerConfig;
 
-/// Flush accumulated batch to storage with TSA timestamping
+/// Flush accumulated batch to storage
+///
+/// Note: TSA anchoring is handled by background jobs (BACKGROUND-1).
+/// POST response returns anchors: [] which is correct.
+/// GET response returns anchors from database (populated by background job).
 pub async fn flush_batch(
     batch: &mut Vec<AppendRequest>,
     storage: &Arc<dyn Storage>,
@@ -33,56 +37,14 @@ pub async fn flush_batch(
     let result = write_batch_with_retry(storage, &params, config).await;
 
     match result {
-        Ok(mut results) => {
-            // Get TSA timestamp on the batch root hash (Tier-1 evidence)
-            if !config.tsa_urls.is_empty() {
-                let tsa_result = super::tsa::get_tsa_timestamp(&results, config).await;
-
-                match tsa_result {
-                    Ok(tsa_anchor) => {
-                        // Attach TSA anchor to all results in batch
-                        for result in results.iter_mut() {
-                            result.tsa_anchor = Some(tsa_anchor.clone());
-                        }
-                        debug!(
-                            batch_size,
-                            tsa_url = %tsa_anchor.tsa_url,
-                            "Batch committed with TSA"
-                        );
-                    }
-                    Err(e) => {
-                        // TSA failed - behavior depends on ATL_STRICT_TSA
-                        if config.tsa_strict {
-                            // Strict mode: fail the entire batch
-                            error!(batch_size, error = %e, "TSA failed in strict mode");
-                            for tx in response_txs {
-                                let _ = tx.send(Err(ServerError::ServiceUnavailable(format!(
-                                    "TSA unavailable: {}",
-                                    e
-                                ))));
-                            }
-                            return;
-                        } else {
-                            // Non-strict mode: proceed without TSA
-                            warn!(
-                                batch_size,
-                                error = %e,
-                                "TSA failed, proceeding without timestamp"
-                            );
-                        }
-                    }
-                }
-            }
-
+        Ok(results) => {
             // Send individual results back to handlers
             for (result, tx) in results.into_iter().zip(response_txs) {
-                // Ignore send error (client may have disconnected)
                 let _ = tx.send(Ok(result));
             }
             debug!(batch_size, "Batch committed successfully");
         }
         Err(e) => {
-            // All requests in batch get the same error
             error!(batch_size, error = %e, "Batch failed after retries");
             let error_msg = e.to_string();
             for tx in response_txs {
@@ -102,7 +64,6 @@ async fn write_batch_with_retry(
     let mut delay_ms = config.retry_base_ms;
 
     loop {
-        // Use spawn_blocking for sync SQLite operation
         let storage = Arc::clone(storage);
         let params_clone = params.to_vec();
 
@@ -127,7 +88,7 @@ async fn write_batch_with_retry(
                 );
 
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                delay_ms *= 2; // Exponential backoff
+                delay_ms *= 2;
             }
         }
     }

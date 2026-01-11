@@ -56,10 +56,11 @@ pub struct AnchorWithId {
 }
 
 impl SqliteStore {
-    /// Get the currently active tree
-    pub fn get_active_tree(&self) -> ServerResult<Option<TreeRecord>> {
-        let conn = self.get_conn()?;
-
+    /// Private helper: queries active tree using existing connection
+    fn get_active_tree_impl(
+        &self,
+        conn: &rusqlite::Connection,
+    ) -> ServerResult<Option<TreeRecord>> {
         let result = conn.query_row(
             "SELECT id, origin_id, status, start_size, end_size, root_hash, created_at, first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id
              FROM trees WHERE status = 'active' LIMIT 1",
@@ -72,6 +73,12 @@ impl SqliteStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Get the currently active tree
+    pub fn get_active_tree(&self) -> ServerResult<Option<TreeRecord>> {
+        let conn = self.get_conn()?;
+        self.get_active_tree_impl(&conn)
     }
 
     /// Create a new active tree
@@ -229,5 +236,72 @@ impl SqliteStore {
         )?;
 
         Ok(())
+    }
+
+    /// Check if active tree needs TSA anchoring
+    ///
+    /// Returns the active tree if it exists AND:
+    /// - Tree has grown (current size > last anchored size), AND
+    /// - Enough time has passed since last anchor (elapsed >= interval_secs)
+    ///
+    /// Special cases:
+    /// - No anchors at all → needs anchor (if tree not empty)
+    /// - Tree empty (size 0) → no anchor needed
+    /// - Tree hasn't grown since last anchor → no anchor needed
+    pub fn get_active_tree_needing_tsa(
+        &self,
+        interval_secs: u64,
+    ) -> ServerResult<Option<TreeRecord>> {
+        let conn = self.get_conn()?;
+
+        // First check if active tree exists
+        let active_tree = match self.get_active_tree_impl(&conn)? {
+            Some(tree) => tree,
+            None => return Ok(None),
+        };
+
+        // Get local entry count for this tree (active tree has no checkpoints yet)
+        let local_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entries WHERE tree_id = ?1",
+                params![active_tree.id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
+        // If no new entries in this tree, no anchor needed
+        if local_count == 0 {
+            return Ok(None);
+        }
+
+        // Calculate GLOBAL tree size (start_size + local entries)
+        let current_tree_size = active_tree.start_size as i64 + local_count;
+
+        // Get last anchor info (tree_size and time)
+        let last_anchor: Option<(i64, i64)> = conn
+            .query_row(
+                "SELECT tree_size, created_at FROM anchors WHERE anchor_type = 'rfc3161' ORDER BY tree_size DESC, created_at DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .ok();
+
+        let now = chrono::Utc::now().timestamp();
+
+        let needs_anchor = match last_anchor {
+            None => true,                                                    // No anchors at all
+            Some((last_size, _)) if current_tree_size <= last_size => false, // Tree hasn't grown
+            Some((_, last_time)) => {
+                // Tree has grown, check if enough time passed
+                let elapsed = now - (last_time / 1_000_000_000);
+                elapsed >= interval_secs as i64
+            }
+        };
+
+        if needs_anchor {
+            Ok(Some(active_tree))
+        } else {
+            Ok(None)
+        }
     }
 }

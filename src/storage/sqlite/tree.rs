@@ -328,3 +328,40 @@ fn get_current_tree_size(conn: &Connection) -> ServerResult<u64> {
         Err(e) => Err(e.into()),
     }
 }
+
+impl SqliteStore {
+    /// Compute root hash at a specific tree size
+    pub(crate) fn get_root_at_size_impl(&self, tree_size: u64) -> ServerResult<[u8; 32]> {
+        let conn = self.get_conn()?;
+
+        // Validate tree_size doesn't exceed current
+        let current_size = get_current_tree_size(&conn)?;
+        if tree_size > current_size {
+            return Err(ServerError::InvalidArgument(format!(
+                "tree_size {} exceeds current size {}",
+                tree_size, current_size
+            )));
+        }
+
+        if tree_size == 0 {
+            return Ok([0u8; 32]);
+        }
+
+        // Closure to fetch leaf nodes from storage
+        let get_node = |level: u32, idx: u64| -> Option<[u8; 32]> {
+            conn.query_row(
+                "SELECT hash FROM tree_nodes WHERE level = ?1 AND idx = ?2",
+                params![level as i64, idx as i64],
+                |row| {
+                    let bytes: Vec<u8> = row.get(0)?;
+                    bytes.try_into().ok().ok_or(rusqlite::Error::InvalidQuery)
+                },
+            )
+            .ok()
+        };
+
+        // Use atl_core's function: offset=0 means full tree from beginning
+        atl_core::core::compute_subtree_root(0, tree_size, &get_node)
+            .map_err(|e| ServerError::Internal(format!("Failed to compute root: {}", e)))
+    }
+}

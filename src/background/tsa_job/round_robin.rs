@@ -78,4 +78,24 @@ impl RoundRobinSelector {
             num_servers, tree.id
         )))
     }
+
+    /// Get number of configured URLs
+    pub fn urls_count(&self) -> usize {
+        self.urls.len()
+    }
+
+    /// Get URL by index
+    pub fn get_url(&self, index: usize) -> &str {
+        &self.urls[index % self.urls.len()]
+    }
+
+    /// Update last used index
+    pub fn update_last_index(&self, index: usize) {
+        self.last_index.store(index, Ordering::Relaxed);
+    }
+
+    /// Get current last_index value
+    pub fn last_index(&self) -> usize {
+        self.last_index.load(Ordering::Relaxed)
+    }
 }
