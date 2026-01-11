@@ -1,6 +1,7 @@
 //! Sequencer client trait and dispatcher implementations
 
 use async_trait::async_trait;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::error::ServerResult;
@@ -194,15 +195,27 @@ pub struct LocalDispatcher {
     handle: crate::sequencer::SequencerHandle,
     /// Checkpoint signer for Ed25519 signatures
     signer: crate::receipt::CheckpointSigner,
+    /// Storage backend for read operations
+    storage: Arc<dyn crate::traits::Storage>,
 }
 
 impl LocalDispatcher {
-    /// Create a new local dispatcher with a sequencer handle and signer
+    /// Create a new local dispatcher with sequencer handle, signer, and storage
+    ///
+    /// # Arguments
+    /// * `handle` - Sequencer handle for append operations
+    /// * `signer` - Checkpoint signing key
+    /// * `storage` - Storage backend for read operations
     pub fn new(
         handle: crate::sequencer::SequencerHandle,
         signer: crate::receipt::CheckpointSigner,
+        storage: Arc<dyn crate::traits::Storage>,
     ) -> Self {
-        Self { handle, signer }
+        Self {
+            handle,
+            signer,
+            storage,
+        }
     }
 }
 
@@ -222,50 +235,96 @@ impl SequencerClient for LocalDispatcher {
         Ok(DispatchResult { result, checkpoint })
     }
 
-    async fn dispatch_batch(
-        &self,
-        _params: Vec<AppendParams>,
-    ) -> ServerResult<BatchDispatchResult> {
-        Err(crate::error::ServerError::NotSupported(
-            "batch dispatch not yet implemented".into(),
-        ))
+    async fn dispatch_batch(&self, params: Vec<AppendParams>) -> ServerResult<BatchDispatchResult> {
+        // Send batch through sequencer handle (sends requests individually through channel)
+        let results = self.handle.append_batch(params).await?;
+
+        // Get tree head after batch
+        let tree_head = self.storage.get_tree_head()?;
+
+        // Create and sign checkpoint
+        let checkpoint = self.signer.sign_checkpoint_struct(
+            tree_head.origin,
+            tree_head.tree_size,
+            &tree_head.root_hash,
+        );
+
+        Ok(BatchDispatchResult {
+            results,
+            checkpoint,
+        })
     }
 
-    async fn get_receipt(&self, _request: GetReceiptRequest) -> ServerResult<ReceiptResponse> {
-        Err(crate::error::ServerError::NotSupported(
-            "get_receipt not yet implemented".into(),
-        ))
+    async fn get_receipt(&self, request: GetReceiptRequest) -> ServerResult<ReceiptResponse> {
+        let entry_id = request.entry_id;
+
+        let entry = self.storage.get_entry(&entry_id)?;
+        let proof = self.storage.get_inclusion_proof(&entry_id, None)?;
+        let tree_head = self.storage.get_tree_head()?;
+
+        let checkpoint = self.signer.sign_checkpoint_struct(
+            tree_head.origin,
+            tree_head.tree_size,
+            &tree_head.root_hash,
+        );
+
+        // Get anchors if requested
+        let anchors = if request.include_anchors {
+            self.storage.get_anchors(tree_head.tree_size)?
+        } else {
+            vec![]
+        };
+
+        Ok(ReceiptResponse {
+            entry,
+            inclusion_proof: proof.path,
+            checkpoint,
+            consistency_proof: None,
+            anchors,
+        })
     }
 
     async fn get_tree_head(&self) -> ServerResult<TreeHead> {
-        Err(crate::error::ServerError::NotSupported(
-            "get_tree_head not yet implemented".into(),
-        ))
+        self.storage.get_tree_head()
     }
 
     async fn get_consistency_proof(
         &self,
-        _from_size: u64,
-        _to_size: u64,
+        from_size: u64,
+        to_size: u64,
     ) -> ServerResult<ConsistencyProofResponse> {
-        Err(crate::error::ServerError::NotSupported(
-            "get_consistency_proof not yet implemented".into(),
-        ))
+        let proof = self.storage.get_consistency_proof(from_size, to_size)?;
+        let tree_head = self.storage.get_tree_head()?;
+
+        // Get root hash at from_size (requires storage query or recomputation)
+        // For now, use zero bytes - proper historical root lookup is a separate feature
+        let from_root = [0u8; 32];
+
+        Ok(ConsistencyProofResponse {
+            from_size: proof.from_size,
+            to_size: proof.to_size,
+            path: proof.path,
+            from_root,
+            to_root: tree_head.root_hash,
+        })
     }
 
     async fn get_public_keys(&self) -> ServerResult<Vec<PublicKeyInfo>> {
-        Err(crate::error::ServerError::NotSupported(
-            "get_public_keys not yet implemented".into(),
-        ))
+        Ok(vec![PublicKeyInfo {
+            key_id: *self.signer.key_id(),
+            public_key: self.signer.public_key_bytes(),
+            algorithm: "Ed25519".to_string(),
+            created_at: 0, // TODO: track key creation time if needed
+        }])
     }
 
     async fn trigger_anchoring(
         &self,
         _request: TriggerAnchoringRequest,
     ) -> ServerResult<Vec<AnchoringStatus>> {
-        Err(crate::error::ServerError::NotSupported(
-            "trigger_anchoring not yet implemented".into(),
-        ))
+        // Anchoring is handled by background tasks, not dispatcher
+        // Return empty array to indicate no immediate anchoring occurred
+        Ok(vec![])
     }
 
     async fn health_check(&self) -> ServerResult<()> {

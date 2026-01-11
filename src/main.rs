@@ -140,8 +140,11 @@ async fn run_standalone(args: Args) -> anyhow::Result<()> {
     });
 
     // Create dispatcher
-    let dispatcher = Arc::new(traits::LocalDispatcher::new(sequencer_handle, signer))
-        as Arc<dyn traits::SequencerClient>;
+    let dispatcher = Arc::new(traits::LocalDispatcher::new(
+        sequencer_handle,
+        signer,
+        storage.clone(),
+    )) as Arc<dyn traits::SequencerClient>;
 
     // Start HTTP server
     start_http_server(
@@ -236,6 +239,7 @@ async fn run_sequencer(args: Args) -> anyhow::Result<()> {
     let dispatcher = Arc::new(traits::LocalDispatcher::new(
         sequencer_handle,
         signer.as_ref().clone(),
+        storage.clone(),
     )) as Arc<dyn traits::SequencerClient>;
 
     // Start HTTP admin server
