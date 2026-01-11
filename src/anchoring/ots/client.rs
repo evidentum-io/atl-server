@@ -39,10 +39,11 @@ impl OpenTimestampsClient {
         hash: &[u8; 32],
         calendar_url: &str,
     ) -> Result<DetachedTimestampFile, AnchorError> {
-        let proof_bytes = self.calendar.submit(calendar_url, hash)?;
+        let response_bytes = self.calendar.submit(calendar_url, hash)?;
 
-        DetachedTimestampFile::from_bytes(&proof_bytes)
-            .map_err(|e| AnchorError::InvalidResponse(format!("failed to parse OTS proof: {}", e)))
+        DetachedTimestampFile::from_calendar_response(*hash, &response_bytes).map_err(|e| {
+            AnchorError::InvalidResponse(format!("failed to parse calendar response: {}", e))
+        })
     }
 
     /// Try to get timestamp with fallback to multiple calendars
