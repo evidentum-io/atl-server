@@ -6,7 +6,7 @@ use std::time::Duration;
 /// Calendar client for HTTP communication with OTS servers
 pub struct CalendarClient {
     /// HTTP client
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
 
     /// Timeout
     timeout: Duration,
@@ -15,7 +15,7 @@ pub struct CalendarClient {
 impl CalendarClient {
     /// Create a new calendar client
     pub fn new(timeout_secs: u64) -> Result<Self, AnchorError> {
-        let client = reqwest::blocking::Client::builder()
+        let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(timeout_secs))
             .build()
             .map_err(|e| AnchorError::Network(e.to_string()))?;
@@ -27,7 +27,11 @@ impl CalendarClient {
     }
 
     /// Submit a hash to calendar and get initial timestamp
-    pub fn submit(&self, calendar_url: &str, hash: &[u8; 32]) -> Result<Vec<u8>, AnchorError> {
+    pub async fn submit(
+        &self,
+        calendar_url: &str,
+        hash: &[u8; 32],
+    ) -> Result<Vec<u8>, AnchorError> {
         tracing::debug!(calendar_url = %calendar_url, "Submitting to calendar");
 
         let url = format!("{}/digest", calendar_url);
@@ -38,6 +42,7 @@ impl CalendarClient {
             .header("Content-Type", "application/x-opentimestamps")
             .body(hash.to_vec())
             .send()
+            .await
             .map_err(|e| {
                 if e.is_timeout() {
                     AnchorError::Timeout(self.timeout.as_secs())
@@ -55,6 +60,7 @@ impl CalendarClient {
 
         let bytes = response
             .bytes()
+            .await
             .map_err(|e| AnchorError::Network(e.to_string()))?
             .to_vec();
 
@@ -64,7 +70,7 @@ impl CalendarClient {
     }
 
     /// Upgrade a pending timestamp by querying calendar
-    pub fn upgrade(
+    pub async fn upgrade(
         &self,
         calendar_url: &str,
         current_timestamp: &[u8],
@@ -79,6 +85,7 @@ impl CalendarClient {
             .header("Content-Type", "application/x-opentimestamps")
             .body(current_timestamp.to_vec())
             .send()
+            .await
             .map_err(|e| {
                 if e.is_timeout() {
                     AnchorError::Timeout(self.timeout.as_secs())
@@ -94,6 +101,7 @@ impl CalendarClient {
 
         let bytes = response
             .bytes()
+            .await
             .map_err(|e| AnchorError::Network(e.to_string()))?
             .to_vec();
 
@@ -114,13 +122,24 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    #[test]
+    #[tokio::test]
+    async fn test_calendar_client_creation_in_async() {
+        let result = CalendarClient::new(30);
+        assert!(
+            result.is_ok(),
+            "CalendarClient::new() must work in async context"
+        );
+    }
+
+    #[tokio::test]
     #[ignore]
-    fn test_calendar_submit() {
+    async fn test_calendar_submit() {
         let client = CalendarClient::new(30).unwrap();
         let hash = sha2::Sha256::digest(b"test calendar").into();
 
-        let result = client.submit("https://a.pool.opentimestamps.org", &hash);
+        let result = client
+            .submit("https://a.pool.opentimestamps.org", &hash)
+            .await;
         assert!(result.is_ok());
     }
 }
