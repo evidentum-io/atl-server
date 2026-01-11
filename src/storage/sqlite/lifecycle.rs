@@ -96,11 +96,13 @@ impl SqliteStore {
     }
 
     /// Close the active tree and create a new one atomically
+    ///
+    /// The tree is marked as 'pending_bitcoin' with bitcoin_anchor_id = NULL.
+    /// The ots_job will create the anchor and set the bitcoin_anchor_id later.
     pub fn close_tree_and_create_new(
         &self,
         end_size: u64,
         root_hash: &[u8; 32],
-        bitcoin_anchor_id: i64,
     ) -> ServerResult<(i64, i64)> {
         let mut conn = self.get_conn()?;
         let tx = conn.transaction()?;
@@ -113,17 +115,11 @@ impl SqliteStore {
             })
             .map_err(|_| ServerError::Internal("No active tree found".into()))?;
 
-        // Update active tree to pending_bitcoin
+        // Update active tree to pending_bitcoin (bitcoin_anchor_id will be set by ots_job)
         tx.execute(
-            "UPDATE trees SET status = 'pending_bitcoin', end_size = ?1, root_hash = ?2, closed_at = ?3, bitcoin_anchor_id = ?4
-             WHERE id = ?5",
-            params![
-                end_size as i64,
-                root_hash.as_slice(),
-                now,
-                bitcoin_anchor_id,
-                active_tree_id,
-            ],
+            "UPDATE trees SET status = 'pending_bitcoin', end_size = ?1, root_hash = ?2, closed_at = ?3
+             WHERE id = ?4",
+            params![end_size as i64, root_hash.as_slice(), now, active_tree_id,],
         )?;
 
         // Create new active tree
@@ -138,6 +134,16 @@ impl SqliteStore {
         tx.commit()?;
 
         Ok((active_tree_id, new_tree_id))
+    }
+
+    /// Set bitcoin anchor for a tree (called by ots_job after anchor creation)
+    pub fn set_tree_bitcoin_anchor(&self, tree_id: i64, anchor_id: i64) -> ServerResult<()> {
+        let conn = self.get_conn()?;
+        conn.execute(
+            "UPDATE trees SET bitcoin_anchor_id = ?1 WHERE id = ?2 AND status = 'pending_bitcoin'",
+            params![anchor_id, tree_id],
+        )?;
+        Ok(())
     }
 
     /// Get trees pending TSA anchoring

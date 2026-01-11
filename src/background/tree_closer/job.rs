@@ -17,9 +17,9 @@ use crate::storage::SqliteStore;
 /// - Tree has at least one entry (first_entry_at IS NOT NULL)
 ///
 /// When closing a tree:
-/// 1. Submits root hash to OTS calendar
-/// 2. Creates anchor record with status='pending'
-/// 3. Atomically closes old tree and creates new active tree
+/// 1. Closes tree with status='pending_bitcoin'
+/// 2. Atomically creates new active tree
+/// 3. OTS anchoring will be handled by ots_job separately
 pub struct TreeCloser {
     #[cfg(feature = "sqlite")]
     storage: Arc<SqliteStore>,
@@ -45,7 +45,6 @@ impl TreeCloser {
                     if let Err(e) = logic::check_and_close_if_needed(
                         &self.storage,
                         self.config.tree_lifetime_secs,
-                        &self.config.ots_calendar_url,
                     ).await {
                         tracing::error!(error = %e, "Tree close check failed");
                     }

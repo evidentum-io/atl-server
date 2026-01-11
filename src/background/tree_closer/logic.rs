@@ -1,7 +1,7 @@
 // File: src/background/tree_closer/logic.rs
 
 use crate::error::ServerResult;
-use crate::traits::{Anchor, AnchorType, Storage};
+use crate::traits::Storage;
 use std::sync::Arc;
 
 #[cfg(feature = "sqlite")]
@@ -13,13 +13,12 @@ use crate::storage::SqliteStore;
 /// 1. Get active tree (or create one if missing)
 /// 2. Check if tree is old enough (based on first_entry_at, NOT created_at)
 /// 3. Empty trees (first_entry_at = NULL) are NEVER closed
-/// 4. Submit root to OTS calendar
-/// 5. Close tree and create new one atomically
+/// 4. Close tree with status='pending_bitcoin' (OTS anchoring will be done by ots_job)
+/// 5. Create new active tree atomically
 #[cfg(feature = "sqlite")]
 pub async fn check_and_close_if_needed(
     storage: &Arc<SqliteStore>,
     tree_lifetime_secs: u64,
-    ots_calendar_url: &str,
 ) -> ServerResult<()> {
     // Get active tree
     let active_tree = match storage.get_active_tree()? {
@@ -82,65 +81,20 @@ pub async fn check_and_close_if_needed(
         start_size = active_tree.start_size,
         end_size = tree_head.tree_size,
         age_secs = tree_age_secs,
-        "Closing tree and submitting to OTS (timer started from first entry)"
+        "Closing tree (timer started from first entry), OTS anchoring will be done by ots_job"
     );
 
-    // STEP 1: Submit to OTS calendar and get pending proof
-    let ots_proof = submit_to_ots_calendar(&tree_head.root_hash, ots_calendar_url).await?;
-
-    // STEP 2: Store anchor with status='pending'
-    let anchor = Anchor {
-        anchor_type: AnchorType::BitcoinOts,
-        anchored_hash: tree_head.root_hash,
-        tree_size: tree_head.tree_size,
-        timestamp: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64,
-        token: ots_proof,
-        metadata: serde_json::json!({
-            "calendar_url": ots_calendar_url,
-        }),
-    };
-
-    let anchor_id = storage.store_anchor_returning_id(
-        tree_head.tree_size,
-        &anchor,
-        "pending", // OTS anchors start as pending
-    )?;
-
-    // STEP 3: Close tree and create new one ATOMICALLY
+    // Close tree and create new one ATOMICALLY
+    // Tree is marked as 'pending_bitcoin', bitcoin_anchor_id will be set by ots_job
     let (closed_tree_id, new_tree_id) =
-        storage.close_tree_and_create_new(tree_head.tree_size, &tree_head.root_hash, anchor_id)?;
+        storage.close_tree_and_create_new(tree_head.tree_size, &tree_head.root_hash)?;
 
     tracing::info!(
         closed_tree_id = closed_tree_id,
         new_tree_id = new_tree_id,
         end_size = tree_head.tree_size,
-        anchor_id = anchor_id,
-        "Tree closed, new active tree created, OTS pending"
+        "Tree closed, new active tree created, pending OTS anchoring by ots_job"
     );
 
     Ok(())
-}
-
-/// Submit hash to OTS calendar server
-///
-/// Returns the pending OTS proof (incomplete until Bitcoin confirmation).
-async fn submit_to_ots_calendar(hash: &[u8; 32], calendar_url: &str) -> ServerResult<Vec<u8>> {
-    // For now, return a stub proof
-    // ANCHOR-1 spec will implement the actual OTS client
-    tracing::warn!(
-        calendar_url = calendar_url,
-        "OTS client not implemented yet (ANCHOR-1 pending), using stub proof"
-    );
-
-    // Create minimal stub proof that can be parsed by OTS poll job
-    // Format: magic bytes + version + hash
-    let mut stub_proof = Vec::new();
-    stub_proof.extend_from_slice(&[0x00, 0x4f, 0x50]); // OTS magic
-    stub_proof.push(0x01); // Version
-    stub_proof.extend_from_slice(hash);
-
-    Ok(stub_proof)
 }
