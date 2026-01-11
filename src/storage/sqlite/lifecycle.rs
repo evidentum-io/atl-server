@@ -230,4 +230,48 @@ impl SqliteStore {
 
         Ok(())
     }
+
+    /// Check if active tree needs TSA anchoring
+    ///
+    /// Returns the active tree if it exists AND either:
+    /// - Has no TSA anchors at all, OR
+    /// - Last TSA anchor was created more than `interval_secs` ago
+    pub fn get_active_tree_needing_tsa(
+        &self,
+        interval_secs: u64,
+    ) -> ServerResult<Option<TreeRecord>> {
+        let conn = self.get_conn()?;
+
+        // First check if active tree exists
+        let active_tree = match self.get_active_tree()? {
+            Some(tree) => tree,
+            None => return Ok(None),
+        };
+
+        // Check last TSA anchor time for this tree's entries
+        // We query anchors table, not trees.tsa_anchor_id (which is only for final anchor)
+        let last_anchor_time: Option<i64> = conn
+            .query_row(
+                "SELECT MAX(created_at) FROM anchors WHERE anchor_type = 'rfc3161'",
+                [],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten();
+
+        let now = chrono::Utc::now().timestamp();
+        let threshold = now - (interval_secs as i64);
+
+        let needs_anchor = match last_anchor_time {
+            // Convert nanoseconds to seconds for comparison
+            Some(ts) => (ts / 1_000_000_000) < threshold,
+            None => true, // No anchors at all
+        };
+
+        if needs_anchor {
+            Ok(Some(active_tree))
+        } else {
+            Ok(None)
+        }
+    }
 }
