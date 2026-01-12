@@ -86,6 +86,8 @@ impl OpenTimestampsClient {
         }
 
         if let OtsStatus::Pending { calendar_url } = status {
+            // Normalize URI: some calendars return URLs with leading '+' or '-'
+            let calendar_url = calendar_url.trim_start_matches(['+', '-']);
             if calendar_url.is_empty() {
                 return Ok(None);
             }
@@ -95,7 +97,7 @@ impl OpenTimestampsClient {
                 .map_err(|e| AnchorError::InvalidResponse(e.to_string()))?;
 
             if let Some(upgraded_bytes) =
-                self.calendar.upgrade(&calendar_url, &current_bytes).await?
+                self.calendar.upgrade(calendar_url, &current_bytes).await?
             {
                 let upgraded = DetachedTimestampFile::from_bytes(&upgraded_bytes)
                     .map_err(|e| AnchorError::InvalidResponse(e.to_string()))?;
