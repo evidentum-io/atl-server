@@ -115,6 +115,16 @@ impl StorageEngine {
         })
     }
 
+    /// Get shared reference to IndexStore for internal use
+    ///
+    /// This is for background jobs that need direct database access
+    /// for tree lifecycle and anchoring operations.
+    ///
+    /// NOT part of Storage trait — internal server mechanics only.
+    pub fn index_store(&self) -> Arc<Mutex<IndexStore>> {
+        Arc::clone(&self.index)
+    }
+
     /// Convert AppendParams to WalEntry
     fn params_to_wal_entry(id: Uuid, params: &AppendParams) -> WalEntry {
         let metadata_bytes = params

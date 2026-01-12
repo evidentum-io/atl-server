@@ -107,7 +107,6 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Run in STANDALONE mode
-#[cfg(feature = "sqlite")]
 async fn run_standalone(args: Args) -> anyhow::Result<()> {
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -137,7 +136,8 @@ async fn run_standalone(args: Args) -> anyhow::Result<()> {
     let engine = crate::storage::StorageEngine::new(storage_config, *signer.key_id())
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize storage engine: {}", e))?;
-    let storage: Arc<dyn traits::Storage> = Arc::new(engine);
+    let storage_engine = Arc::new(engine);
+    let storage: Arc<dyn traits::Storage> = storage_engine.clone();
 
     // Create sequencer
     let sequencer_config = sequencer::SequencerConfig::from_env();
@@ -148,15 +148,10 @@ async fn run_standalone(args: Args) -> anyhow::Result<()> {
         sequencer_instance.run().await;
     });
 
-    // TODO: Re-enable in Wave 4 after Storage trait has all required methods
-    // Background jobs temporarily disabled because they require SqliteStore-specific methods
-    // that are not yet available in the Storage trait.
-    /*
     let background_config = background::BackgroundConfig::from_env();
     let background_runner =
-        background::BackgroundJobRunner::new(storage.clone(), background_config);
+        background::BackgroundJobRunner::new(storage_engine.clone(), background_config);
     let background_handles = background_runner.start().await?;
-    */
 
     // Create dispatcher
     let dispatcher = Arc::new(traits::LocalDispatcher::new(
@@ -174,15 +169,12 @@ async fn run_standalone(args: Args) -> anyhow::Result<()> {
     )
     .await?;
 
-    // TODO: Re-enable in Wave 4
-    /*
     // Shutdown background jobs first
     tracing::info!("Shutting down background jobs...");
     background_runner.shutdown();
     for handle in background_handles {
         let _ = handle.await;
     }
-    */
 
     // Wait for sequencer
     tracing::info!("Waiting for sequencer to shut down...");
@@ -212,7 +204,7 @@ async fn run_node(args: Args) -> anyhow::Result<()> {
 }
 
 /// Run in SEQUENCER mode
-#[cfg(all(feature = "grpc", feature = "sqlite"))]
+#[cfg(feature = "grpc")]
 async fn run_sequencer(args: Args) -> anyhow::Result<()> {
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -243,7 +235,8 @@ async fn run_sequencer(args: Args) -> anyhow::Result<()> {
     let engine = crate::storage::StorageEngine::new(storage_config, *signer.key_id())
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize storage engine: {}", e))?;
-    let storage: Arc<dyn traits::Storage> = Arc::new(engine);
+    let storage_engine = Arc::new(engine);
+    let storage: Arc<dyn traits::Storage> = storage_engine.clone();
 
     // Create sequencer
     let sequencer_config = sequencer::SequencerConfig::from_env();
@@ -254,15 +247,10 @@ async fn run_sequencer(args: Args) -> anyhow::Result<()> {
         sequencer_instance.run().await;
     });
 
-    // TODO: Re-enable in Wave 4 after Storage trait has all required methods
-    // Background jobs temporarily disabled because they require SqliteStore-specific methods
-    // that are not yet available in the Storage trait.
-    /*
     let background_config = background::BackgroundConfig::from_env();
     let background_runner =
-        background::BackgroundJobRunner::new(storage.clone(), background_config);
+        background::BackgroundJobRunner::new(storage_engine.clone(), background_config);
     let background_handles = background_runner.start().await?;
-    */
 
     // Create gRPC server
     let token = std::env::var("ATL_SEQUENCER_TOKEN").ok();
@@ -310,15 +298,12 @@ async fn run_sequencer(args: Args) -> anyhow::Result<()> {
         r = http_handle => r??,
     }
 
-    // TODO: Re-enable in Wave 4
-    /*
     // Shutdown background jobs first
     tracing::info!("Shutting down background jobs...");
     background_runner.shutdown();
     for handle in background_handles {
         let _ = handle.await;
     }
-    */
 
     // Wait for sequencer
     tracing::info!("Waiting for sequencer to shut down...");
@@ -375,19 +360,14 @@ async fn start_http_server(
 }
 
 // Fallback stubs for when features are not enabled
-#[cfg(not(feature = "sqlite"))]
-async fn run_standalone(_args: Args) -> anyhow::Result<()> {
-    anyhow::bail!("STANDALONE mode requires --features sqlite")
-}
-
 #[cfg(not(feature = "grpc"))]
 async fn run_node(_args: Args) -> anyhow::Result<()> {
     anyhow::bail!("NODE mode requires --features grpc")
 }
 
-#[cfg(not(all(feature = "grpc", feature = "sqlite")))]
+#[cfg(not(feature = "grpc"))]
 async fn run_sequencer(_args: Args) -> anyhow::Result<()> {
-    anyhow::bail!("SEQUENCER mode requires --features grpc,sqlite")
+    anyhow::bail!("SEQUENCER mode requires --features grpc")
 }
 
 /// Wait for SIGTERM or SIGINT

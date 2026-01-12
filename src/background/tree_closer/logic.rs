@@ -1,11 +1,10 @@
 // File: src/background/tree_closer/logic.rs
 
 use crate::error::ServerResult;
+use crate::storage::index::IndexStore;
 use crate::traits::Storage;
 use std::sync::Arc;
-
-#[cfg(feature = "sqlite")]
-use crate::storage::SqliteStore;
+use tokio::sync::Mutex;
 
 /// Check if active tree should be closed and close it if needed
 ///
@@ -15,18 +14,30 @@ use crate::storage::SqliteStore;
 /// 3. Empty trees (first_entry_at = NULL) are NEVER closed
 /// 4. Close tree with status='pending_bitcoin' (OTS anchoring will be done by ots_job)
 /// 5. Create new active tree atomically
-#[cfg(feature = "sqlite")]
 pub async fn check_and_close_if_needed(
-    storage: &Arc<SqliteStore>,
+    index: &Arc<Mutex<IndexStore>>,
+    storage: &Arc<dyn Storage>,
     tree_lifetime_secs: u64,
 ) -> ServerResult<()> {
+    let tree_head = storage.tree_head();
+    let origin_id = storage.origin_id();
+
     // Get active tree
-    let active_tree = match storage.get_active_tree()? {
+    let active_tree = {
+        let idx = index.lock().await;
+        idx.get_active_tree()
+            .map_err(|e| crate::error::ServerError::Storage(crate::error::StorageError::Database(e.to_string())))?
+    };
+
+    let active_tree = match active_tree {
         Some(tree) => tree,
         None => {
             // No active tree - create one (first run or recovery)
-            let tree_head = storage.get_tree_head()?;
-            let tree_id = storage.create_active_tree(tree_head.tree_size)?;
+            let tree_id = {
+                let idx = index.lock().await;
+                idx.create_active_tree(&origin_id, tree_head.tree_size)
+                    .map_err(|e| crate::error::ServerError::Storage(crate::error::StorageError::Database(e.to_string())))?
+            };
             tracing::info!(
                 tree_id = tree_id,
                 start_size = tree_head.tree_size,
@@ -62,9 +73,6 @@ pub async fn check_and_close_if_needed(
         return Ok(());
     }
 
-    // Get current tree head (may have new entries since tree was created)
-    let tree_head = storage.get_tree_head()?;
-
     // Double-check: tree has entries (should always be true if first_entry_at is set)
     if tree_head.tree_size <= active_tree.start_size {
         tracing::warn!(
@@ -86,8 +94,11 @@ pub async fn check_and_close_if_needed(
 
     // Close tree and create new one ATOMICALLY
     // Tree is marked as 'pending_bitcoin', bitcoin_anchor_id will be set by ots_job
-    let (closed_tree_id, new_tree_id) =
-        storage.close_tree_and_create_new(tree_head.tree_size, &tree_head.root_hash)?;
+    let (closed_tree_id, new_tree_id) = {
+        let mut idx = index.lock().await;
+        idx.close_tree_and_create_new(&origin_id, tree_head.tree_size, &tree_head.root_hash)
+            .map_err(|e| crate::error::ServerError::Storage(crate::error::StorageError::Database(e.to_string())))?
+    };
 
     tracing::info!(
         closed_tree_id = closed_tree_id,

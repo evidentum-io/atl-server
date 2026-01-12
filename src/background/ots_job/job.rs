@@ -4,18 +4,18 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use tokio::time::interval;
 
 use super::config::OtsJobConfig;
+use crate::storage::index::IndexStore;
+use crate::traits::Storage;
 
-#[cfg(all(feature = "sqlite", feature = "ots"))]
+#[cfg(feature = "ots")]
 use super::{poll, submit};
 
 #[cfg(feature = "ots")]
 use crate::anchoring::ots::OtsClient;
-
-#[cfg(feature = "sqlite")]
-use crate::storage::SqliteStore;
 
 /// Unified OTS background job
 ///
@@ -23,21 +23,23 @@ use crate::storage::SqliteStore;
 /// 1. Submit: Find trees with status='pending_bitcoin' and bitcoin_anchor_id=NULL, submit to OTS
 /// 2. Poll: Check pending OTS anchors for Bitcoin confirmation
 pub struct OtsJob {
-    #[cfg(feature = "sqlite")]
-    storage: Arc<SqliteStore>,
+    index: Arc<Mutex<IndexStore>>,
+    storage: Arc<dyn Storage>,
     #[cfg(feature = "ots")]
     ots_client: Arc<dyn OtsClient>,
     config: OtsJobConfig,
 }
 
 impl OtsJob {
-    #[cfg(all(feature = "sqlite", feature = "ots"))]
+    #[cfg(feature = "ots")]
     pub fn new(
-        storage: Arc<SqliteStore>,
+        index: Arc<Mutex<IndexStore>>,
+        storage: Arc<dyn Storage>,
         ots_client: Arc<dyn OtsClient>,
         config: OtsJobConfig,
     ) -> Self {
         Self {
+            index,
             storage,
             ots_client,
             config,
@@ -53,10 +55,11 @@ impl OtsJob {
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
-                    #[cfg(all(feature = "sqlite", feature = "ots"))]
+                    #[cfg(feature = "ots")]
                     {
                         // Phase 1: Submit unanchored trees
                         if let Err(e) = submit::submit_unanchored_trees(
+                            &self.index,
                             &self.storage,
                             &self.ots_client,
                             self.config.max_batch_size,
@@ -68,7 +71,7 @@ impl OtsJob {
 
                         // Phase 2: Poll pending anchors
                         if let Err(e) = poll::poll_pending_anchors(
-                            &self.storage,
+                            &self.index,
                             &self.ots_client,
                             self.config.max_batch_size,
                         )
