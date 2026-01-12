@@ -10,6 +10,10 @@ use crate::error::StorageError;
 /// Handles signed tree head checkpoints. Separated from the main
 /// write path as checkpoint operations are low-frequency and
 /// typically involve cryptographic signing.
+///
+/// NOTE: Currently unused - HTS generates checkpoints on-the-fly.
+/// Will be needed for historical checkpoint queries per RFC 6962.
+#[allow(dead_code)]
 #[async_trait]
 pub trait CheckpointStore: Send + Sync {
     /// Store a signed checkpoint

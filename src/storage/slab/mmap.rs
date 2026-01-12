@@ -190,18 +190,21 @@ impl SlabFile {
     }
 
     /// Get slab ID
+    #[allow(dead_code)]
     #[must_use]
     pub fn slab_id(&self) -> u32 {
         self.slab_id
     }
 
     /// Get start index (first leaf index in global tree)
+    #[allow(dead_code)]
     #[must_use]
     pub fn start_index(&self) -> u64 {
         self.start_index
     }
 
     /// Get maximum capacity
+    #[allow(dead_code)]
     #[must_use]
     pub fn max_leaves(&self) -> u32 {
         self.max_leaves
@@ -332,10 +335,10 @@ mod tests {
 
         let mut slab = SlabFile::create(&path, 1, 0, 8).unwrap();
 
-        // Write leaves (level 0)
+        // Write leaves (level 0) - use non-zero hashes to avoid sentinel check
         for i in 0..8 {
             let mut hash = [0u8; 32];
-            hash[0] = i;
+            hash[0] = i + 1; // +1 to avoid all-zero hash for i=0
             slab.set_node(0, i as u64, &hash);
         }
 
@@ -347,8 +350,8 @@ mod tests {
         }
 
         // Verify
-        assert_eq!(slab.get_node(0, 0).unwrap()[0], 0);
-        assert_eq!(slab.get_node(0, 7).unwrap()[0], 7);
+        assert_eq!(slab.get_node(0, 0).unwrap()[0], 1);
+        assert_eq!(slab.get_node(0, 7).unwrap()[0], 8);
         assert_eq!(slab.get_node(1, 0).unwrap()[0], 100);
         assert_eq!(slab.get_node(1, 3).unwrap()[0], 103);
     }

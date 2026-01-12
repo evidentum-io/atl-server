@@ -9,6 +9,7 @@ use crate::error::StorageError;
 /// A log entry (stored in the database)
 ///
 /// Contains only hashes - NO payload data.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Entry {
     /// Unique identifier (UUID v4)
@@ -51,6 +52,7 @@ pub struct AppendParams {
 }
 
 /// Result for a single entry in a batch
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct EntryResult {
     /// Generated entry ID
@@ -90,6 +92,7 @@ pub struct TreeHead {
 }
 
 /// Inclusion proof for an entry
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct InclusionProof {
     /// Leaf index being proved
@@ -103,6 +106,9 @@ pub struct InclusionProof {
 }
 
 /// Consistency proof between two tree sizes
+///
+/// NOTE: Protocol-required for RFC 6962 log verification.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ConsistencyProof {
     /// Older tree size
@@ -118,6 +124,9 @@ pub struct ConsistencyProof {
 /// Result of a single append operation (used by Sequencer)
 ///
 /// This is returned to individual API handlers after batch commit.
+///
+/// NOTE: Protocol-required - returned from append operations.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct AppendResult {
     /// Generated entry ID
@@ -163,6 +172,7 @@ pub trait Storage: Send + Sync + 'static {
     /// After this returns, all previously appended entries are guaranteed
     /// to survive a crash. Called automatically by append_batch, but can
     /// be called explicitly for checkpoint operations.
+    #[allow(dead_code)]
     async fn flush(&self) -> Result<(), StorageError>;
 
     /// Get current tree head (size + root hash)
@@ -174,6 +184,7 @@ pub trait Storage: Send + Sync + 'static {
     fn origin_id(&self) -> [u8; 32];
 
     /// Check if storage is healthy
+    #[allow(dead_code)]
     fn is_healthy(&self) -> bool;
 
     /// Get entry by ID
@@ -194,13 +205,20 @@ pub trait Storage: Send + Sync + 'static {
     ) -> crate::error::ServerResult<ConsistencyProof>;
 
     /// Get anchors for a specific tree size
-    fn get_anchors(&self, tree_size: u64) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>>;
+    fn get_anchors(
+        &self,
+        tree_size: u64,
+    ) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>>;
 
     /// Get the most recent anchored tree size
     fn get_latest_anchored_size(&self) -> crate::error::ServerResult<Option<u64>>;
 
     /// Get anchors covering a target tree size
-    fn get_anchors_covering(&self, target_tree_size: u64, limit: usize) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>>;
+    fn get_anchors_covering(
+        &self,
+        target_tree_size: u64,
+        limit: usize,
+    ) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>>;
 
     /// Get root hash at specific tree size
     fn get_root_at_size(&self, tree_size: u64) -> crate::error::ServerResult<[u8; 32]>;

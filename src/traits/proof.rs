@@ -35,6 +35,9 @@ pub trait ProofProvider: Send + Sync {
     ///
     /// # Errors
     /// * `StorageError::NotFound` - Index out of bounds
+    ///
+    /// NOTE: Required by RFC 6962 for auditor access. Will be exposed via HTTP API.
+    #[allow(dead_code)]
     async fn get_entry_by_index(&self, index: u64) -> Result<Entry, StorageError>;
 
     /// Get entry by external ID
@@ -49,6 +52,9 @@ pub trait ProofProvider: Send + Sync {
     ///
     /// # Errors
     /// * `StorageError::NotFound` - No entry with this external_id
+    ///
+    /// NOTE: Required for client correlation. Will be exposed via HTTP API.
+    #[allow(dead_code)]
     async fn get_entry_by_external_id(&self, external_id: &str) -> Result<Entry, StorageError>;
 
     /// Generate inclusion proof for an entry

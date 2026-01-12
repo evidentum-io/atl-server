@@ -22,4 +22,4 @@ pub mod grpc;
 // Re-export key types at crate root
 pub use error::{ServerError, ServerResult};
 
-pub use storage::{StorageEngine, TreeRecord, TreeStatus, AnchorWithId};
+pub use storage::{AnchorWithId, StorageEngine, TreeRecord, TreeStatus};

@@ -84,6 +84,7 @@ impl SlabManager {
     ///
     /// # Errors
     /// Returns IO error if directory doesn't exist or files are corrupted
+    #[allow(dead_code)]
     pub fn open(slab_dir: PathBuf, config: SlabConfig) -> io::Result<Self> {
         let mut manager = Self::new(slab_dir, config)?;
 
@@ -224,8 +225,8 @@ impl SlabManager {
         let slab_id = self.leaf_index_to_slab_id(leaf_index);
         let local_index = leaf_index % (self.config.max_leaves as u64);
 
-        // Get local path within slab
-        let mut path = self.get_local_inclusion_path(slab_id, local_index)?;
+        // Get local path within slab (limited by actual tree size)
+        let mut path = self.get_local_inclusion_path(slab_id, local_index, tree_size)?;
 
         // Add cross-slab path if needed
         if self.num_slabs_for_size(tree_size) > 1 {
@@ -248,6 +249,7 @@ impl SlabManager {
     }
 
     /// Get current tree size
+    #[allow(dead_code)]
     #[must_use]
     pub fn tree_size(&self) -> u64 {
         self.tree_size
@@ -297,7 +299,7 @@ impl SlabManager {
     /// Ensure active slab exists and is not full
     fn ensure_active_slab(&mut self) -> io::Result<u32> {
         if let Some(id) = self.active_slab {
-            if !self.slabs.get(&id).map_or(false, SlabFile::is_full) {
+            if !self.slabs.get(&id).is_some_and(SlabFile::is_full) {
                 return Ok(id);
             }
         }
@@ -344,7 +346,7 @@ impl SlabManager {
 
     /// Calculate number of slabs needed for tree size
     fn num_slabs_for_size(&self, tree_size: u64) -> u32 {
-        ((tree_size + (self.config.max_leaves as u64) - 1) / (self.config.max_leaves as u64)) as u32
+        tree_size.div_ceil(self.config.max_leaves as u64) as u32
     }
 
     /// Get slab file path
@@ -365,6 +367,7 @@ impl SlabManager {
     }
 
     /// Get root hash for a single slab
+    #[allow(dead_code)]
     fn get_slab_root(&self, slab: &SlabFile, leaf_count: u32) -> io::Result<[u8; 32]> {
         if leaf_count == 0 {
             return Ok([0u8; 32]);
@@ -396,17 +399,27 @@ impl SlabManager {
     }
 
     /// Get local inclusion path within a slab
+    ///
+    /// The path is limited by the actual tree_size, not the slab's max capacity,
+    /// to produce RFC 6962 compliant proofs.
     fn get_local_inclusion_path(
         &mut self,
         slab_id: u32,
         local_index: u64,
+        tree_size: u64,
     ) -> io::Result<Vec<[u8; 32]>> {
-        let max_height = SlabHeader::tree_height(self.config.max_leaves);
+        // Calculate actual tree height from tree_size (not max_leaves)
+        let actual_height = if tree_size <= 1 {
+            0
+        } else {
+            64 - (tree_size - 1).leading_zeros()
+        };
+
         let slab = self.get_or_open_slab(slab_id)?;
         let mut path = Vec::new();
         let mut current_index = local_index;
 
-        for level in 0..max_height {
+        for level in 0..actual_height {
             let sibling_index = current_index ^ 1;
             if let Some(sibling) = slab.get_node(level, sibling_index) {
                 path.push(sibling);

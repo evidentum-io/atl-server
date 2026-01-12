@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 const CRC_ALGORITHM: crc::Crc<u32> = crc::Crc::<u32>::new(&crc::CRC_32_ISCSI);
 
 /// WAL recovery result
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct RecoveryResult {
     /// Batches that need replay to SQLite
@@ -128,7 +129,8 @@ impl WalRecovery {
                 && (name_str.ends_with(".wal") || name_str.ends_with(".wal.done"))
             {
                 if let Some(id_str) = name_str.strip_prefix("batch_") {
-                    let id_str = id_str.trim_end_matches(".wal").trim_end_matches(".done");
+                    // Must strip .done first, then .wal (for .wal.done files)
+                    let id_str = id_str.trim_end_matches(".done").trim_end_matches(".wal");
                     if let Ok(batch_id) = id_str.parse::<u64>() {
                         files.push((batch_id, entry.path()));
                     }

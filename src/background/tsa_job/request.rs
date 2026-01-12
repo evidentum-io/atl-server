@@ -25,8 +25,9 @@ pub async fn try_tsa_timestamp(
     // Check if TSA anchor already exists for this root_hash
     let existing_id = {
         let idx = index.lock().await;
-        idx.get_tsa_anchor_for_hash(&root_hash)
-            .map_err(|e| ServerError::Storage(crate::error::StorageError::Database(e.to_string())))?
+        idx.get_tsa_anchor_for_hash(&root_hash).map_err(|e| {
+            ServerError::Storage(crate::error::StorageError::Database(e.to_string()))
+        })?
     };
 
     if let Some(existing_id) = existing_id {
@@ -37,7 +38,9 @@ pub async fn try_tsa_timestamp(
         );
         let idx = index.lock().await;
         idx.update_tree_tsa_anchor(tree.id, existing_id)
-            .map_err(|e| ServerError::Storage(crate::error::StorageError::Database(e.to_string())))?;
+            .map_err(|e| {
+                ServerError::Storage(crate::error::StorageError::Database(e.to_string()))
+            })?;
         return Ok(existing_id);
     }
 
@@ -83,7 +86,9 @@ pub async fn try_tsa_timestamp(
     {
         let idx = index.lock().await;
         idx.update_tree_tsa_anchor(tree.id, anchor_id)
-            .map_err(|e| ServerError::Storage(crate::error::StorageError::Database(e.to_string())))?
+            .map_err(|e| {
+                ServerError::Storage(crate::error::StorageError::Database(e.to_string()))
+            })?
     };
 
     Ok(anchor_id)

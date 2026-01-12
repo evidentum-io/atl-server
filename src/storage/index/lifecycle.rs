@@ -12,6 +12,7 @@ use super::queries::IndexStore;
 use rusqlite::{params, OptionalExtension};
 
 /// Tree record from database
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct TreeRecord {
     pub id: i64,
@@ -34,6 +35,7 @@ pub enum TreeStatus {
     Closed,
 }
 
+#[allow(dead_code)]
 impl TreeStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -84,6 +86,7 @@ fn row_to_tree(row: &rusqlite::Row) -> rusqlite::Result<TreeRecord> {
     })
 }
 
+#[allow(dead_code)]
 impl IndexStore {
     /// Get the currently active tree
     pub fn get_active_tree(&self) -> rusqlite::Result<Option<TreeRecord>> {
@@ -101,7 +104,11 @@ impl IndexStore {
     /// Create a new active tree
     ///
     /// Returns the tree ID.
-    pub fn create_active_tree(&self, origin_id: &[u8; 32], start_size: u64) -> rusqlite::Result<i64> {
+    pub fn create_active_tree(
+        &self,
+        origin_id: &[u8; 32],
+        start_size: u64,
+    ) -> rusqlite::Result<i64> {
         let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
 
         self.connection().execute(
@@ -130,8 +137,8 @@ impl IndexStore {
         let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
 
         // Get current active tree ID
-        let active_tree_id: i64 = tx
-            .query_row("SELECT id FROM trees WHERE status = 'active'", [], |row| {
+        let active_tree_id: i64 =
+            tx.query_row("SELECT id FROM trees WHERE status = 'active'", [], |row| {
                 row.get(0)
             })?;
 
@@ -227,7 +234,10 @@ impl IndexStore {
     }
 
     /// Get tree by bitcoin anchor ID
-    pub fn get_tree_by_bitcoin_anchor_id(&self, anchor_id: i64) -> rusqlite::Result<Option<TreeRecord>> {
+    pub fn get_tree_by_bitcoin_anchor_id(
+        &self,
+        anchor_id: i64,
+    ) -> rusqlite::Result<Option<TreeRecord>> {
         self.connection()
             .query_row(
                 "SELECT id, origin_id, status, start_size, end_size, root_hash, created_at,

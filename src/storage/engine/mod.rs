@@ -8,7 +8,7 @@
 //! This is the ONLY concrete implementation - no fallback storage.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock as StdRwLock};
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
@@ -51,8 +51,8 @@ pub struct StorageEngine {
     /// SQLite index (Mutex because Connection is not Sync)
     index: Arc<Mutex<IndexStore>>,
 
-    /// Cached tree state
-    tree_state: RwLock<TreeState>,
+    /// Cached tree state (sync RwLock for fast access from sync trait methods)
+    tree_state: StdRwLock<TreeState>,
 
     /// Health status
     healthy: AtomicBool,
@@ -110,7 +110,7 @@ impl StorageEngine {
             wal: Arc::new(RwLock::new(wal)),
             slabs: Arc::new(RwLock::new(slabs)),
             index: Arc::new(Mutex::new(index)),
-            tree_state: RwLock::new(tree_state),
+            tree_state: StdRwLock::new(tree_state),
             healthy: AtomicBool::new(true),
         })
     }
@@ -161,7 +161,7 @@ impl Storage for StorageEngine {
         }
 
         // 1. Prepare entries
-        let tree_size = self.tree_state.read().await.tree_size;
+        let tree_size = self.tree_state.read().unwrap().tree_size;
         let entries: Vec<_> = params
             .iter()
             .enumerate()
@@ -227,7 +227,7 @@ impl Storage for StorageEngine {
 
         // 6. Update cached state
         {
-            let mut state = self.tree_state.write().await;
+            let mut state = self.tree_state.write().unwrap();
             state.tree_size = tree_size + params.len() as u64;
             state.root_hash = new_root;
         }
@@ -256,8 +256,8 @@ impl Storage for StorageEngine {
     }
 
     fn tree_head(&self) -> TreeHead {
-        // Fast path: read from cache without async
-        let state = self.tree_state.blocking_read();
+        // Fast path: read from cache using sync RwLock
+        let state = self.tree_state.read().unwrap();
         TreeHead {
             tree_size: state.tree_size,
             root_hash: state.root_hash,
@@ -266,7 +266,7 @@ impl Storage for StorageEngine {
     }
 
     fn origin_id(&self) -> [u8; 32] {
-        self.tree_state.blocking_read().origin
+        self.tree_state.read().unwrap().origin
     }
 
     fn is_healthy(&self) -> bool {
@@ -276,11 +276,8 @@ impl Storage for StorageEngine {
     fn get_entry(&self, id: &Uuid) -> crate::error::ServerResult<Entry> {
         // Delegate to ProofProvider async method via blocking
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                ProofProvider::get_entry(self, id)
-                    .await
-                    .map_err(Into::into)
-            })
+            tokio::runtime::Handle::current()
+                .block_on(async { ProofProvider::get_entry(self, id).await.map_err(Into::into) })
         })
     }
 
@@ -320,12 +317,16 @@ impl Storage for StorageEngine {
         })
     }
 
-    fn get_anchors(&self, tree_size: u64) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>> {
+    fn get_anchors(
+        &self,
+        tree_size: u64,
+    ) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>> {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let index = self.index.lock().await;
-                index.get_anchors(tree_size)
-                    .map_err(|e| crate::error::ServerError::Storage(StorageError::Database(e.to_string())))
+                index.get_anchors(tree_size).map_err(|e| {
+                    crate::error::ServerError::Storage(StorageError::Database(e.to_string()))
+                })
             })
         })
     }
@@ -334,18 +335,26 @@ impl Storage for StorageEngine {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let index = self.index.lock().await;
-                index.get_latest_anchored_size()
-                    .map_err(|e| crate::error::ServerError::Storage(StorageError::Database(e.to_string())))
+                index.get_latest_anchored_size().map_err(|e| {
+                    crate::error::ServerError::Storage(StorageError::Database(e.to_string()))
+                })
             })
         })
     }
 
-    fn get_anchors_covering(&self, target_tree_size: u64, limit: usize) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>> {
+    fn get_anchors_covering(
+        &self,
+        target_tree_size: u64,
+        limit: usize,
+    ) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>> {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let index = self.index.lock().await;
-                index.get_anchors_covering(target_tree_size, limit)
-                    .map_err(|e| crate::error::ServerError::Storage(StorageError::Database(e.to_string())))
+                index
+                    .get_anchors_covering(target_tree_size, limit)
+                    .map_err(|e| {
+                        crate::error::ServerError::Storage(StorageError::Database(e.to_string()))
+                    })
             })
         })
     }
@@ -354,8 +363,9 @@ impl Storage for StorageEngine {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let mut slabs = self.slabs.write().await;
-                slabs.get_root(tree_size)
-                    .map_err(|e| crate::error::ServerError::Storage(crate::error::StorageError::Io(e)))
+                slabs.get_root(tree_size).map_err(|e| {
+                    crate::error::ServerError::Storage(crate::error::StorageError::Io(e))
+                })
             })
         })
     }
@@ -451,4 +461,3 @@ impl ProofProvider for StorageEngine {
 
 #[cfg(test)]
 mod tests;
-

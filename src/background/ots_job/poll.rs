@@ -29,8 +29,9 @@ pub async fn poll_pending_anchors(
 ) -> ServerResult<()> {
     let pending = {
         let idx = index.lock().await;
-        idx.get_pending_ots_anchors()
-            .map_err(|e| ServerError::Storage(crate::error::StorageError::Database(e.to_string())))?
+        idx.get_pending_ots_anchors().map_err(|e| {
+            ServerError::Storage(crate::error::StorageError::Database(e.to_string()))
+        })?
     };
 
     if pending.is_empty() {
@@ -80,7 +81,9 @@ pub async fn poll_pending_anchors(
                         block_height,
                         block_time,
                     )
-                    .map_err(|e| ServerError::Storage(crate::error::StorageError::Database(e.to_string())))?
+                    .map_err(|e| {
+                        ServerError::Storage(crate::error::StorageError::Database(e.to_string()))
+                    })?
                 };
 
                 tracing::info!(
@@ -94,7 +97,11 @@ pub async fn poll_pending_anchors(
                 {
                     let idx = index.lock().await;
                     idx.update_anchor_token(anchor.id, &upgrade_result.proof)
-                        .map_err(|e| ServerError::Storage(crate::error::StorageError::Database(e.to_string())))?
+                        .map_err(|e| {
+                            ServerError::Storage(crate::error::StorageError::Database(
+                                e.to_string(),
+                            ))
+                        })?
                 };
                 tracing::debug!(
                     anchor_id = anchor.id,

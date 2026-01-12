@@ -13,6 +13,7 @@ use crate::traits::{Anchor, AnchorType};
 use rusqlite::{params, OptionalExtension};
 
 /// Anchor with ID (for OTS poll job)
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct AnchorWithId {
     pub id: i64,
@@ -54,6 +55,7 @@ fn row_to_anchor(row: &rusqlite::Row) -> rusqlite::Result<Anchor> {
 }
 
 /// Convert database row to AnchorWithId
+#[allow(dead_code)]
 fn row_to_anchor_with_id(row: &rusqlite::Row) -> rusqlite::Result<AnchorWithId> {
     let id: i64 = row.get(0)?;
     let tree_size: i64 = row.get(1)?;
@@ -91,6 +93,7 @@ fn row_to_anchor_with_id(row: &rusqlite::Row) -> rusqlite::Result<AnchorWithId> 
     })
 }
 
+#[allow(dead_code)]
 impl IndexStore {
     /// Store an external anchor for a tree size
     pub fn store_anchor(&self, tree_size: u64, anchor: &Anchor) -> rusqlite::Result<()> {
@@ -154,11 +157,11 @@ impl IndexStore {
 
     /// Get the most recent anchored tree size
     pub fn get_latest_anchored_size(&self) -> rusqlite::Result<Option<u64>> {
-        let result = self
-            .connection()
-            .query_row("SELECT MAX(tree_size) FROM anchors", [], |row| {
-                row.get::<_, Option<i64>>(0)
-            })?;
+        let result =
+            self.connection()
+                .query_row("SELECT MAX(tree_size) FROM anchors", [], |row| {
+                    row.get::<_, Option<i64>>(0)
+                })?;
 
         Ok(result.map(|s| s as u64))
     }

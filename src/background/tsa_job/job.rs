@@ -8,7 +8,7 @@ use tokio::time::interval;
 use super::config::TsaJobConfig;
 use super::round_robin::RoundRobinSelector;
 use crate::error::ServerResult;
-use crate::storage::index::{IndexStore, TreeRecord};
+use crate::storage::index::IndexStore;
 use crate::traits::Storage;
 
 /// TSA anchoring background job
@@ -67,8 +67,11 @@ impl TsaAnchoringJob {
         // PART 2: Anchor closed trees that don't have final TSA anchor
         let pending_trees = {
             let idx = self.index.lock().await;
-            idx.get_trees_pending_tsa()
-                .map_err(|e| crate::error::ServerError::Storage(crate::error::StorageError::Database(e.to_string())))?
+            idx.get_trees_pending_tsa().map_err(|e| {
+                crate::error::ServerError::Storage(crate::error::StorageError::Database(
+                    e.to_string(),
+                ))
+            })?
         };
 
         if pending_trees.is_empty() {

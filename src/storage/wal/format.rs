@@ -183,6 +183,7 @@ pub struct WalEntry {
     pub external_id: Vec<u8>,
 }
 
+#[allow(dead_code)]
 impl WalEntry {
     /// Minimum entry size (without variable data)
     pub const MIN_SIZE: usize = 16 + 32 + 32 + 2 + 2;

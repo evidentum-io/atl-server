@@ -33,8 +33,9 @@ pub async fn submit_unanchored_trees(
 ) -> ServerResult<()> {
     let trees = {
         let idx = index.lock().await;
-        idx.get_trees_without_bitcoin_anchor()
-            .map_err(|e| ServerError::Storage(crate::error::StorageError::Database(e.to_string())))?
+        idx.get_trees_without_bitcoin_anchor().map_err(|e| {
+            ServerError::Storage(crate::error::StorageError::Database(e.to_string()))
+        })?
     };
 
     if trees.is_empty() {
@@ -70,7 +71,9 @@ pub async fn submit_unanchored_trees(
                         &root_hash,
                         tree.end_size.unwrap_or(0),
                     )
-                    .map_err(|e| ServerError::Storage(crate::error::StorageError::Database(e.to_string())))?
+                    .map_err(|e| {
+                        ServerError::Storage(crate::error::StorageError::Database(e.to_string()))
+                    })?
                 };
 
                 tracing::info!(

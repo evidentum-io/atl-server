@@ -25,8 +25,9 @@ pub async fn check_and_close_if_needed(
     // Get active tree
     let active_tree = {
         let idx = index.lock().await;
-        idx.get_active_tree()
-            .map_err(|e| crate::error::ServerError::Storage(crate::error::StorageError::Database(e.to_string())))?
+        idx.get_active_tree().map_err(|e| {
+            crate::error::ServerError::Storage(crate::error::StorageError::Database(e.to_string()))
+        })?
     };
 
     let active_tree = match active_tree {
@@ -36,7 +37,11 @@ pub async fn check_and_close_if_needed(
             let tree_id = {
                 let idx = index.lock().await;
                 idx.create_active_tree(&origin_id, tree_head.tree_size)
-                    .map_err(|e| crate::error::ServerError::Storage(crate::error::StorageError::Database(e.to_string())))?
+                    .map_err(|e| {
+                        crate::error::ServerError::Storage(crate::error::StorageError::Database(
+                            e.to_string(),
+                        ))
+                    })?
             };
             tracing::info!(
                 tree_id = tree_id,
@@ -97,7 +102,11 @@ pub async fn check_and_close_if_needed(
     let (closed_tree_id, new_tree_id) = {
         let mut idx = index.lock().await;
         idx.close_tree_and_create_new(&origin_id, tree_head.tree_size, &tree_head.root_hash)
-            .map_err(|e| crate::error::ServerError::Storage(crate::error::StorageError::Database(e.to_string())))?
+            .map_err(|e| {
+                crate::error::ServerError::Storage(crate::error::StorageError::Database(
+                    e.to_string(),
+                ))
+            })?
     };
 
     tracing::info!(

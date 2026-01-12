@@ -10,6 +10,7 @@ use std::cell::RefCell;
 use std::path::Path;
 
 /// Entry with slab location
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct IndexEntry {
     pub id: uuid::Uuid,
@@ -58,7 +59,9 @@ impl IndexStore {
             "#,
         )?;
 
-        Ok(Self { conn: RefCell::new(conn) })
+        Ok(Self {
+            conn: RefCell::new(conn),
+        })
     }
 
     /// Initialize schema (create tables if needed)
@@ -76,6 +79,7 @@ impl IndexStore {
     }
 
     /// Run migrations from v2 to v3
+    #[allow(dead_code)]
     pub fn migrate(&self) -> rusqlite::Result<()> {
         let current: u32 = self
             .conn
@@ -88,7 +92,9 @@ impl IndexStore {
             .unwrap_or(2);
 
         if current < 3 {
-            self.conn.borrow().execute_batch(super::schema::MIGRATE_V2_TO_V3)?;
+            self.conn
+                .borrow()
+                .execute_batch(super::schema::MIGRATE_V2_TO_V3)?;
         }
 
         Ok(())
@@ -171,6 +177,7 @@ impl IndexStore {
     }
 
     /// Get current slab ID
+    #[allow(dead_code)]
     pub fn get_current_slab(&self) -> rusqlite::Result<u32> {
         match self.conn.borrow().query_row(
             "SELECT value FROM atl_config WHERE key = 'current_slab_id'",
@@ -184,6 +191,7 @@ impl IndexStore {
     }
 
     /// Set current slab ID
+    #[allow(dead_code)]
     pub fn set_current_slab(&self, slab_id: u32) -> rusqlite::Result<()> {
         let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
         self.conn.borrow().execute(
@@ -194,7 +202,8 @@ impl IndexStore {
     }
 
     /// Begin transaction
-    pub fn transaction(&mut self) -> rusqlite::Result<Transaction> {
+    #[allow(dead_code)]
+    pub fn transaction(&mut self) -> rusqlite::Result<Transaction<'_>> {
         self.conn.get_mut().transaction()
     }
 
@@ -394,6 +403,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "benchmark test - machine dependent timing"]
     fn test_batch_insert_performance() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.db");

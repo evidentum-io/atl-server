@@ -34,8 +34,22 @@ pub async fn recover(
         result.discarded.len()
     );
 
-    // Replay committed batches
+    // Get current tree size from SQLite to skip already-replayed batches
+    let current_tree_size = index.get_tree_size()?;
+
+    // Replay committed batches (only those not yet in SQLite)
     for batch in result.replay_needed {
+        // Skip if this batch was already applied to SQLite
+        let batch_end_size = batch.tree_size_before + batch.entries.len() as u64;
+        if batch_end_size <= current_tree_size {
+            tracing::debug!(
+                "skipping batch {} (already in SQLite: {} >= {})",
+                batch.batch_id,
+                current_tree_size,
+                batch_end_size
+            );
+            continue;
+        }
         tracing::debug!("replaying batch {}", batch.batch_id);
 
         // Convert WAL entries to BatchInsert format

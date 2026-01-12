@@ -38,12 +38,12 @@ pub async fn handle_get_receipt(
         .get_inclusion_proof(&entry_id, None)
         .map_err(|e| Status::internal(e.to_string()))?;
 
-    // Get latest checkpoint
-    let checkpoint = server
-        .storage()
-        .get_latest_checkpoint()
-        .map_err(|e| Status::internal(e.to_string()))?
-        .ok_or_else(|| Status::internal("no checkpoint available"))?;
+    // Create checkpoint on the fly using current tree head and signer
+    let head = server.storage().tree_head();
+    let checkpoint =
+        server
+            .signer()
+            .sign_checkpoint_struct(head.origin, head.tree_size, &head.root_hash);
 
     // Get anchors if requested
     let anchors = if req.include_anchors {

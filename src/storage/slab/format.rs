@@ -113,15 +113,21 @@ impl SlabHeader {
     /// Calculate number of nodes at a specific level
     ///
     /// Level 0 = leaves, level 1 = first internal level, etc.
+    /// Uses ceiling division to correctly handle non-power-of-2 leaf counts.
     ///
     /// # Arguments
     /// * `level` - Tree level (0 = leaves)
     /// * `max_leaves` - Maximum leaves in tree
     ///
     /// # Returns
-    /// Number of nodes at this level
+    /// Number of nodes at this level (at least 1 for non-empty trees)
     pub fn nodes_at_level(level: u32, max_leaves: u32) -> usize {
-        (max_leaves as usize) >> level
+        if max_leaves == 0 {
+            return 0;
+        }
+        // Ceiling division: ceil(max_leaves / 2^level)
+        let divisor = 1usize << level;
+        (max_leaves as usize).div_ceil(divisor)
     }
 
     /// Calculate file offset for start of a given level
@@ -259,9 +265,9 @@ mod tests {
         // 8 leaves = 15 total nodes = 15 * 32 = 480 bytes data + 32 bytes header
         assert_eq!(SlabHeader::file_size(8), SlabHeader::SIZE + 15 * NODE_SIZE);
 
-        // 1M leaves = ~2M nodes = ~64 MB
+        // 1M leaves = 1,999,999 nodes = exactly 64 MB
         let size = SlabHeader::file_size(1_000_000);
-        assert!(size > 64_000_000 && size < 65_000_000);
+        assert_eq!(size, 64_000_000);
     }
 
     #[test]

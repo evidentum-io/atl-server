@@ -2,9 +2,7 @@
 //!
 //! Provides atomic batch writes with fsync guarantees.
 
-use crate::storage::wal::format::{
-    WalEntry, WalHeader, WalTrailer, COMMIT_DONE, COMMIT_PENDING,
-};
+use crate::storage::wal::format::{WalEntry, WalHeader, WalTrailer, COMMIT_DONE, COMMIT_PENDING};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -59,8 +57,9 @@ impl WalWriter {
             let name_str = name.to_string_lossy();
 
             // Parse batch_{id}.wal or batch_{id}.wal.done
+            // Must strip .done first, then .wal (for .wal.done files)
             if let Some(id_str) = name_str.strip_prefix("batch_") {
-                let id_str = id_str.trim_end_matches(".wal").trim_end_matches(".done");
+                let id_str = id_str.trim_end_matches(".done").trim_end_matches(".wal");
                 if let Ok(batch_id) = id_str.parse::<u64>() {
                     max_batch_id = max_batch_id.max(batch_id);
                 }
@@ -200,6 +199,7 @@ impl WalWriter {
     }
 
     /// Get next batch ID
+    #[allow(dead_code)]
     #[must_use]
     pub fn next_batch_id(&self) -> u64 {
         self.next_batch_id

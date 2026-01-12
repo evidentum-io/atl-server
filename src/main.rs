@@ -208,7 +208,6 @@ async fn run_node(args: Args) -> anyhow::Result<()> {
 async fn run_sequencer(args: Args) -> anyhow::Result<()> {
     use std::path::PathBuf;
     use std::sync::Arc;
-    use traits::Storage;
 
     tracing::info!("Starting in SEQUENCER mode");
 
