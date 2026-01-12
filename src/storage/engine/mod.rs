@@ -21,7 +21,7 @@ use crate::storage::slab::{SlabConfig, SlabManager};
 use crate::storage::wal::{WalEntry, WalWriter};
 use crate::traits::{
     AppendParams, BatchResult, ConsistencyProof, Entry, EntryResult, InclusionProof, ProofProvider,
-    Storage, TreeHead,
+    Storage, TreeHead, TreeRotator,
 };
 
 /// Cached tree state
@@ -476,6 +476,21 @@ impl Storage for StorageEngine {
     fn is_initialized(&self) -> bool {
         // Storage is considered initialized if tree_state has been set
         true
+    }
+}
+
+#[async_trait::async_trait]
+impl TreeRotator for StorageEngine {
+    async fn rotate_tree(
+        &self,
+        origin_id: &[u8; 32],
+        end_size: u64,
+        root_hash: &[u8; 32],
+    ) -> Result<TreeRotationResult, StorageError> {
+        // Delegate to the concrete implementation
+        // This allows TreeRotator trait to be used polymorphically while
+        // keeping the actual implementation in the StorageEngine method
+        StorageEngine::rotate_tree(self, origin_id, end_size, root_hash).await
     }
 }
 

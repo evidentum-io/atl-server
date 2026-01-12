@@ -8,5 +8,8 @@ pub mod config;
 pub mod job;
 pub mod logic;
 
+#[cfg(test)]
+mod tests;
+
 pub use config::TreeCloserConfig;
 pub use job::TreeCloser;

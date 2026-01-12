@@ -2,7 +2,7 @@
 
 use crate::error::ServerResult;
 use crate::storage::index::IndexStore;
-use crate::traits::Storage;
+use crate::traits::{Storage, TreeRotator};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -12,11 +12,13 @@ use tokio::sync::Mutex;
 /// 1. Get active tree (or create one if missing)
 /// 2. Check if tree is old enough (based on first_entry_at, NOT created_at)
 /// 3. Empty trees (first_entry_at = NULL) are NEVER closed
-/// 4. Close tree with status='pending_bitcoin' (OTS anchoring will be done by ots_job)
-/// 5. Create new active tree atomically
+/// 4. Close tree and create new one with genesis leaf (via TreeRotator)
+/// 5. Genesis leaf is inserted into BOTH Slab and SQLite
+/// 6. OTS anchoring will be done by ots_job separately
 pub async fn check_and_close_if_needed(
     index: &Arc<Mutex<IndexStore>>,
     storage: &Arc<dyn Storage>,
+    rotator: &Arc<dyn TreeRotator>,
     tree_lifetime_secs: u64,
 ) -> ServerResult<()> {
     let tree_head = storage.tree_head();
@@ -97,25 +99,20 @@ pub async fn check_and_close_if_needed(
         "Closing tree (timer started from first entry), OTS anchoring will be done by ots_job"
     );
 
-    // Close tree and create new one ATOMICALLY with chain link
-    // Tree is marked as 'pending_bitcoin', bitcoin_anchor_id will be set by ots_job
-    // NOTE: Genesis leaf insertion is NOT done here - will be done by StorageEngine::rotate_tree()
-    let result = {
-        let mut idx = index.lock().await;
-        idx.close_tree_and_create_new(&origin_id, tree_head.tree_size, &tree_head.root_hash)
-            .map_err(|e| {
-                crate::error::ServerError::Storage(crate::error::StorageError::Database(
-                    e.to_string(),
-                ))
-            })?
-    };
+    // Rotate tree: close current tree and create new one with genesis leaf
+    // This uses TreeRotator trait which ensures genesis leaf is inserted into BOTH Slab and SQLite
+    let result = rotator
+        .rotate_tree(&origin_id, tree_head.tree_size, &tree_head.root_hash)
+        .await
+        .map_err(crate::error::ServerError::Storage)?;
 
     tracing::info!(
         closed_tree_id = result.closed_tree_id,
         new_tree_id = result.new_tree_id,
-        end_size = tree_head.tree_size,
+        genesis_leaf_index = result.genesis_leaf_index,
+        new_tree_size = result.new_tree_head.tree_size,
         prev_tree_id = ?result.closed_tree_metadata.prev_tree_id,
-        "Tree closed with chain link, new active tree created (genesis leaf will be inserted by rotate_tree), pending OTS anchoring by ots_job"
+        "Tree rotated with genesis leaf in both Slab and SQLite, pending OTS anchoring by ots_job"
     );
 
     // TODO: Record closed tree in Chain Index DB

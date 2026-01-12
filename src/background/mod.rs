@@ -20,7 +20,7 @@ pub mod tsa_job;
 use crate::error::ServerResult;
 use crate::storage::engine::StorageEngine;
 use crate::storage::index::IndexStore;
-use crate::traits::Storage;
+use crate::traits::{Storage, TreeRotator};
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
 
@@ -36,8 +36,8 @@ pub use tsa_job::TsaAnchoringJob;
 pub struct BackgroundJobRunner {
     /// Index store for tree lifecycle and anchoring
     index: Arc<Mutex<IndexStore>>,
-    /// Storage engine for tree head queries (via Storage trait)
-    storage: Arc<dyn Storage>,
+    /// Storage engine (concrete type, implements both Storage and TreeRotator)
+    storage: Arc<StorageEngine>,
     #[cfg(feature = "ots")]
     ots_client: Arc<dyn crate::anchoring::ots::OtsClient>,
     config: BackgroundConfig,
@@ -87,11 +87,15 @@ impl BackgroundJobRunner {
 
         let mut handles = Vec::new();
 
-        // 1. Tree Closer (includes OTS submit on tree close)
+        // 1. Tree Closer (rotates trees with genesis leaf insertion)
         {
+            // StorageEngine implements both Storage and TreeRotator traits
+            // We pass it as both Storage and TreeRotator to enable proper tree rotation
+            let storage_arc = Arc::clone(&self.storage);
             let closer = TreeCloser::new(
                 Arc::clone(&self.index),
-                Arc::clone(&self.storage),
+                storage_arc.clone() as Arc<dyn Storage>,
+                storage_arc.clone() as Arc<dyn TreeRotator>,
                 self.config.tree_closer.clone(),
             );
             let shutdown_rx = self.shutdown_tx.subscribe();
@@ -109,7 +113,7 @@ impl BackgroundJobRunner {
         if !self.config.tsa_job.tsa_urls.is_empty() {
             let job = TsaAnchoringJob::new(
                 Arc::clone(&self.index),
-                Arc::clone(&self.storage),
+                Arc::clone(&self.storage) as Arc<dyn Storage>,
                 self.config.tsa_job.clone(),
             );
             let shutdown_rx = self.shutdown_tx.subscribe();
@@ -130,7 +134,7 @@ impl BackgroundJobRunner {
         {
             let ots_job = OtsJob::new(
                 Arc::clone(&self.index),
-                Arc::clone(&self.storage),
+                Arc::clone(&self.storage) as Arc<dyn Storage>,
                 Arc::clone(&self.ots_client),
                 self.config.ots_job.clone(),
             );
