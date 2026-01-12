@@ -5,7 +5,7 @@
 //! - Check commit flags
 //! - Determine which batches need replay
 
-use crate::storage::high_throughput::wal::format::{WalEntry, WalHeader, WalTrailer, COMMIT_DONE};
+use crate::storage::wal::format::{WalEntry, WalHeader, WalTrailer, COMMIT_DONE};
 use std::fs::{self, File};
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -272,7 +272,7 @@ impl WalRecovery {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::high_throughput::wal::writer::WalWriter;
+    use crate::storage::wal::writer::WalWriter;
     use tempfile::tempdir;
 
     #[test]

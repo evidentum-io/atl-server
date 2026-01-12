@@ -2,7 +2,7 @@
 //!
 //! Provides atomic batch writes with fsync guarantees.
 
-use crate::storage::high_throughput::wal::format::{
+use crate::storage::wal::format::{
     WalEntry, WalHeader, WalTrailer, COMMIT_DONE, COMMIT_PENDING,
 };
 use std::fs::{self, File, OpenOptions};
@@ -203,6 +203,17 @@ impl WalWriter {
     #[must_use]
     pub fn next_batch_id(&self) -> u64 {
         self.next_batch_id
+    }
+
+    /// Set next batch ID (used during recovery)
+    pub fn set_next_batch_id(&mut self, batch_id: u64) {
+        self.next_batch_id = batch_id;
+    }
+
+    /// Get WAL directory path
+    #[must_use]
+    pub fn dir(&self) -> &Path {
+        &self.wal_dir
     }
 
     /// Get path for batch file

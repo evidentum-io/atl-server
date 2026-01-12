@@ -1,4 +1,4 @@
-// File: src/storage/high_throughput/index/queries.rs
+// File: src/storage/index/queries.rs
 
 //! SQLite index operations for HTS
 //!

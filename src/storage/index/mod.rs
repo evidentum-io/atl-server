@@ -1,4 +1,4 @@
-// File: src/storage/high_throughput/index/mod.rs
+// File: src/storage/index/mod.rs
 
 //! SQLite index store for HTS (High Throughput Storage)
 //!

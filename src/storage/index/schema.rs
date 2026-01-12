@@ -1,4 +1,4 @@
-// File: src/storage/high_throughput/index/schema.rs
+// File: src/storage/index/schema.rs
 
 //! SQLite schema v3 for High-Throughput Storage
 //!

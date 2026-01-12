@@ -1,0 +1,352 @@
+// File: src/storage/engine.rs
+
+#![allow(dead_code)]
+
+//! Storage engine coordinator
+//!
+//! Orchestrates WAL, Slab, and SQLite components to implement the Storage trait.
+//! This is the ONLY concrete implementation - no fallback storage.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tokio::sync::{Mutex, RwLock};
+use uuid::Uuid;
+
+use crate::error::StorageError;
+use crate::storage::config::StorageConfig;
+use crate::storage::index::{BatchInsert, IndexStore};
+use crate::storage::recovery;
+use crate::storage::slab::{SlabConfig, SlabManager};
+use crate::storage::wal::{WalEntry, WalWriter};
+use crate::traits::{
+    AppendParams, BatchResult, ConsistencyProof, Entry, EntryResult, InclusionProof, ProofProvider,
+    Storage, TreeHead,
+};
+
+/// Cached tree state
+struct TreeState {
+    /// Current tree size
+    tree_size: u64,
+
+    /// Current root hash
+    root_hash: [u8; 32],
+
+    /// Origin ID (hash of log's public key)
+    origin: [u8; 32],
+}
+
+/// Storage engine (THE storage implementation)
+///
+/// Coordinates WAL, Slab, and SQLite for high-throughput append operations.
+pub struct StorageEngine {
+    /// Configuration
+    config: StorageConfig,
+
+    /// WAL writer
+    wal: Arc<RwLock<WalWriter>>,
+
+    /// Slab manager
+    slabs: Arc<RwLock<SlabManager>>,
+
+    /// SQLite index (Mutex because Connection is not Sync)
+    index: Arc<Mutex<IndexStore>>,
+
+    /// Cached tree state
+    tree_state: RwLock<TreeState>,
+
+    /// Health status
+    healthy: AtomicBool,
+}
+
+impl StorageEngine {
+    /// Create new engine with configuration
+    ///
+    /// # Errors
+    ///
+    /// Returns `StorageError` if:
+    /// - Directory creation fails
+    /// - Component initialization fails
+    /// - Recovery fails
+    pub async fn new(config: StorageConfig, origin: [u8; 32]) -> Result<Self, StorageError> {
+        // Create directories if needed
+        std::fs::create_dir_all(config.wal_dir())?;
+        std::fs::create_dir_all(config.slab_dir())?;
+        std::fs::create_dir_all(&config.data_dir)?;
+
+        // Initialize components
+        let mut wal = WalWriter::new(config.wal_dir())?;
+        let mut slabs = SlabManager::new(
+            config.slab_dir(),
+            SlabConfig {
+                max_leaves: config.slab_capacity,
+                max_open_slabs: config.max_open_slabs,
+            },
+        )?;
+
+        let index = IndexStore::open(&config.db_path())?;
+        index.initialize()?;
+
+        // Run crash recovery
+        recovery::recover(&mut wal, &mut slabs, &index).await?;
+
+        // Get tree size from index
+        let tree_size = index.get_tree_size()?;
+
+        // Get root hash from slab (or compute if tree is empty)
+        let root_hash = if tree_size > 0 {
+            slabs.get_root(tree_size)?
+        } else {
+            [0u8; 32]
+        };
+
+        let tree_state = TreeState {
+            tree_size,
+            root_hash,
+            origin,
+        };
+
+        Ok(Self {
+            config,
+            wal: Arc::new(RwLock::new(wal)),
+            slabs: Arc::new(RwLock::new(slabs)),
+            index: Arc::new(Mutex::new(index)),
+            tree_state: RwLock::new(tree_state),
+            healthy: AtomicBool::new(true),
+        })
+    }
+
+    /// Convert AppendParams to WalEntry
+    fn params_to_wal_entry(id: Uuid, params: &AppendParams) -> WalEntry {
+        let metadata_bytes = params
+            .metadata_cleartext
+            .as_ref()
+            .map(|v| v.to_string().into_bytes())
+            .unwrap_or_default();
+
+        let external_id_bytes = params
+            .external_id
+            .as_ref()
+            .map(|s| s.as_bytes().to_vec())
+            .unwrap_or_default();
+
+        WalEntry {
+            id: *id.as_bytes(),
+            payload_hash: params.payload_hash,
+            metadata_hash: params.metadata_hash,
+            metadata: metadata_bytes,
+            external_id: external_id_bytes,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Storage for StorageEngine {
+    async fn append_batch(&self, params: Vec<AppendParams>) -> Result<BatchResult, StorageError> {
+        if params.is_empty() {
+            return Ok(BatchResult {
+                entries: vec![],
+                tree_head: self.tree_head(),
+                committed_at: chrono::Utc::now(),
+            });
+        }
+
+        // 1. Prepare entries
+        let tree_size = self.tree_state.read().await.tree_size;
+        let entries: Vec<_> = params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let id = Uuid::new_v4();
+                let leaf_index = tree_size + i as u64;
+                let leaf_hash = atl_core::compute_leaf_hash(&p.payload_hash, &p.metadata_hash);
+                (id, leaf_index, leaf_hash, p)
+            })
+            .collect();
+
+        // 2. Write to WAL
+        let wal_entries: Vec<WalEntry> = entries
+            .iter()
+            .map(|(id, _, _, p)| Self::params_to_wal_entry(*id, p))
+            .collect();
+
+        let batch_id = {
+            let mut wal = self.wal.write().await;
+            wal.write_batch(&wal_entries, tree_size)?
+        };
+
+        // 3. Update Slab
+        let leaf_hashes: Vec<[u8; 32]> = entries.iter().map(|(_, _, h, _)| *h).collect();
+        let new_root = {
+            let mut slabs = self.slabs.write().await;
+            slabs.append_leaves(&leaf_hashes)?
+        };
+
+        // 4. Update SQLite
+        let batch_inserts: Vec<BatchInsert> = entries
+            .iter()
+            .map(|(id, leaf_index, _, p)| {
+                let slab_id = (*leaf_index / u64::from(self.config.slab_capacity)) as u32 + 1;
+                let slab_offset = (*leaf_index % u64::from(self.config.slab_capacity)) * 32;
+
+                BatchInsert {
+                    id: *id,
+                    leaf_index: *leaf_index,
+                    slab_id,
+                    slab_offset,
+                    payload_hash: p.payload_hash,
+                    metadata_hash: p.metadata_hash,
+                    metadata_cleartext: p.metadata_cleartext.as_ref().map(|v| v.to_string()),
+                    external_id: p.external_id.clone(),
+                }
+            })
+            .collect();
+
+        {
+            let mut index = self.index.lock().await;
+            index.insert_batch(&batch_inserts)?;
+            let new_tree_size = tree_size + params.len() as u64;
+            index.set_tree_size(new_tree_size)?;
+        }
+
+        // 5. Finalize
+        {
+            let wal = self.wal.read().await;
+            wal.mark_committed(batch_id)?;
+            wal.cleanup(self.config.wal_keep_count)?;
+        }
+
+        // 6. Update cached state
+        {
+            let mut state = self.tree_state.write().await;
+            state.tree_size = tree_size + params.len() as u64;
+            state.root_hash = new_root;
+        }
+
+        // 7. Build result
+        let entry_results: Vec<EntryResult> = entries
+            .iter()
+            .map(|(id, leaf_index, leaf_hash, _)| EntryResult {
+                id: *id,
+                leaf_index: *leaf_index,
+                leaf_hash: *leaf_hash,
+            })
+            .collect();
+
+        Ok(BatchResult {
+            entries: entry_results,
+            tree_head: self.tree_head(),
+            committed_at: chrono::Utc::now(),
+        })
+    }
+
+    async fn flush(&self) -> Result<(), StorageError> {
+        let mut slabs = self.slabs.write().await;
+        slabs.flush()?;
+        Ok(())
+    }
+
+    fn tree_head(&self) -> TreeHead {
+        // Fast path: read from cache without async
+        let state = self.tree_state.blocking_read();
+        TreeHead {
+            tree_size: state.tree_size,
+            root_hash: state.root_hash,
+            origin: state.origin,
+        }
+    }
+
+    fn origin_id(&self) -> [u8; 32] {
+        self.tree_state.blocking_read().origin
+    }
+
+    fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::Relaxed)
+    }
+}
+
+#[async_trait::async_trait]
+impl ProofProvider for StorageEngine {
+    async fn get_entry(&self, id: &Uuid) -> Result<Entry, StorageError> {
+        let index = self.index.lock().await;
+        index
+            .get_entry(id)?
+            .map(Into::into)
+            .ok_or(StorageError::NotFound)
+    }
+
+    async fn get_entry_by_index(&self, index: u64) -> Result<Entry, StorageError> {
+        let idx = self.index.lock().await;
+        idx.get_entry_by_index(index)?
+            .map(Into::into)
+            .ok_or(StorageError::NotFound)
+    }
+
+    async fn get_entry_by_external_id(&self, external_id: &str) -> Result<Entry, StorageError> {
+        let index = self.index.lock().await;
+        index
+            .get_entry_by_external_id(external_id)?
+            .map(Into::into)
+            .ok_or(StorageError::NotFound)
+    }
+
+    async fn get_inclusion_proof(
+        &self,
+        leaf_index: u64,
+        tree_size: Option<u64>,
+    ) -> Result<InclusionProof, StorageError> {
+        let tree_size = tree_size.unwrap_or_else(|| self.tree_head().tree_size);
+
+        if leaf_index >= tree_size {
+            return Err(StorageError::InvalidIndex);
+        }
+
+        let path = {
+            let mut slabs = self.slabs.write().await;
+            slabs.get_inclusion_path(leaf_index, tree_size)?
+        };
+
+        Ok(InclusionProof {
+            leaf_index,
+            tree_size,
+            path,
+        })
+    }
+
+    async fn get_consistency_proof(
+        &self,
+        from_size: u64,
+        to_size: u64,
+    ) -> Result<ConsistencyProof, StorageError> {
+        let current_tree_size = self.tree_head().tree_size;
+
+        if from_size > to_size || to_size > current_tree_size {
+            return Err(StorageError::InvalidRange);
+        }
+
+        // Compute consistency proof using atl-core algorithm
+        // Use RefCell for interior mutability in Fn closure
+        let proof = {
+            let mut slabs = self.slabs.write().await;
+            let slabs_cell = std::cell::RefCell::new(&mut *slabs);
+
+            atl_core::generate_consistency_proof(from_size, to_size, |level, index| {
+                slabs_cell
+                    .borrow_mut()
+                    .get_node(level, index)
+                    .ok()
+                    .flatten()
+            })
+            .map_err(|e| StorageError::Corruption(e.to_string()))?
+        };
+
+        Ok(ConsistencyProof {
+            from_size,
+            to_size,
+            path: proof.path,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests;
+
