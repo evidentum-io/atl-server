@@ -283,6 +283,19 @@ impl IndexStore {
         Ok(())
     }
 
+    /// Get tree by ID
+    pub fn get_tree(&self, tree_id: i64) -> rusqlite::Result<Option<TreeRecord>> {
+        self.connection()
+            .query_row(
+                "SELECT id, origin_id, status, start_size, end_size, root_hash, created_at,
+                        first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id, prev_tree_id
+                 FROM trees WHERE id = ?1",
+                params![tree_id],
+                row_to_tree,
+            )
+            .optional()
+    }
+
     /// Get tree covering a specific entry
     pub fn get_tree_covering_entry(&self, leaf_index: u64) -> rusqlite::Result<Option<TreeRecord>> {
         self.connection()

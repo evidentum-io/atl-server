@@ -81,9 +81,7 @@ async fn test_tree_rotator_trait_successful_rotation() {
     let root_hash = [42u8; 32];
 
     // Call rotate_tree
-    let result = rotator
-        .rotate_tree(&origin_id, end_size, &root_hash)
-        .await;
+    let result = rotator.rotate_tree(&origin_id, end_size, &root_hash).await;
 
     // Verify success
     assert!(result.is_ok());
@@ -104,9 +102,7 @@ async fn test_tree_rotator_trait_handles_failure() {
     let root_hash = [42u8; 32];
 
     // Call rotate_tree
-    let result = rotator
-        .rotate_tree(&origin_id, end_size, &root_hash)
-        .await;
+    let result = rotator.rotate_tree(&origin_id, end_size, &root_hash).await;
 
     // Verify failure
     assert!(result.is_err());
