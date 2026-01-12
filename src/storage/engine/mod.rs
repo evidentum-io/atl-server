@@ -83,11 +83,11 @@ impl StorageEngine {
             },
         )?;
 
-        let index = IndexStore::open(&config.db_path())?;
+        let mut index = IndexStore::open(&config.db_path())?;
         index.initialize()?;
 
         // Run crash recovery
-        recovery::recover(&mut wal, &mut slabs, &index).await?;
+        recovery::recover(&mut wal, &mut slabs, &mut index).await?;
 
         // Get tree size from index
         let tree_size = index.get_tree_size()?;
@@ -292,7 +292,7 @@ impl Storage for StorageEngine {
         // First get the entry to find its leaf_index
         let entry = Storage::get_entry(self, entry_id)?;
         let leaf_index = entry.leaf_index.ok_or_else(|| {
-            crate::error::ServerError::Storage(StorageError::NotFound)
+            crate::error::ServerError::Storage(StorageError::NotFound("entry not found".into()))
         })?;
 
         // Delegate to ProofProvider async method via blocking
@@ -319,6 +319,51 @@ impl Storage for StorageEngine {
             })
         })
     }
+
+    fn get_anchors(&self, tree_size: u64) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let index = self.index.lock().await;
+                index.get_anchors(tree_size)
+                    .map_err(|e| crate::error::ServerError::Storage(StorageError::Database(e.to_string())))
+            })
+        })
+    }
+
+    fn get_latest_anchored_size(&self) -> crate::error::ServerResult<Option<u64>> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let index = self.index.lock().await;
+                index.get_latest_anchored_size()
+                    .map_err(|e| crate::error::ServerError::Storage(StorageError::Database(e.to_string())))
+            })
+        })
+    }
+
+    fn get_anchors_covering(&self, target_tree_size: u64, limit: usize) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let index = self.index.lock().await;
+                index.get_anchors_covering(target_tree_size, limit)
+                    .map_err(|e| crate::error::ServerError::Storage(StorageError::Database(e.to_string())))
+            })
+        })
+    }
+
+    fn get_root_at_size(&self, tree_size: u64) -> crate::error::ServerResult<[u8; 32]> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut slabs = self.slabs.write().await;
+                slabs.get_root(tree_size)
+                    .map_err(|e| crate::error::ServerError::Storage(crate::error::StorageError::Io(e)))
+            })
+        })
+    }
+
+    fn is_initialized(&self) -> bool {
+        // Storage is considered initialized if tree_state has been set
+        true
+    }
 }
 
 #[async_trait::async_trait]
@@ -328,14 +373,14 @@ impl ProofProvider for StorageEngine {
         index
             .get_entry(id)?
             .map(Into::into)
-            .ok_or(StorageError::NotFound)
+            .ok_or(StorageError::NotFound("entry not found".into()))
     }
 
     async fn get_entry_by_index(&self, index: u64) -> Result<Entry, StorageError> {
         let idx = self.index.lock().await;
         idx.get_entry_by_index(index)?
             .map(Into::into)
-            .ok_or(StorageError::NotFound)
+            .ok_or(StorageError::NotFound("entry not found".into()))
     }
 
     async fn get_entry_by_external_id(&self, external_id: &str) -> Result<Entry, StorageError> {
@@ -343,7 +388,7 @@ impl ProofProvider for StorageEngine {
         index
             .get_entry_by_external_id(external_id)?
             .map(Into::into)
-            .ok_or(StorageError::NotFound)
+            .ok_or(StorageError::NotFound("entry not found".into()))
     }
 
     async fn get_inclusion_proof(
@@ -354,7 +399,7 @@ impl ProofProvider for StorageEngine {
         let tree_size = tree_size.unwrap_or_else(|| self.tree_head().tree_size);
 
         if leaf_index >= tree_size {
-            return Err(StorageError::InvalidIndex);
+            return Err(StorageError::InvalidIndex("invalid leaf index".into()));
         }
 
         let path = {
@@ -377,7 +422,7 @@ impl ProofProvider for StorageEngine {
         let current_tree_size = self.tree_head().tree_size;
 
         if from_size > to_size || to_size > current_tree_size {
-            return Err(StorageError::InvalidRange);
+            return Err(StorageError::InvalidRange("invalid range".into()));
         }
 
         // Compute consistency proof using atl-core algorithm

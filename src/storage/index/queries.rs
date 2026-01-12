@@ -6,6 +6,7 @@
 //! Tree nodes are NOT stored here - they live in Slab files.
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use std::cell::RefCell;
 use std::path::Path;
 
 /// Entry with slab location
@@ -38,7 +39,7 @@ pub struct BatchInsert {
 
 /// SQLite index operations
 pub struct IndexStore {
-    conn: Connection,
+    conn: RefCell<Connection>,
 }
 
 impl IndexStore {
@@ -57,16 +58,16 @@ impl IndexStore {
             "#,
         )?;
 
-        Ok(Self { conn })
+        Ok(Self { conn: RefCell::new(conn) })
     }
 
     /// Initialize schema (create tables if needed)
     pub fn initialize(&self) -> rusqlite::Result<()> {
-        self.conn.execute_batch(super::schema::SCHEMA_V3)?;
+        self.conn.borrow().execute_batch(super::schema::SCHEMA_V3)?;
 
         // Set schema version
         let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
-        self.conn.execute(
+        self.conn.borrow().execute(
             "INSERT OR REPLACE INTO atl_config (key, value, updated_at) VALUES ('schema_version', ?1, ?2)",
             params![super::schema::SCHEMA_VERSION.to_string(), now],
         )?;
@@ -78,6 +79,7 @@ impl IndexStore {
     pub fn migrate(&self) -> rusqlite::Result<()> {
         let current: u32 = self
             .conn
+            .borrow()
             .query_row(
                 "SELECT COALESCE(value, '2') FROM atl_config WHERE key = 'schema_version'",
                 [],
@@ -86,7 +88,7 @@ impl IndexStore {
             .unwrap_or(2);
 
         if current < 3 {
-            self.conn.execute_batch(super::schema::MIGRATE_V2_TO_V3)?;
+            self.conn.borrow().execute_batch(super::schema::MIGRATE_V2_TO_V3)?;
         }
 
         Ok(())
@@ -94,7 +96,7 @@ impl IndexStore {
 
     /// Insert batch of entries (within transaction)
     pub fn insert_batch(&mut self, entries: &[BatchInsert]) -> rusqlite::Result<()> {
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.get_mut().transaction()?;
         insert_batch_inner(&tx, entries)?;
         tx.commit()?;
         Ok(())
@@ -103,6 +105,7 @@ impl IndexStore {
     /// Get entry by ID
     pub fn get_entry(&self, id: &uuid::Uuid) -> rusqlite::Result<Option<IndexEntry>> {
         self.conn
+            .borrow()
             .query_row(
                 "SELECT id, leaf_index, slab_id, slab_offset, payload_hash, metadata_hash,
                         metadata_cleartext, external_id, tree_id, created_at
@@ -116,6 +119,7 @@ impl IndexStore {
     /// Get entry by leaf index
     pub fn get_entry_by_index(&self, leaf_index: u64) -> rusqlite::Result<Option<IndexEntry>> {
         self.conn
+            .borrow()
             .query_row(
                 "SELECT id, leaf_index, slab_id, slab_offset, payload_hash, metadata_hash,
                         metadata_cleartext, external_id, tree_id, created_at
@@ -132,6 +136,7 @@ impl IndexStore {
         external_id: &str,
     ) -> rusqlite::Result<Option<IndexEntry>> {
         self.conn
+            .borrow()
             .query_row(
                 "SELECT id, leaf_index, slab_id, slab_offset, payload_hash, metadata_hash,
                         metadata_cleartext, external_id, tree_id, created_at
@@ -144,7 +149,7 @@ impl IndexStore {
 
     /// Get current tree size
     pub fn get_tree_size(&self) -> rusqlite::Result<u64> {
-        match self.conn.query_row(
+        match self.conn.borrow().query_row(
             "SELECT value FROM atl_config WHERE key = 'tree_size'",
             [],
             |row| row.get::<_, String>(0),
@@ -158,7 +163,7 @@ impl IndexStore {
     /// Update tree size
     pub fn set_tree_size(&self, size: u64) -> rusqlite::Result<()> {
         let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
-        self.conn.execute(
+        self.conn.borrow().execute(
             "INSERT OR REPLACE INTO atl_config (key, value, updated_at) VALUES ('tree_size', ?1, ?2)",
             params![size.to_string(), now],
         )?;
@@ -167,7 +172,7 @@ impl IndexStore {
 
     /// Get current slab ID
     pub fn get_current_slab(&self) -> rusqlite::Result<u32> {
-        match self.conn.query_row(
+        match self.conn.borrow().query_row(
             "SELECT value FROM atl_config WHERE key = 'current_slab_id'",
             [],
             |row| row.get::<_, String>(0),
@@ -181,7 +186,7 @@ impl IndexStore {
     /// Set current slab ID
     pub fn set_current_slab(&self, slab_id: u32) -> rusqlite::Result<()> {
         let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
-        self.conn.execute(
+        self.conn.borrow().execute(
             "INSERT OR REPLACE INTO atl_config (key, value, updated_at) VALUES ('current_slab_id', ?1, ?2)",
             params![slab_id.to_string(), now],
         )?;
@@ -190,12 +195,17 @@ impl IndexStore {
 
     /// Begin transaction
     pub fn transaction(&mut self) -> rusqlite::Result<Transaction> {
-        self.conn.transaction()
+        self.conn.get_mut().transaction()
     }
 
     /// Get a reference to the underlying database connection
-    pub fn connection(&self) -> &rusqlite::Connection {
-        &self.conn
+    pub fn connection(&self) -> std::cell::Ref<'_, rusqlite::Connection> {
+        self.conn.borrow()
+    }
+
+    /// Get a mutable reference to the underlying database connection
+    pub fn connection_mut(&self) -> std::cell::RefMut<'_, rusqlite::Connection> {
+        self.conn.borrow_mut()
     }
 }
 
@@ -301,6 +311,7 @@ mod tests {
         // Verify tables exist
         let tables: Vec<String> = store
             .conn
+            .borrow()
             .prepare("SELECT name FROM sqlite_master WHERE type='table'")
             .unwrap()
             .query_map([], |row| row.get(0))
@@ -339,6 +350,7 @@ mod tests {
         // Verify count
         let count: i64 = store
             .conn
+            .borrow()
             .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
             .unwrap();
 

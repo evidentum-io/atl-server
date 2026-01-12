@@ -192,6 +192,21 @@ pub trait Storage: Send + Sync + 'static {
         from_size: u64,
         to_size: u64,
     ) -> crate::error::ServerResult<ConsistencyProof>;
+
+    /// Get anchors for a specific tree size
+    fn get_anchors(&self, tree_size: u64) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>>;
+
+    /// Get the most recent anchored tree size
+    fn get_latest_anchored_size(&self) -> crate::error::ServerResult<Option<u64>>;
+
+    /// Get anchors covering a target tree size
+    fn get_anchors_covering(&self, target_tree_size: u64, limit: usize) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>>;
+
+    /// Get root hash at specific tree size
+    fn get_root_at_size(&self, tree_size: u64) -> crate::error::ServerResult<[u8; 32]>;
+
+    /// Check if storage is initialized
+    fn is_initialized(&self) -> bool;
 }
 
 #[cfg(test)]

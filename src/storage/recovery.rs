@@ -22,7 +22,7 @@ use uuid::Uuid;
 pub async fn recover(
     wal: &mut WalWriter,
     slabs: &mut SlabManager,
-    index: &IndexStore,
+    index: &mut IndexStore,
 ) -> Result<(), StorageError> {
     // Scan WAL directory for pending/committed batches
     let recovery = WalRecovery::new(wal.dir().to_path_buf());

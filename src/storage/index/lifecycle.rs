@@ -125,7 +125,8 @@ impl IndexStore {
         end_size: u64,
         root_hash: &[u8; 32],
     ) -> rusqlite::Result<(i64, i64)> {
-        let tx = self.connection().transaction()?;
+        let mut conn = self.connection_mut();
+        let tx = conn.transaction()?;
         let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
 
         // Get current active tree ID
@@ -166,7 +167,8 @@ impl IndexStore {
 
     /// Get trees pending TSA anchoring
     pub fn get_trees_pending_tsa(&self) -> rusqlite::Result<Vec<TreeRecord>> {
-        let mut stmt = self.connection().prepare(
+        let conn = self.connection();
+        let mut stmt = conn.prepare(
             "SELECT id, origin_id, status, start_size, end_size, root_hash, created_at,
                     first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id
              FROM trees
@@ -180,7 +182,8 @@ impl IndexStore {
 
     /// Get trees pending Bitcoin confirmation
     pub fn get_trees_pending_bitcoin_confirmation(&self) -> rusqlite::Result<Vec<TreeRecord>> {
-        let mut stmt = self.connection().prepare(
+        let conn = self.connection();
+        let mut stmt = conn.prepare(
             "SELECT id, origin_id, status, start_size, end_size, root_hash, created_at,
                     first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id
              FROM trees WHERE status = 'pending_bitcoin' ORDER BY created_at ASC",
@@ -250,7 +253,8 @@ impl IndexStore {
 
     /// Get trees that need OTS submission (pending_bitcoin but no anchor)
     pub fn get_trees_without_bitcoin_anchor(&self) -> rusqlite::Result<Vec<TreeRecord>> {
-        let mut stmt = self.connection().prepare(
+        let conn = self.connection();
+        let mut stmt = conn.prepare(
             "SELECT id, origin_id, status, start_size, end_size, root_hash, created_at,
                     first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id
              FROM trees

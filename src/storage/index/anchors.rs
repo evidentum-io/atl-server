@@ -142,7 +142,8 @@ impl IndexStore {
 
     /// Get all anchors for a tree size
     pub fn get_anchors(&self, tree_size: u64) -> rusqlite::Result<Vec<Anchor>> {
-        let mut stmt = self.connection().prepare(
+        let conn = self.connection();
+        let mut stmt = conn.prepare(
             "SELECT id, tree_size, anchor_type, anchored_hash, timestamp, token, metadata
              FROM anchors WHERE tree_size = ?1",
         )?;
@@ -164,7 +165,8 @@ impl IndexStore {
 
     /// Get pending OTS anchors
     pub fn get_pending_ots_anchors(&self) -> rusqlite::Result<Vec<AnchorWithId>> {
-        let mut stmt = self.connection().prepare(
+        let conn = self.connection();
+        let mut stmt = conn.prepare(
             "SELECT id, tree_size, anchor_type, anchored_hash, timestamp, token, metadata, status
              FROM anchors WHERE anchor_type = 'bitcoin_ots' AND status = 'pending'",
         )?;
@@ -215,7 +217,8 @@ impl IndexStore {
         target_tree_size: u64,
         limit: usize,
     ) -> rusqlite::Result<Vec<Anchor>> {
-        let mut stmt = self.connection().prepare(
+        let conn = self.connection();
+        let mut stmt = conn.prepare(
             "SELECT a.id, a.tree_size, a.anchor_type, a.anchored_hash, a.timestamp, a.token, a.metadata
              FROM anchors a
              INNER JOIN (
@@ -246,7 +249,8 @@ impl IndexStore {
         root_hash: &[u8; 32],
         tree_size: u64,
     ) -> rusqlite::Result<i64> {
-        let tx = self.connection().transaction()?;
+        let mut conn = self.connection_mut();
+        let tx = conn.transaction()?;
         let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
 
         // Insert anchor
@@ -282,7 +286,8 @@ impl IndexStore {
         block_height: u64,
         block_time: u64,
     ) -> rusqlite::Result<()> {
-        let tx = self.connection().transaction()?;
+        let mut conn = self.connection_mut();
+        let tx = conn.transaction()?;
 
         // Update anchor token
         tx.execute(
