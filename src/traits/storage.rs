@@ -175,6 +175,23 @@ pub trait Storage: Send + Sync + 'static {
 
     /// Check if storage is healthy
     fn is_healthy(&self) -> bool;
+
+    /// Get entry by ID
+    fn get_entry(&self, id: &Uuid) -> crate::error::ServerResult<Entry>;
+
+    /// Get inclusion proof for entry
+    fn get_inclusion_proof(
+        &self,
+        entry_id: &Uuid,
+        tree_size: Option<u64>,
+    ) -> crate::error::ServerResult<InclusionProof>;
+
+    /// Get consistency proof between tree sizes
+    fn get_consistency_proof(
+        &self,
+        from_size: u64,
+        to_size: u64,
+    ) -> crate::error::ServerResult<ConsistencyProof>;
 }
 
 #[cfg(test)]

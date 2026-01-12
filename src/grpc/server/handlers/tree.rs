@@ -18,10 +18,7 @@ pub async fn handle_get_tree_head(
 ) -> Result<Response<TreeHeadResponse>, Status> {
     server.check_auth(&request)?;
 
-    let head = server
-        .storage()
-        .get_tree_head()
-        .map_err(|e| Status::internal(e.to_string()))?;
+    let head = server.storage().tree_head();
 
     let checkpoint = server
         .storage()

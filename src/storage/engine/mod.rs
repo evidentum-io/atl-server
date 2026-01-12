@@ -272,6 +272,53 @@ impl Storage for StorageEngine {
     fn is_healthy(&self) -> bool {
         self.healthy.load(Ordering::Relaxed)
     }
+
+    fn get_entry(&self, id: &Uuid) -> crate::error::ServerResult<Entry> {
+        // Delegate to ProofProvider async method via blocking
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                ProofProvider::get_entry(self, id)
+                    .await
+                    .map_err(Into::into)
+            })
+        })
+    }
+
+    fn get_inclusion_proof(
+        &self,
+        entry_id: &Uuid,
+        tree_size: Option<u64>,
+    ) -> crate::error::ServerResult<InclusionProof> {
+        // First get the entry to find its leaf_index
+        let entry = Storage::get_entry(self, entry_id)?;
+        let leaf_index = entry.leaf_index.ok_or_else(|| {
+            crate::error::ServerError::Storage(StorageError::NotFound)
+        })?;
+
+        // Delegate to ProofProvider async method via blocking
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                ProofProvider::get_inclusion_proof(self, leaf_index, tree_size)
+                    .await
+                    .map_err(Into::into)
+            })
+        })
+    }
+
+    fn get_consistency_proof(
+        &self,
+        from_size: u64,
+        to_size: u64,
+    ) -> crate::error::ServerResult<ConsistencyProof> {
+        // Delegate to ProofProvider async method via blocking
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                ProofProvider::get_consistency_proof(self, from_size, to_size)
+                    .await
+                    .map_err(Into::into)
+            })
+        })
+    }
 }
 
 #[async_trait::async_trait]

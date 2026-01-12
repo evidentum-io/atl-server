@@ -237,7 +237,7 @@ pub fn generate_receipt<S: Storage + ?Sized>(
         .ok_or_else(|| ServerError::EntryNotInTree(entry_id.to_string()))?;
 
     // 3. Get tree head
-    let tree_head = storage.get_tree_head()?;
+    let tree_head = storage.tree_head();
     let tree_size = options.at_tree_size.unwrap_or(tree_head.tree_size);
 
     // Validate tree size

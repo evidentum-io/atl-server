@@ -123,7 +123,7 @@ fn find_bitcoin_anchor_covering<S: Storage + ?Sized>(
     target_tree_size: u64,
 ) -> ServerResult<Option<crate::traits::anchor::Anchor>> {
     // Get current tree size to search from
-    let tree_head = storage.get_tree_head()?;
+    let tree_head = storage.tree_head();
 
     // Search from target_tree_size up to current
     for size in target_tree_size..=tree_head.tree_size {
@@ -144,7 +144,7 @@ fn find_bitcoin_anchor_covering<S: Storage + ?Sized>(
 fn get_latest_bitcoin_anchor<S: Storage + ?Sized>(
     storage: &S,
 ) -> ServerResult<Option<crate::traits::anchor::Anchor>> {
-    let tree_head = storage.get_tree_head()?;
+    let tree_head = storage.tree_head();
 
     // Search backwards from current tree size
     for size in (0..=tree_head.tree_size).rev() {
