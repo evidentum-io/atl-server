@@ -2,8 +2,8 @@
 
 use crate::anchoring::error::AnchorError;
 use crate::anchoring::ots::calendar::CalendarClient;
-use crate::anchoring::ots::proof::{detect_status, is_finalized};
-use crate::anchoring::ots::types::{OtsConfig, OtsStatus};
+use crate::anchoring::ots::proof::find_pending_attestation;
+use crate::anchoring::ots::types::OtsConfig;
 use atl_core::ots::DetachedTimestampFile;
 
 /// OpenTimestamps client
@@ -79,31 +79,28 @@ impl OpenTimestampsClient {
         &self,
         file: &DetachedTimestampFile,
     ) -> Result<Option<DetachedTimestampFile>, AnchorError> {
-        let status = detect_status(&file.timestamp);
+        // Find pending attestation with commitment
+        let Some((calendar_url, commitment)) = find_pending_attestation(&file.timestamp) else {
+            return Ok(None);
+        };
 
-        if is_finalized(&status) {
+        // Normalize URI: some calendars return URLs with leading '+' or '-'
+        let calendar_url = calendar_url.trim_start_matches(['+', '-']);
+        if calendar_url.is_empty() {
             return Ok(None);
         }
 
-        if let OtsStatus::Pending { calendar_url } = status {
-            // Normalize URI: some calendars return URLs with leading '+' or '-'
-            let calendar_url = calendar_url.trim_start_matches(['+', '-']);
-            if calendar_url.is_empty() {
-                return Ok(None);
-            }
+        // Query calendar for completed timestamp using commitment
+        if let Some(response_bytes) = self.calendar.upgrade(calendar_url, &commitment).await? {
+            // Parse calendar response into timestamp
+            // Response is a partial timestamp that needs to be merged with original
+            let upgraded =
+                DetachedTimestampFile::upgrade_from_calendar_response(file, &response_bytes)
+                    .map_err(|e| {
+                        AnchorError::InvalidResponse(format!("failed to parse upgrade: {}", e))
+                    })?;
 
-            let current_bytes = file
-                .to_bytes()
-                .map_err(|e| AnchorError::InvalidResponse(e.to_string()))?;
-
-            if let Some(upgraded_bytes) =
-                self.calendar.upgrade(calendar_url, &current_bytes).await?
-            {
-                let upgraded = DetachedTimestampFile::from_bytes(&upgraded_bytes)
-                    .map_err(|e| AnchorError::InvalidResponse(e.to_string()))?;
-
-                return Ok(Some(upgraded));
-            }
+            return Ok(Some(upgraded));
         }
 
         Ok(None)
