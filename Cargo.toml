@@ -1,6 +1,6 @@
 [package]
 name = "atl-server"
-version = "0.9.3"
+version = "0.10.3"
 edition = "2021"
 rust-version = "1.92.0"
 authors = ["Dmitrii Zatona <dmitrii@zatona.dev>"]
@@ -12,7 +12,7 @@ categories = ["cryptography", "web-programming"]
 
 [dependencies]
 # Core ATL library
-atl-core = { path = "../atl-core", version = "0.8", features = ["bitcoin-ots"] }
+atl-core = { path = "../atl-core", version = "0.9", features = ["bitcoin-ots"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -30,7 +30,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Database
-rusqlite = { version = "0.31", features = ["bundled"], optional = true }
+rusqlite = { version = "0.31", features = ["bundled"] }
 
 # Anchoring
 rasn = { version = "0.28", optional = true }
@@ -47,6 +47,9 @@ anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
 base64 = "0.22"
+crc = "3"
+memmap2 = "0.9"
+crc32fast = "1.4"
 
 # Logging
 tracing = "0.1"
@@ -75,13 +78,12 @@ sha2 = "0.10"
 bytes = "1"
 
 [features]
-default = ["sqlite", "rfc3161"]
-sqlite = ["rusqlite"]
+default = ["rfc3161", "ots"]
 rfc3161 = ["rasn", "rasn-cms", "reqwest"]
 ots = []  # Uses atl_core::ots (no external deps needed)
 monitoring = ["betteruptime-heartbeat"]  # Optional Better Uptime heartbeats
 grpc = ["tonic", "prost", "tonic-build"]  # gRPC Node-Sequencer architecture
-full = ["sqlite", "rfc3161", "ots", "monitoring", "grpc"]
+full = ["rfc3161", "ots", "monitoring", "grpc"]
 
 [[bin]]
 name = "atl-server"

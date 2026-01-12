@@ -18,11 +18,11 @@ pub mod tree_closer;
 pub mod tsa_job;
 
 use crate::error::ServerResult;
+use crate::storage::engine::StorageEngine;
+use crate::storage::index::IndexStore;
+use crate::traits::Storage;
 use std::sync::Arc;
-use tokio::sync::broadcast;
-
-#[cfg(feature = "sqlite")]
-use crate::storage::SqliteStore;
+use tokio::sync::{broadcast, Mutex};
 
 pub use config::BackgroundConfig;
 #[cfg(feature = "ots")]
@@ -34,8 +34,10 @@ pub use tsa_job::TsaAnchoringJob;
 ///
 /// Manages all proactive anchoring jobs. Jobs run continuously until shutdown.
 pub struct BackgroundJobRunner {
-    #[cfg(feature = "sqlite")]
-    storage: Arc<SqliteStore>,
+    /// Index store for tree lifecycle and anchoring
+    index: Arc<Mutex<IndexStore>>,
+    /// Storage engine for tree head queries (via Storage trait)
+    storage: Arc<dyn Storage>,
     #[cfg(feature = "ots")]
     ots_client: Arc<dyn crate::anchoring::ots::OtsClient>,
     config: BackgroundConfig,
@@ -43,9 +45,10 @@ pub struct BackgroundJobRunner {
 }
 
 impl BackgroundJobRunner {
-    #[cfg(feature = "sqlite")]
-    pub fn new(storage: Arc<SqliteStore>, config: BackgroundConfig) -> Self {
+    pub fn new(storage: Arc<StorageEngine>, config: BackgroundConfig) -> Self {
         let (shutdown_tx, _) = broadcast::channel(1);
+
+        let index = storage.index_store();
 
         #[cfg(feature = "ots")]
         let ots_client: Arc<dyn crate::anchoring::ots::OtsClient> = {
@@ -63,6 +66,7 @@ impl BackgroundJobRunner {
         };
 
         Self {
+            index,
             storage,
             #[cfg(feature = "ots")]
             ots_client,
@@ -75,7 +79,6 @@ impl BackgroundJobRunner {
     ///
     /// All jobs run proactively and continuously until shutdown.
     /// Jobs discover pending work by querying the database on each tick.
-    #[cfg(feature = "sqlite")]
     pub async fn start(&self) -> ServerResult<Vec<tokio::task::JoinHandle<()>>> {
         if self.config.disabled {
             tracing::info!("Background jobs disabled via ATL_BACKGROUND_DISABLED=true");
@@ -86,8 +89,11 @@ impl BackgroundJobRunner {
 
         // 1. Tree Closer (includes OTS submit on tree close)
         {
-            let closer =
-                TreeCloser::new(Arc::clone(&self.storage), self.config.tree_closer.clone());
+            let closer = TreeCloser::new(
+                Arc::clone(&self.index),
+                Arc::clone(&self.storage),
+                self.config.tree_closer.clone(),
+            );
             let shutdown_rx = self.shutdown_tx.subscribe();
             handles.push(tokio::spawn(async move {
                 closer.run(shutdown_rx).await;
@@ -101,7 +107,11 @@ impl BackgroundJobRunner {
 
         // 2. TSA Job (if TSA URLs configured)
         if !self.config.tsa_job.tsa_urls.is_empty() {
-            let job = TsaAnchoringJob::new(Arc::clone(&self.storage), self.config.tsa_job.clone());
+            let job = TsaAnchoringJob::new(
+                Arc::clone(&self.index),
+                Arc::clone(&self.storage),
+                self.config.tsa_job.clone(),
+            );
             let shutdown_rx = self.shutdown_tx.subscribe();
             handles.push(tokio::spawn(async move {
                 job.run(shutdown_rx).await;
@@ -119,6 +129,7 @@ impl BackgroundJobRunner {
         #[cfg(feature = "ots")]
         {
             let ots_job = OtsJob::new(
+                Arc::clone(&self.index),
                 Arc::clone(&self.storage),
                 Arc::clone(&self.ots_client),
                 self.config.ots_job.clone(),

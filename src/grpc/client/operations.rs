@@ -59,14 +59,6 @@ impl SequencerClient for GrpcDispatcher {
                     })
                     .collect::<Result<Vec<[u8; 32]>, _>>()?,
                 timestamp: chrono::Utc::now(),
-                #[cfg(feature = "rfc3161")]
-                tsa_anchor: response
-                    .tsa_anchor
-                    .map(|ta| crate::anchoring::rfc3161::TsaAnchor {
-                        tsa_url: ta.tsa_url,
-                        tsa_response: ta.tsa_response,
-                        timestamp: ta.timestamp,
-                    }),
             },
             checkpoint: proto_checkpoint_to_core(checkpoint)?,
         })
@@ -118,8 +110,6 @@ impl SequencerClient for GrpcDispatcher {
                         })
                         .collect::<Result<Vec<[u8; 32]>, _>>()?,
                     timestamp: chrono::Utc::now(),
-                    #[cfg(feature = "rfc3161")]
-                    tsa_anchor: None, // Batch doesn't include individual TSA anchors
                 })
             })
             .collect::<ServerResult<Vec<_>>>()?;

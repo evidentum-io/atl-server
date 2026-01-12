@@ -18,21 +18,18 @@ pub async fn handle_get_tree_head(
 ) -> Result<Response<TreeHeadResponse>, Status> {
     server.check_auth(&request)?;
 
-    let head = server
-        .storage()
-        .get_tree_head()
-        .map_err(|e| Status::internal(e.to_string()))?;
+    let head = server.storage().tree_head();
 
-    let checkpoint = server
-        .storage()
-        .get_latest_checkpoint()
-        .map_err(|e| Status::internal(e.to_string()))?;
+    // Create checkpoint on the fly using current tree head and signer
+    let cp = server
+        .signer()
+        .sign_checkpoint_struct(head.origin, head.tree_size, &head.root_hash);
 
     Ok(Response::new(TreeHeadResponse {
         tree_size: head.tree_size,
         root_hash: head.root_hash.to_vec(),
         origin: server.storage().origin_id().to_vec(),
-        latest_checkpoint: checkpoint.map(|cp| Checkpoint {
+        latest_checkpoint: Some(Checkpoint {
             origin: cp.origin.to_vec(),
             tree_size: cp.tree_size,
             timestamp: cp.timestamp,

@@ -2,38 +2,45 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::interval;
+use tokio::sync::Mutex;
+use tokio::time::{interval, Instant};
 
 use super::config::TsaJobConfig;
 use super::round_robin::RoundRobinSelector;
 use crate::error::ServerResult;
-
-#[cfg(feature = "sqlite")]
-use crate::storage::{SqliteStore, TreeRecord};
+use crate::storage::index::IndexStore;
+use crate::traits::Storage;
 
 /// TSA anchoring background job
 ///
 /// Processes trees that need TSA anchoring (Tier-1 evidence):
+/// - Periodic anchoring of active tree (every N seconds)
 /// - Trees with status IN ('pending_bitcoin', 'closed')
 /// - Trees without tsa_anchor_id (not yet anchored)
 ///
 /// Uses round-robin load distribution across configured TSA servers.
 pub struct TsaAnchoringJob {
-    #[cfg(feature = "sqlite")]
-    storage: Arc<SqliteStore>,
+    index: Arc<Mutex<IndexStore>>,
+    storage: Arc<dyn Storage>,
     selector: RoundRobinSelector,
     config: TsaJobConfig,
+    last_active_anchor: Arc<Mutex<Option<Instant>>>,
 }
 
 impl TsaAnchoringJob {
-    #[cfg(feature = "sqlite")]
-    pub fn new(storage: Arc<SqliteStore>, config: TsaJobConfig) -> Self {
+    pub fn new(
+        index: Arc<Mutex<IndexStore>>,
+        storage: Arc<dyn Storage>,
+        config: TsaJobConfig,
+    ) -> Self {
         let selector = RoundRobinSelector::new(config.tsa_urls.clone());
 
         Self {
+            index,
             storage,
             selector,
             config,
+            last_active_anchor: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -46,7 +53,6 @@ impl TsaAnchoringJob {
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
-                    #[cfg(feature = "sqlite")]
                     if let Err(e) = self.process_pending_trees().await {
                         tracing::error!(error = %e, "TSA anchoring job failed");
                     }
@@ -60,33 +66,19 @@ impl TsaAnchoringJob {
     }
 
     /// Process trees that don't have TSA anchors yet
-    #[cfg(feature = "sqlite")]
     async fn process_pending_trees(&self) -> ServerResult<()> {
-        // PART 1: Anchor active tree if needed (periodic TSA)
-        if let Some(active_tree) = self
-            .storage
-            .get_active_tree_needing_tsa(self.config.active_tree_interval_secs)?
-        {
-            match self.anchor_active_tree(&active_tree).await {
-                Ok(anchor_id) => {
-                    tracing::info!(
-                        tree_id = active_tree.id,
-                        anchor_id = anchor_id,
-                        "Periodic TSA anchor created for active tree"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        tree_id = active_tree.id,
-                        error = %e,
-                        "Periodic TSA anchoring failed for active tree, will retry"
-                    );
-                }
-            }
-        }
+        // PART 1: Anchor active tree periodically
+        self.process_active_tree_anchoring().await?;
 
         // PART 2: Anchor closed trees that don't have final TSA anchor
-        let pending_trees = self.storage.get_trees_pending_tsa()?;
+        let pending_trees = {
+            let idx = self.index.lock().await;
+            idx.get_trees_pending_tsa().map_err(|e| {
+                crate::error::ServerError::Storage(crate::error::StorageError::Database(
+                    e.to_string(),
+                ))
+            })?
+        };
 
         if pending_trees.is_empty() {
             return Ok(());
@@ -105,7 +97,7 @@ impl TsaAnchoringJob {
         for tree in trees_to_process {
             match self
                 .selector
-                .anchor_with_round_robin(&tree, &self.storage, self.config.timeout_ms)
+                .anchor_with_round_robin(&tree, &self.index, self.config.timeout_ms)
                 .await
             {
                 Ok(anchor_id) => {
@@ -128,15 +120,96 @@ impl TsaAnchoringJob {
         Ok(())
     }
 
-    /// Anchor active tree using current tree head
-    #[cfg(feature = "sqlite")]
-    async fn anchor_active_tree(&self, tree: &TreeRecord) -> ServerResult<i64> {
-        super::request::try_tsa_timestamp_active(
-            tree,
-            &self.selector,
-            &self.storage,
+    /// Process active tree anchoring (periodic)
+    ///
+    /// Anchors the current active tree state if:
+    /// 1. Tree has new entries since last anchor
+    /// 2. Enough time has passed since last active anchor
+    async fn process_active_tree_anchoring(&self) -> ServerResult<()> {
+        // Check if enough time has passed since last active anchor
+        let should_anchor = {
+            let last_anchor = self.last_active_anchor.lock().await;
+            match *last_anchor {
+                None => true,
+                Some(last_time) => {
+                    let elapsed = last_time.elapsed();
+                    elapsed >= Duration::from_secs(self.config.active_tree_interval_secs)
+                }
+            }
+        };
+
+        if !should_anchor {
+            return Ok(());
+        }
+
+        // Get current tree head
+        let tree_head = self.storage.tree_head();
+
+        // Skip if tree is empty
+        if tree_head.tree_size == 0 {
+            return Ok(());
+        }
+
+        // Get latest TSA anchored size
+        let last_anchored_size = {
+            let idx = self.index.lock().await;
+            idx.get_latest_tsa_anchored_size().map_err(|e| {
+                crate::error::ServerError::Storage(crate::error::StorageError::Database(
+                    e.to_string(),
+                ))
+            })?
+        };
+
+        // Skip if tree hasn't grown since last anchor
+        if let Some(last_size) = last_anchored_size {
+            if tree_head.tree_size <= last_size {
+                return Ok(());
+            }
+        }
+
+        // Anchor the active tree with round-robin server selection
+        tracing::info!(
+            tree_size = tree_head.tree_size,
+            root_hash = hex::encode(tree_head.root_hash),
+            "Anchoring active tree"
+        );
+
+        // Get next TSA URL from round-robin selector
+        let tsa_url = self.selector.next_url().map_err(|e| {
+            crate::error::ServerError::Internal(format!("No TSA servers configured: {}", e))
+        })?;
+
+        match super::request::create_tsa_anchor_for_tree_head(
+            tree_head.root_hash,
+            tree_head.tree_size,
+            &tsa_url,
             self.config.timeout_ms,
+            &self.index,
         )
         .await
+        {
+            Ok(anchor_id) => {
+                tracing::info!(
+                    tree_size = tree_head.tree_size,
+                    anchor_id = anchor_id,
+                    root_hash = hex::encode(tree_head.root_hash),
+                    "Active tree anchored successfully"
+                );
+
+                // Update last anchor time
+                let mut last_anchor = self.last_active_anchor.lock().await;
+                *last_anchor = Some(Instant::now());
+
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(
+                    tree_size = tree_head.tree_size,
+                    error = %e,
+                    "Failed to anchor active tree, will retry next interval"
+                );
+                Ok(())
+            }
+        }
     }
 }

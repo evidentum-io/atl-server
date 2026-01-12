@@ -70,33 +70,37 @@ impl CalendarClient {
     }
 
     /// Upgrade a pending timestamp by querying calendar
+    ///
+    /// Sends GET request to `{calendar_url}/timestamp/{hex_commitment}`
     pub async fn upgrade(
         &self,
         calendar_url: &str,
-        current_timestamp: &[u8],
+        commitment: &[u8],
     ) -> Result<Option<Vec<u8>>, AnchorError> {
-        tracing::debug!(calendar_url = %calendar_url, "Attempting upgrade");
+        let hex_commitment = hex::encode(commitment);
+        let url = format!("{}/timestamp/{}", calendar_url, hex_commitment);
 
-        let url = format!("{}/timestamp", calendar_url);
+        tracing::debug!(url = %url, "Fetching timestamp from calendar");
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/x-opentimestamps")
-            .body(current_timestamp.to_vec())
-            .send()
-            .await
-            .map_err(|e| {
-                if e.is_timeout() {
-                    AnchorError::Timeout(self.timeout.as_secs())
-                } else {
-                    AnchorError::Network(e.to_string())
-                }
-            })?;
+        let response = self.client.get(&url).send().await.map_err(|e| {
+            if e.is_timeout() {
+                AnchorError::Timeout(self.timeout.as_secs())
+            } else {
+                AnchorError::Network(e.to_string())
+            }
+        })?;
+
+        // 404 = timestamp not yet available
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            tracing::debug!("Timestamp not yet available at calendar");
+            return Ok(None);
+        }
 
         if !response.status().is_success() {
-            tracing::debug!("Upgrade not available yet");
-            return Ok(None);
+            return Err(AnchorError::ServiceError(format!(
+                "Calendar returned status {}",
+                response.status()
+            )));
         }
 
         let bytes = response

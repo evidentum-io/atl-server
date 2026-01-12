@@ -18,22 +18,14 @@ pub async fn handle_health_check(
 ) -> Result<Response<HealthCheckResponse>, Status> {
     server.check_auth(&request)?;
 
-    let head = server.storage().get_tree_head();
+    let head = server.storage().tree_head();
 
-    match head {
-        Ok(h) => Ok(Response::new(HealthCheckResponse {
-            healthy: true,
-            message: "OK".to_string(),
-            tree_size: h.tree_size,
-            uptime_secs: server.uptime_secs(),
-        })),
-        Err(e) => Ok(Response::new(HealthCheckResponse {
-            healthy: false,
-            message: format!("Storage error: {e}"),
-            tree_size: 0,
-            uptime_secs: server.uptime_secs(),
-        })),
-    }
+    Ok(Response::new(HealthCheckResponse {
+        healthy: true,
+        message: "OK".to_string(),
+        tree_size: head.tree_size,
+        uptime_secs: server.uptime_secs(),
+    }))
 }
 
 /// Handle TriggerAnchoring request
@@ -48,10 +40,7 @@ pub async fn handle_trigger_anchoring(
 
     let req = request.into_inner();
 
-    let head = server
-        .storage()
-        .get_tree_head()
-        .map_err(|e| Status::internal(e.to_string()))?;
+    let head = server.storage().tree_head();
 
     // TODO: Implement actual anchoring trigger
     // For now, return placeholder response

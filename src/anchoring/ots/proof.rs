@@ -67,6 +67,33 @@ fn collect_attestations(step: &atl_core::ots::Step) -> Vec<&Attestation> {
     attestations
 }
 
+/// Find pending attestation and return (calendar_url, commitment)
+///
+/// Commitment is the step.output for the pending attestation - this is what
+/// the calendar server uses to look up the completed timestamp.
+pub fn find_pending_attestation(timestamp: &Timestamp) -> Option<(String, Vec<u8>)> {
+    find_pending_in_step(&timestamp.first_step)
+}
+
+fn find_pending_in_step(step: &atl_core::ots::Step) -> Option<(String, Vec<u8>)> {
+    use atl_core::ots::StepData;
+
+    match &step.data {
+        StepData::Attestation(Attestation::Pending { uri }) => {
+            Some((uri.clone(), step.output.clone()))
+        }
+        StepData::Op(_) | StepData::Fork => {
+            for child in &step.next {
+                if let Some(result) = find_pending_in_step(child) {
+                    return Some(result);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 /// Check if a timestamp is finalized (Bitcoin confirmed)
 #[must_use]
 pub fn is_finalized(status: &OtsStatus) -> bool {

@@ -1,7 +1,9 @@
 //! Trait definitions for storage and anchoring
 
 pub mod anchor;
+pub mod checkpoint;
 pub mod dispatcher;
+pub mod proof;
 pub mod storage;
 
 // Re-export all types
@@ -11,6 +13,9 @@ pub use anchor::{
 };
 
 #[allow(unused_imports)]
+pub use checkpoint::CheckpointStore;
+
+#[allow(unused_imports)]
 pub use dispatcher::{
     AnchoringStatus, BatchDispatchResult, ConsistencyProofInfo, ConsistencyProofResponse,
     DispatchResult, GetReceiptRequest, GrpcDispatcher, LocalDispatcher, PublicKeyInfo,
@@ -18,6 +23,10 @@ pub use dispatcher::{
 };
 
 #[allow(unused_imports)]
+pub use proof::ProofProvider;
+
+#[allow(unused_imports)]
 pub use storage::{
-    AppendParams, AppendResult, ConsistencyProof, Entry, InclusionProof, Storage, TreeHead,
+    AppendParams, AppendResult, BatchResult, ConsistencyProof, Entry, EntryResult, InclusionProof,
+    Storage, TreeHead,
 };

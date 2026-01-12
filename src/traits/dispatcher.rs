@@ -240,7 +240,7 @@ impl SequencerClient for LocalDispatcher {
         let results = self.handle.append_batch(params).await?;
 
         // Get tree head after batch
-        let tree_head = self.storage.get_tree_head()?;
+        let tree_head = self.storage.tree_head();
 
         // Create and sign checkpoint
         let checkpoint = self.signer.sign_checkpoint_struct(
@@ -282,7 +282,7 @@ impl SequencerClient for LocalDispatcher {
             (anchor.tree_size, root)
         } else {
             // No anchors - use current tree state
-            let tree_head = self.storage.get_tree_head()?;
+            let tree_head = self.storage.tree_head();
             (tree_head.tree_size, tree_head.root_hash)
         };
 
@@ -308,7 +308,7 @@ impl SequencerClient for LocalDispatcher {
     }
 
     async fn get_tree_head(&self) -> ServerResult<TreeHead> {
-        self.storage.get_tree_head()
+        Ok(self.storage.tree_head())
     }
 
     async fn get_consistency_proof(
@@ -317,7 +317,7 @@ impl SequencerClient for LocalDispatcher {
         to_size: u64,
     ) -> ServerResult<ConsistencyProofResponse> {
         let proof = self.storage.get_consistency_proof(from_size, to_size)?;
-        let tree_head = self.storage.get_tree_head()?;
+        let tree_head = self.storage.tree_head();
 
         // Get root hash at from_size (requires storage query or recomputation)
         // For now, use zero bytes - proper historical root lookup is a separate feature

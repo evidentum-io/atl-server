@@ -1,11 +1,10 @@
 // File: src/background/tsa_job/round_robin.rs
 
 use crate::error::{ServerError, ServerResult};
-use crate::storage::TreeRecord;
+use crate::storage::index::{IndexStore, TreeRecord};
 use std::sync::atomic::{AtomicUsize, Ordering};
-
-#[cfg(feature = "sqlite")]
-use crate::storage::SqliteStore;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 /// Round-robin TSA server selection
 ///
@@ -28,11 +27,10 @@ impl RoundRobinSelector {
     /// Try to anchor tree with round-robin TSA selection
     ///
     /// Returns anchor_id on success, error if all servers fail.
-    #[cfg(feature = "sqlite")]
     pub async fn anchor_with_round_robin(
         &self,
         tree: &TreeRecord,
-        storage: &SqliteStore,
+        index: &Arc<Mutex<IndexStore>>,
         timeout_ms: u64,
     ) -> ServerResult<i64> {
         if self.urls.is_empty() {
@@ -55,7 +53,7 @@ impl RoundRobinSelector {
                 "Attempting TSA timestamp"
             );
 
-            match super::request::try_tsa_timestamp(tree, tsa_url, storage, timeout_ms).await {
+            match super::request::try_tsa_timestamp(tree, tsa_url, index, timeout_ms).await {
                 Ok(anchor_id) => {
                     // Update round-robin index for next request
                     self.last_index.store(current_index, Ordering::Relaxed);
@@ -97,5 +95,21 @@ impl RoundRobinSelector {
     /// Get current last_index value
     pub fn last_index(&self) -> usize {
         self.last_index.load(Ordering::Relaxed)
+    }
+
+    /// Get next URL in round-robin order
+    ///
+    /// Returns the next URL to use for TSA requests.
+    /// Updates internal counter for subsequent calls.
+    pub fn next_url(&self) -> ServerResult<String> {
+        if self.urls.is_empty() {
+            return Err(ServerError::Internal("No TSA URLs configured".into()));
+        }
+
+        let num_servers = self.urls.len();
+        let current_index = (self.last_index.load(Ordering::Relaxed) + 1) % num_servers;
+        self.last_index.store(current_index, Ordering::Relaxed);
+
+        Ok(self.urls[current_index].clone())
     }
 }

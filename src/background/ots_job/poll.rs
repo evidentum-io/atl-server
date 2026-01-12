@@ -2,29 +2,37 @@
 //!
 //! Polls pending OTS anchors for Bitcoin confirmation and updates them atomically.
 
-#[cfg(all(feature = "sqlite", feature = "ots"))]
+#[cfg(feature = "ots")]
 use std::sync::Arc;
 
-#[cfg(all(feature = "sqlite", feature = "ots"))]
-use crate::error::ServerResult;
+#[cfg(feature = "ots")]
+use crate::error::{ServerError, ServerResult};
 
 #[cfg(feature = "ots")]
 use crate::anchoring::ots::{OtsClient, OtsStatus};
 
-#[cfg(all(feature = "sqlite", feature = "ots"))]
-use crate::storage::SqliteStore;
+#[cfg(feature = "ots")]
+use crate::storage::index::IndexStore;
+
+#[cfg(feature = "ots")]
+use tokio::sync::Mutex;
 
 /// Poll pending OTS anchors for Bitcoin confirmation
 ///
 /// Upgrades pending proofs via OTS calendar and updates database atomically
 /// when Bitcoin confirmation is detected.
-#[cfg(all(feature = "sqlite", feature = "ots"))]
+#[cfg(feature = "ots")]
 pub async fn poll_pending_anchors(
-    storage: &Arc<SqliteStore>,
+    index: &Arc<Mutex<IndexStore>>,
     client: &Arc<dyn OtsClient>,
     max_batch_size: usize,
 ) -> ServerResult<()> {
-    let pending = storage.get_pending_ots_anchors()?;
+    let pending = {
+        let idx = index.lock().await;
+        idx.get_pending_ots_anchors().map_err(|e| {
+            ServerError::Storage(crate::error::StorageError::Database(e.to_string()))
+        })?
+    };
 
     if pending.is_empty() {
         tracing::debug!("No pending OTS anchors");
@@ -65,12 +73,18 @@ pub async fn poll_pending_anchors(
                 block_height,
                 block_time,
             } => {
-                storage.confirm_ots_anchor_atomic(
-                    anchor.id,
-                    &upgrade_result.proof,
-                    block_height,
-                    block_time,
-                )?;
+                {
+                    let mut idx = index.lock().await;
+                    idx.confirm_ots_anchor_atomic(
+                        anchor.id,
+                        &upgrade_result.proof,
+                        block_height,
+                        block_time,
+                    )
+                    .map_err(|e| {
+                        ServerError::Storage(crate::error::StorageError::Database(e.to_string()))
+                    })?
+                };
 
                 tracing::info!(
                     anchor_id = anchor.id,
@@ -80,7 +94,15 @@ pub async fn poll_pending_anchors(
                 confirmed += 1;
             }
             OtsStatus::Pending { calendar_url } => {
-                storage.update_anchor_token(anchor.id, &upgrade_result.proof)?;
+                {
+                    let idx = index.lock().await;
+                    idx.update_anchor_token(anchor.id, &upgrade_result.proof)
+                        .map_err(|e| {
+                            ServerError::Storage(crate::error::StorageError::Database(
+                                e.to_string(),
+                            ))
+                        })?
+                };
                 tracing::debug!(
                     anchor_id = anchor.id,
                     calendar_url = %calendar_url,

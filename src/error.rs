@@ -128,10 +128,25 @@ pub enum StorageError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// SQLite error
-    #[cfg(feature = "sqlite")]
+    /// SQLite database error
     #[error("SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+
+    /// Database operation failed
+    #[error("Database error: {0}")]
+    Database(String),
+
+    /// Entity not found
+    #[error("Not found: {0}")]
+    NotFound(String),
+
+    /// Invalid range specified
+    #[error("Invalid range: {0}")]
+    InvalidRange(String),
+
+    /// Invalid index specified
+    #[error("Invalid index: {0}")]
+    InvalidIndex(String),
 }
 
 // Re-export AnchorError from anchoring module
@@ -254,7 +269,6 @@ impl From<base64::DecodeError> for ServerError {
     }
 }
 
-#[cfg(feature = "sqlite")]
 impl From<rusqlite::Error> for ServerError {
     fn from(e: rusqlite::Error) -> Self {
         ServerError::Storage(StorageError::Sqlite(e))

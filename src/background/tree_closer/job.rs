@@ -2,13 +2,13 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use tokio::time::interval;
 
 use super::config::TreeCloserConfig;
 use super::logic;
-
-#[cfg(feature = "sqlite")]
-use crate::storage::SqliteStore;
+use crate::storage::index::IndexStore;
+use crate::traits::Storage;
 
 /// Tree closer background job
 ///
@@ -21,15 +21,22 @@ use crate::storage::SqliteStore;
 /// 2. Atomically creates new active tree
 /// 3. OTS anchoring will be handled by ots_job separately
 pub struct TreeCloser {
-    #[cfg(feature = "sqlite")]
-    storage: Arc<SqliteStore>,
+    index: Arc<Mutex<IndexStore>>,
+    storage: Arc<dyn Storage>,
     config: TreeCloserConfig,
 }
 
 impl TreeCloser {
-    #[cfg(feature = "sqlite")]
-    pub fn new(storage: Arc<SqliteStore>, config: TreeCloserConfig) -> Self {
-        Self { storage, config }
+    pub fn new(
+        index: Arc<Mutex<IndexStore>>,
+        storage: Arc<dyn Storage>,
+        config: TreeCloserConfig,
+    ) -> Self {
+        Self {
+            index,
+            storage,
+            config,
+        }
     }
 
     /// Run the tree closer as a background task
@@ -41,8 +48,8 @@ impl TreeCloser {
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
-                    #[cfg(feature = "sqlite")]
                     if let Err(e) = logic::check_and_close_if_needed(
+                        &self.index,
                         &self.storage,
                         self.config.tree_lifetime_secs,
                     ).await {
