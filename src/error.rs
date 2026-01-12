@@ -128,8 +128,7 @@ pub enum StorageError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// SQLite error
-    #[cfg(feature = "sqlite")]
+    /// SQLite database error
     #[error("SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
 
@@ -270,7 +269,6 @@ impl From<base64::DecodeError> for ServerError {
     }
 }
 
-#[cfg(feature = "sqlite")]
 impl From<rusqlite::Error> for ServerError {
     fn from(e: rusqlite::Error) -> Self {
         ServerError::Storage(StorageError::Sqlite(e))
