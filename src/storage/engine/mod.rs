@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::error::StorageError;
 use crate::storage::config::StorageConfig;
+use crate::storage::index::lifecycle::TreeRotationResult;
 use crate::storage::index::{BatchInsert, IndexStore};
 use crate::storage::recovery;
 use crate::storage::slab::{SlabConfig, SlabManager};
@@ -123,6 +124,107 @@ impl StorageEngine {
     /// NOT part of Storage trait — internal server mechanics only.
     pub fn index_store(&self) -> Arc<Mutex<IndexStore>> {
         Arc::clone(&self.index)
+    }
+
+    /// Rotate the tree: close active tree and create new one with genesis leaf
+    ///
+    /// This is the ONLY correct way to rotate trees. Do NOT call
+    /// `IndexStore::close_tree_and_create_new()` directly - it does not
+    /// insert genesis leaf into Slab.
+    ///
+    /// # Flow
+    /// 1. Close active tree and create new one (IndexStore)
+    /// 2. Compute genesis leaf hash
+    /// 3. Insert genesis leaf into Slab (Merkle tree)
+    /// 4. Insert genesis metadata into SQLite
+    /// 5. Update tree_state cache
+    ///
+    /// # Arguments
+    /// * `origin_id` - Origin ID of the log
+    /// * `end_size` - Final size of the tree being closed
+    /// * `root_hash` - Root hash of the tree being closed
+    ///
+    /// # Returns
+    /// `TreeRotationResult` with closed tree metadata and new tree head
+    ///
+    /// # Errors
+    /// Returns `StorageError` if any step fails
+    pub async fn rotate_tree(
+        &self,
+        origin_id: &[u8; 32],
+        end_size: u64,
+        root_hash: &[u8; 32],
+    ) -> Result<TreeRotationResult, StorageError> {
+        // 1. Close tree and create new one (no genesis insertion yet)
+        let close_result = {
+            let mut index = self.index.lock().await;
+            index
+                .close_tree_and_create_new(origin_id, end_size, root_hash)
+                .map_err(|e| StorageError::Database(e.to_string()))?
+        };
+
+        // 2. Compute genesis leaf hash
+        let genesis_hash = atl_core::compute_genesis_leaf_hash(root_hash, end_size);
+
+        // 3. Insert genesis leaf into Slab
+        let new_root = {
+            let mut slabs = self.slabs.write().await;
+            slabs.append_leaves(&[genesis_hash])?
+        };
+
+        // 4. Insert genesis metadata into SQLite
+        let genesis_id = Uuid::new_v4();
+        let genesis_leaf_index = end_size;
+        let slab_id = (genesis_leaf_index / u64::from(self.config.slab_capacity)) as u32 + 1;
+        let slab_offset = (genesis_leaf_index % u64::from(self.config.slab_capacity)) * 32;
+
+        let genesis_metadata = serde_json::json!({
+            "type": "genesis",
+            "prev_tree_id": close_result.closed_tree_id,
+            "prev_root_hash": format!("sha256:{}", hex::encode(root_hash)),
+            "prev_tree_size": end_size
+        });
+
+        let batch_insert = BatchInsert {
+            id: genesis_id,
+            leaf_index: genesis_leaf_index,
+            slab_id,
+            slab_offset,
+            payload_hash: genesis_hash,
+            metadata_hash: genesis_hash,
+            metadata_cleartext: Some(genesis_metadata.to_string()),
+            external_id: None,
+        };
+
+        {
+            let mut index = self.index.lock().await;
+            index.insert_batch(&[batch_insert])?;
+            index.set_tree_size(end_size + 1)?;
+            index.update_first_entry_at_for_active_tree()?;
+        }
+
+        // 5. Update tree_state cache
+        let new_tree_size = end_size + 1;
+        {
+            let mut state = self.tree_state.write().unwrap();
+            state.tree_size = new_tree_size;
+            state.root_hash = new_root;
+        }
+
+        // 6. Return result
+        let new_tree_head = TreeHead {
+            tree_size: new_tree_size,
+            root_hash: new_root,
+            origin: *origin_id,
+        };
+
+        Ok(TreeRotationResult {
+            closed_tree_id: close_result.closed_tree_id,
+            new_tree_id: close_result.new_tree_id,
+            genesis_leaf_index,
+            closed_tree_metadata: close_result.closed_tree_metadata,
+            new_tree_head,
+        })
     }
 
     /// Convert AppendParams to WalEntry
