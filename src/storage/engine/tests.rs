@@ -92,9 +92,11 @@ async fn test_inclusion_proof_verification() {
         .collect();
     engine.append_batch(params).await.unwrap();
 
-    // Get proof for entry 5
-    let proof = engine.get_inclusion_proof(5, None).await.unwrap();
-    let entry = engine.get_entry_by_index(5).await.unwrap();
+    // Get proof for entry 5 (using explicit trait qualification to avoid ambiguity)
+    use crate::traits::storage::Storage;
+    let entry_uuid = engine.get_entry_by_index(5).await.unwrap().id;
+    let proof = Storage::get_inclusion_proof(&engine, &entry_uuid, None).unwrap();
+    let entry = Storage::get_entry(&engine, &entry_uuid).unwrap();
     let head = engine.tree_head();
 
     // Verify with atl-core
