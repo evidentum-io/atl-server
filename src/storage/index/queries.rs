@@ -78,7 +78,7 @@ impl IndexStore {
         Ok(())
     }
 
-    /// Run migrations from v2 to v3
+    /// Run migrations from v2 to latest
     #[allow(dead_code)]
     pub fn migrate(&self) -> rusqlite::Result<()> {
         let current: u32 = self
@@ -95,6 +95,12 @@ impl IndexStore {
             self.conn
                 .borrow()
                 .execute_batch(super::schema::MIGRATE_V2_TO_V3)?;
+        }
+
+        if current < 4 {
+            self.conn
+                .borrow()
+                .execute_batch(super::schema::MIGRATE_V3_TO_V4)?;
         }
 
         Ok(())
