@@ -27,6 +27,6 @@ pub use proof::ProofProvider;
 
 #[allow(unused_imports)]
 pub use storage::{
-    AppendParams, BatchResult, ConsistencyProof, Entry, EntryResult, InclusionProof, Storage,
-    TreeHead,
+    AppendParams, AppendResult, BatchResult, ConsistencyProof, Entry, EntryResult, InclusionProof,
+    Storage, TreeHead,
 };

@@ -18,11 +18,9 @@ pub mod tree_closer;
 pub mod tsa_job;
 
 use crate::error::ServerResult;
+use crate::traits::Storage;
 use std::sync::Arc;
 use tokio::sync::broadcast;
-
-#[cfg(feature = "sqlite")]
-use crate::storage::SqliteStore;
 
 pub use config::BackgroundConfig;
 #[cfg(feature = "ots")]
@@ -34,8 +32,7 @@ pub use tsa_job::TsaAnchoringJob;
 ///
 /// Manages all proactive anchoring jobs. Jobs run continuously until shutdown.
 pub struct BackgroundJobRunner {
-    #[cfg(feature = "sqlite")]
-    storage: Arc<SqliteStore>,
+    storage: Arc<dyn Storage>,
     #[cfg(feature = "ots")]
     ots_client: Arc<dyn crate::anchoring::ots::OtsClient>,
     config: BackgroundConfig,
@@ -43,8 +40,7 @@ pub struct BackgroundJobRunner {
 }
 
 impl BackgroundJobRunner {
-    #[cfg(feature = "sqlite")]
-    pub fn new(storage: Arc<SqliteStore>, config: BackgroundConfig) -> Self {
+    pub fn new(storage: Arc<dyn Storage>, config: BackgroundConfig) -> Self {
         let (shutdown_tx, _) = broadcast::channel(1);
 
         #[cfg(feature = "ots")]
@@ -75,7 +71,6 @@ impl BackgroundJobRunner {
     ///
     /// All jobs run proactively and continuously until shutdown.
     /// Jobs discover pending work by querying the database on each tick.
-    #[cfg(feature = "sqlite")]
     pub async fn start(&self) -> ServerResult<Vec<tokio::task::JoinHandle<()>>> {
         if self.config.disabled {
             tracing::info!("Background jobs disabled via ATL_BACKGROUND_DISABLED=true");

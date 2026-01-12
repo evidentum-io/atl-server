@@ -8,7 +8,6 @@ mod config;
 mod error;
 mod traits;
 
-#[cfg(feature = "sqlite")]
 mod storage;
 
 #[cfg(any(feature = "rfc3161", feature = "ots"))]
@@ -17,7 +16,6 @@ mod anchoring;
 mod receipt;
 mod sequencer;
 
-#[cfg(feature = "sqlite")]
 mod background;
 
 #[cfg(feature = "grpc")]
@@ -111,25 +109,35 @@ async fn main() -> anyhow::Result<()> {
 /// Run in STANDALONE mode
 #[cfg(feature = "sqlite")]
 async fn run_standalone(args: Args) -> anyhow::Result<()> {
+    use std::path::PathBuf;
     use std::sync::Arc;
-    use storage::SqliteStore;
-    use traits::Storage;
 
     tracing::info!("Starting in STANDALONE mode");
 
-    // Initialize storage
-    tracing::info!("Initializing SQLite storage at: {}", args.database);
-    let store: Arc<SqliteStore> = Arc::new(SqliteStore::new(&args.database)?);
-    store.initialize()?;
-    let store_for_background = Arc::clone(&store);
-    let storage: Arc<dyn Storage> = store;
-
-    // Load signing key
+    // Load signing key first (needed for origin)
     let signing_key_path = args
         .signing_key
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("ATL_SIGNING_KEY_PATH required for STANDALONE mode"))?;
     let signer = receipt::CheckpointSigner::from_file(signing_key_path)?;
+
+    // Initialize StorageEngine
+    tracing::info!("Initializing storage at: {}", args.database);
+    let storage_config = crate::storage::StorageConfig {
+        data_dir: PathBuf::from(&args.database),
+        wal_dir: None,
+        slab_dir: None,
+        db_path: None,
+        slab_capacity: 1_000_000,
+        max_open_slabs: 10,
+        wal_keep_count: 2,
+        fsync_enabled: true,
+    };
+
+    let engine = crate::storage::StorageEngine::new(storage_config, *signer.key_id())
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to initialize storage engine: {}", e))?;
+    let storage: Arc<dyn traits::Storage> = Arc::new(engine);
 
     // Create sequencer
     let sequencer_config = sequencer::SequencerConfig::from_env();
@@ -140,11 +148,15 @@ async fn run_standalone(args: Args) -> anyhow::Result<()> {
         sequencer_instance.run().await;
     });
 
-    // Start background jobs
+    // TODO: Re-enable in Wave 4 after Storage trait has all required methods
+    // Background jobs temporarily disabled because they require SqliteStore-specific methods
+    // that are not yet available in the Storage trait.
+    /*
     let background_config = background::BackgroundConfig::from_env();
     let background_runner =
-        background::BackgroundJobRunner::new(store_for_background, background_config);
+        background::BackgroundJobRunner::new(storage.clone(), background_config);
     let background_handles = background_runner.start().await?;
+    */
 
     // Create dispatcher
     let dispatcher = Arc::new(traits::LocalDispatcher::new(
@@ -162,12 +174,15 @@ async fn run_standalone(args: Args) -> anyhow::Result<()> {
     )
     .await?;
 
+    // TODO: Re-enable in Wave 4
+    /*
     // Shutdown background jobs first
     tracing::info!("Shutting down background jobs...");
     background_runner.shutdown();
     for handle in background_handles {
         let _ = handle.await;
     }
+    */
 
     // Wait for sequencer
     tracing::info!("Waiting for sequencer to shut down...");
@@ -199,25 +214,36 @@ async fn run_node(args: Args) -> anyhow::Result<()> {
 /// Run in SEQUENCER mode
 #[cfg(all(feature = "grpc", feature = "sqlite"))]
 async fn run_sequencer(args: Args) -> anyhow::Result<()> {
+    use std::path::PathBuf;
     use std::sync::Arc;
-    use storage::SqliteStore;
     use traits::Storage;
 
     tracing::info!("Starting in SEQUENCER mode");
 
-    // Initialize storage
-    tracing::info!("Initializing SQLite storage at: {}", args.database);
-    let store: Arc<SqliteStore> = Arc::new(SqliteStore::new(&args.database)?);
-    store.initialize()?;
-    let store_for_background = Arc::clone(&store);
-    let storage: Arc<dyn Storage> = store;
-
-    // Load signing key
+    // Load signing key first (needed for origin)
     let signing_key_path = args
         .signing_key
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("ATL_SIGNING_KEY_PATH required for SEQUENCER mode"))?;
     let signer = Arc::new(receipt::CheckpointSigner::from_file(signing_key_path)?);
+
+    // Initialize StorageEngine
+    tracing::info!("Initializing storage at: {}", args.database);
+    let storage_config = crate::storage::StorageConfig {
+        data_dir: PathBuf::from(&args.database),
+        wal_dir: None,
+        slab_dir: None,
+        db_path: None,
+        slab_capacity: 1_000_000,
+        max_open_slabs: 10,
+        wal_keep_count: 2,
+        fsync_enabled: true,
+    };
+
+    let engine = crate::storage::StorageEngine::new(storage_config, *signer.key_id())
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to initialize storage engine: {}", e))?;
+    let storage: Arc<dyn traits::Storage> = Arc::new(engine);
 
     // Create sequencer
     let sequencer_config = sequencer::SequencerConfig::from_env();
@@ -228,11 +254,15 @@ async fn run_sequencer(args: Args) -> anyhow::Result<()> {
         sequencer_instance.run().await;
     });
 
-    // Start background jobs
+    // TODO: Re-enable in Wave 4 after Storage trait has all required methods
+    // Background jobs temporarily disabled because they require SqliteStore-specific methods
+    // that are not yet available in the Storage trait.
+    /*
     let background_config = background::BackgroundConfig::from_env();
     let background_runner =
-        background::BackgroundJobRunner::new(store_for_background, background_config);
+        background::BackgroundJobRunner::new(storage.clone(), background_config);
     let background_handles = background_runner.start().await?;
+    */
 
     // Create gRPC server
     let token = std::env::var("ATL_SEQUENCER_TOKEN").ok();
@@ -280,12 +310,15 @@ async fn run_sequencer(args: Args) -> anyhow::Result<()> {
         r = http_handle => r??,
     }
 
+    // TODO: Re-enable in Wave 4
+    /*
     // Shutdown background jobs first
     tracing::info!("Shutting down background jobs...");
     background_runner.shutdown();
     for handle in background_handles {
         let _ = handle.await;
     }
+    */
 
     // Wait for sequencer
     tracing::info!("Waiting for sequencer to shut down...");

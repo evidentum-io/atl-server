@@ -115,6 +115,27 @@ pub struct ConsistencyProof {
     pub path: Vec<[u8; 32]>,
 }
 
+/// Result of a single append operation (used by Sequencer)
+///
+/// This is returned to individual API handlers after batch commit.
+#[derive(Debug, Clone)]
+pub struct AppendResult {
+    /// Generated entry ID
+    pub id: Uuid,
+
+    /// Position in the Merkle tree
+    pub leaf_index: u64,
+
+    /// Tree head after append
+    pub tree_head: TreeHead,
+
+    /// Inclusion proof (empty - generated lazily on GET)
+    pub inclusion_proof: Vec<[u8; 32]>,
+
+    /// Timestamp when entry was committed
+    pub timestamp: DateTime<Utc>,
+}
+
 /// Async storage backend for high-throughput operations
 ///
 /// This is the ONLY storage trait - no sync version exists.
