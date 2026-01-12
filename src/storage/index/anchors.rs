@@ -335,4 +335,18 @@ impl IndexStore {
             )
             .optional()
     }
+
+    /// Get the latest anchored tree_size for TSA anchors (rfc3161)
+    ///
+    /// Returns the maximum tree_size that has been anchored via TSA.
+    /// Used for periodic active tree anchoring.
+    pub fn get_latest_tsa_anchored_size(&self) -> rusqlite::Result<Option<u64>> {
+        let result = self.connection().query_row(
+            "SELECT MAX(tree_size) FROM anchors WHERE anchor_type = 'rfc3161'",
+            [],
+            |row| row.get::<_, Option<i64>>(0),
+        )?;
+
+        Ok(result.map(|s| s as u64))
+    }
 }

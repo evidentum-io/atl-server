@@ -96,4 +96,20 @@ impl RoundRobinSelector {
     pub fn last_index(&self) -> usize {
         self.last_index.load(Ordering::Relaxed)
     }
+
+    /// Get next URL in round-robin order
+    ///
+    /// Returns the next URL to use for TSA requests.
+    /// Updates internal counter for subsequent calls.
+    pub fn next_url(&self) -> ServerResult<String> {
+        if self.urls.is_empty() {
+            return Err(ServerError::Internal("No TSA URLs configured".into()));
+        }
+
+        let num_servers = self.urls.len();
+        let current_index = (self.last_index.load(Ordering::Relaxed) + 1) % num_servers;
+        self.last_index.store(current_index, Ordering::Relaxed);
+
+        Ok(self.urls[current_index].clone())
+    }
 }

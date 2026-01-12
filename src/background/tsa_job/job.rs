@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
-use tokio::time::interval;
+use tokio::time::{interval, Instant};
 
 use super::config::TsaJobConfig;
 use super::round_robin::RoundRobinSelector;
@@ -14,6 +14,7 @@ use crate::traits::Storage;
 /// TSA anchoring background job
 ///
 /// Processes trees that need TSA anchoring (Tier-1 evidence):
+/// - Periodic anchoring of active tree (every N seconds)
 /// - Trees with status IN ('pending_bitcoin', 'closed')
 /// - Trees without tsa_anchor_id (not yet anchored)
 ///
@@ -23,6 +24,7 @@ pub struct TsaAnchoringJob {
     storage: Arc<dyn Storage>,
     selector: RoundRobinSelector,
     config: TsaJobConfig,
+    last_active_anchor: Arc<Mutex<Option<Instant>>>,
 }
 
 impl TsaAnchoringJob {
@@ -38,6 +40,7 @@ impl TsaAnchoringJob {
             storage,
             selector,
             config,
+            last_active_anchor: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -64,6 +67,9 @@ impl TsaAnchoringJob {
 
     /// Process trees that don't have TSA anchors yet
     async fn process_pending_trees(&self) -> ServerResult<()> {
+        // PART 1: Anchor active tree periodically
+        self.process_active_tree_anchoring().await?;
+
         // PART 2: Anchor closed trees that don't have final TSA anchor
         let pending_trees = {
             let idx = self.index.lock().await;
@@ -112,5 +118,98 @@ impl TsaAnchoringJob {
         }
 
         Ok(())
+    }
+
+    /// Process active tree anchoring (periodic)
+    ///
+    /// Anchors the current active tree state if:
+    /// 1. Tree has new entries since last anchor
+    /// 2. Enough time has passed since last active anchor
+    async fn process_active_tree_anchoring(&self) -> ServerResult<()> {
+        // Check if enough time has passed since last active anchor
+        let should_anchor = {
+            let last_anchor = self.last_active_anchor.lock().await;
+            match *last_anchor {
+                None => true,
+                Some(last_time) => {
+                    let elapsed = last_time.elapsed();
+                    elapsed >= Duration::from_secs(self.config.active_tree_interval_secs)
+                }
+            }
+        };
+
+        if !should_anchor {
+            return Ok(());
+        }
+
+        // Get current tree head
+        let tree_head = self.storage.tree_head();
+
+        // Skip if tree is empty
+        if tree_head.tree_size == 0 {
+            return Ok(());
+        }
+
+        // Get latest TSA anchored size
+        let last_anchored_size = {
+            let idx = self.index.lock().await;
+            idx.get_latest_tsa_anchored_size().map_err(|e| {
+                crate::error::ServerError::Storage(crate::error::StorageError::Database(
+                    e.to_string(),
+                ))
+            })?
+        };
+
+        // Skip if tree hasn't grown since last anchor
+        if let Some(last_size) = last_anchored_size {
+            if tree_head.tree_size <= last_size {
+                return Ok(());
+            }
+        }
+
+        // Anchor the active tree with round-robin server selection
+        tracing::info!(
+            tree_size = tree_head.tree_size,
+            root_hash = hex::encode(tree_head.root_hash),
+            "Anchoring active tree"
+        );
+
+        // Get next TSA URL from round-robin selector
+        let tsa_url = self.selector.next_url().map_err(|e| {
+            crate::error::ServerError::Internal(format!("No TSA servers configured: {}", e))
+        })?;
+
+        match super::request::create_tsa_anchor_for_tree_head(
+            tree_head.root_hash,
+            tree_head.tree_size,
+            &tsa_url,
+            self.config.timeout_ms,
+            &self.index,
+        )
+        .await
+        {
+            Ok(anchor_id) => {
+                tracing::info!(
+                    tree_size = tree_head.tree_size,
+                    anchor_id = anchor_id,
+                    root_hash = hex::encode(tree_head.root_hash),
+                    "Active tree anchored successfully"
+                );
+
+                // Update last anchor time
+                let mut last_anchor = self.last_active_anchor.lock().await;
+                *last_anchor = Some(Instant::now());
+
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(
+                    tree_size = tree_head.tree_size,
+                    error = %e,
+                    "Failed to anchor active tree, will retry next interval"
+                );
+                Ok(())
+            }
+        }
     }
 }
