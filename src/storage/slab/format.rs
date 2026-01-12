@@ -299,7 +299,8 @@ mod tests {
     #[test]
     fn test_update_leaf_count() {
         let mut header = SlabHeader::new(1, 0, 1000);
-        assert_eq!(header.leaf_count, 0);
+        let leaf_count = header.leaf_count;
+        assert_eq!(leaf_count, 0);
 
         header.update_leaf_count(500);
         let leaf_count = header.leaf_count;

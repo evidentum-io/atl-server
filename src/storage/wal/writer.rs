@@ -6,7 +6,7 @@ use crate::storage::wal::format::{
     WalEntry, WalHeader, WalTrailer, COMMIT_DONE, COMMIT_PENDING,
 };
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufWriter, Seek, SeekFrom, Write};
+use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 

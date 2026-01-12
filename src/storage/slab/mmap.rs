@@ -336,14 +336,14 @@ mod tests {
         for i in 0..8 {
             let mut hash = [0u8; 32];
             hash[0] = i;
-            slab.set_node(0, i, &hash);
+            slab.set_node(0, i as u64, &hash);
         }
 
         // Write internal nodes (level 1)
         for i in 0..4 {
             let mut hash = [0u8; 32];
             hash[0] = 100 + i as u8;
-            slab.set_node(1, i, &hash);
+            slab.set_node(1, i as u64, &hash);
         }
 
         // Verify
@@ -364,7 +364,7 @@ mod tests {
         // Fill up
         for i in 0..10 {
             let hash = [i as u8; 32];
-            slab.set_node(0, i, &hash);
+            slab.set_node(0, i as u64, &hash);
         }
 
         assert!(slab.is_full());
@@ -409,7 +409,7 @@ mod tests {
         // Try to open
         let result = SlabFile::open(&path);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid magic"));
+        assert!(result.err().unwrap().to_string().contains("invalid magic"));
     }
 
     #[test]
