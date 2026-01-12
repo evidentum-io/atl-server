@@ -87,7 +87,7 @@ fn row_to_tree(row: &rusqlite::Row) -> rusqlite::Result<TreeRecord> {
 impl IndexStore {
     /// Get the currently active tree
     pub fn get_active_tree(&self) -> rusqlite::Result<Option<TreeRecord>> {
-        self.conn
+        self.connection()
             .query_row(
                 "SELECT id, origin_id, status, start_size, end_size, root_hash, created_at,
                         first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id
@@ -104,13 +104,13 @@ impl IndexStore {
     pub fn create_active_tree(&self, origin_id: &[u8; 32], start_size: u64) -> rusqlite::Result<i64> {
         let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
 
-        self.conn.execute(
+        self.connection().execute(
             "INSERT INTO trees (origin_id, status, start_size, created_at)
              VALUES (?1, 'active', ?2, ?3)",
             params![origin_id.as_slice(), start_size as i64, now],
         )?;
 
-        Ok(self.conn.last_insert_rowid())
+        Ok(self.connection().last_insert_rowid())
     }
 
     /// Close the active tree and create a new one atomically
@@ -125,7 +125,7 @@ impl IndexStore {
         end_size: u64,
         root_hash: &[u8; 32],
     ) -> rusqlite::Result<(i64, i64)> {
-        let tx = self.conn.transaction()?;
+        let tx = self.connection().transaction()?;
         let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
 
         // Get current active tree ID
@@ -157,7 +157,7 @@ impl IndexStore {
 
     /// Set bitcoin anchor for a tree (called by ots_job after anchor creation)
     pub fn set_tree_bitcoin_anchor(&self, tree_id: i64, anchor_id: i64) -> rusqlite::Result<()> {
-        self.conn.execute(
+        self.connection().execute(
             "UPDATE trees SET bitcoin_anchor_id = ?1 WHERE id = ?2 AND status = 'pending_bitcoin'",
             params![anchor_id, tree_id],
         )?;
@@ -166,7 +166,7 @@ impl IndexStore {
 
     /// Get trees pending TSA anchoring
     pub fn get_trees_pending_tsa(&self) -> rusqlite::Result<Vec<TreeRecord>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.connection().prepare(
             "SELECT id, origin_id, status, start_size, end_size, root_hash, created_at,
                     first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id
              FROM trees
@@ -180,7 +180,7 @@ impl IndexStore {
 
     /// Get trees pending Bitcoin confirmation
     pub fn get_trees_pending_bitcoin_confirmation(&self) -> rusqlite::Result<Vec<TreeRecord>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.connection().prepare(
             "SELECT id, origin_id, status, start_size, end_size, root_hash, created_at,
                     first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id
              FROM trees WHERE status = 'pending_bitcoin' ORDER BY created_at ASC",
@@ -192,7 +192,7 @@ impl IndexStore {
 
     /// Mark tree as closed after Bitcoin confirmation
     pub fn mark_tree_closed(&self, tree_id: i64) -> rusqlite::Result<()> {
-        self.conn.execute(
+        self.connection().execute(
             "UPDATE trees SET status = 'closed' WHERE id = ?1 AND status = 'pending_bitcoin'",
             params![tree_id],
         )?;
@@ -201,7 +201,7 @@ impl IndexStore {
 
     /// Update tree TSA anchor
     pub fn update_tree_tsa_anchor(&self, tree_id: i64, anchor_id: i64) -> rusqlite::Result<()> {
-        self.conn.execute(
+        self.connection().execute(
             "UPDATE trees SET tsa_anchor_id = ?1 WHERE id = ?2",
             params![anchor_id, tree_id],
         )?;
@@ -210,7 +210,7 @@ impl IndexStore {
 
     /// Get tree covering a specific entry
     pub fn get_tree_covering_entry(&self, leaf_index: u64) -> rusqlite::Result<Option<TreeRecord>> {
-        self.conn
+        self.connection()
             .query_row(
                 "SELECT id, origin_id, status, start_size, end_size, root_hash, created_at,
                         first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id
@@ -225,7 +225,7 @@ impl IndexStore {
 
     /// Get tree by bitcoin anchor ID
     pub fn get_tree_by_bitcoin_anchor_id(&self, anchor_id: i64) -> rusqlite::Result<Option<TreeRecord>> {
-        self.conn
+        self.connection()
             .query_row(
                 "SELECT id, origin_id, status, start_size, end_size, root_hash, created_at,
                         first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id
@@ -240,7 +240,7 @@ impl IndexStore {
     pub fn update_tree_first_entry_at(&self, tree_id: i64) -> rusqlite::Result<()> {
         let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
 
-        self.conn.execute(
+        self.connection().execute(
             "UPDATE trees SET first_entry_at = ?1 WHERE id = ?2 AND first_entry_at IS NULL",
             params![now, tree_id],
         )?;
@@ -250,7 +250,7 @@ impl IndexStore {
 
     /// Get trees that need OTS submission (pending_bitcoin but no anchor)
     pub fn get_trees_without_bitcoin_anchor(&self) -> rusqlite::Result<Vec<TreeRecord>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.connection().prepare(
             "SELECT id, origin_id, status, start_size, end_size, root_hash, created_at,
                     first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id
              FROM trees

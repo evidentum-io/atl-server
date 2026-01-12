@@ -192,6 +192,11 @@ impl IndexStore {
     pub fn transaction(&mut self) -> rusqlite::Result<Transaction> {
         self.conn.transaction()
     }
+
+    /// Get a reference to the underlying database connection
+    pub fn connection(&self) -> &rusqlite::Connection {
+        &self.conn
+    }
 }
 
 /// Insert batch using prepared statement

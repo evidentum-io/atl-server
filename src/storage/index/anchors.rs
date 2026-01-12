@@ -96,7 +96,7 @@ impl IndexStore {
     pub fn store_anchor(&self, tree_size: u64, anchor: &Anchor) -> rusqlite::Result<()> {
         let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
 
-        self.conn.execute(
+        self.connection().execute(
             "INSERT INTO anchors (tree_size, anchor_type, anchored_hash, timestamp, token, metadata, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
@@ -122,7 +122,7 @@ impl IndexStore {
     ) -> rusqlite::Result<i64> {
         let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
 
-        self.conn.execute(
+        self.connection().execute(
             "INSERT INTO anchors (tree_size, anchor_type, anchored_hash, timestamp, token, metadata, status, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
@@ -137,12 +137,12 @@ impl IndexStore {
             ],
         )?;
 
-        Ok(self.conn.last_insert_rowid())
+        Ok(self.connection().last_insert_rowid())
     }
 
     /// Get all anchors for a tree size
     pub fn get_anchors(&self, tree_size: u64) -> rusqlite::Result<Vec<Anchor>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.connection().prepare(
             "SELECT id, tree_size, anchor_type, anchored_hash, timestamp, token, metadata
              FROM anchors WHERE tree_size = ?1",
         )?;
@@ -154,7 +154,7 @@ impl IndexStore {
     /// Get the most recent anchored tree size
     pub fn get_latest_anchored_size(&self) -> rusqlite::Result<Option<u64>> {
         let result = self
-            .conn
+            .connection()
             .query_row("SELECT MAX(tree_size) FROM anchors", [], |row| {
                 row.get::<_, Option<i64>>(0)
             })?;
@@ -164,7 +164,7 @@ impl IndexStore {
 
     /// Get pending OTS anchors
     pub fn get_pending_ots_anchors(&self) -> rusqlite::Result<Vec<AnchorWithId>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.connection().prepare(
             "SELECT id, tree_size, anchor_type, anchored_hash, timestamp, token, metadata, status
              FROM anchors WHERE anchor_type = 'bitcoin_ots' AND status = 'pending'",
         )?;
@@ -175,7 +175,7 @@ impl IndexStore {
 
     /// Update anchor status
     pub fn update_anchor_status(&self, anchor_id: i64, status: &str) -> rusqlite::Result<()> {
-        self.conn.execute(
+        self.connection().execute(
             "UPDATE anchors SET status = ?1 WHERE id = ?2",
             params![status, anchor_id],
         )?;
@@ -184,7 +184,7 @@ impl IndexStore {
 
     /// Update anchor token (for OTS upgrade)
     pub fn update_anchor_token(&self, anchor_id: i64, token: &[u8]) -> rusqlite::Result<()> {
-        self.conn.execute(
+        self.connection().execute(
             "UPDATE anchors SET token = ?1 WHERE id = ?2",
             params![token, anchor_id],
         )?;
@@ -197,7 +197,7 @@ impl IndexStore {
         anchor_id: i64,
         metadata: serde_json::Value,
     ) -> rusqlite::Result<()> {
-        self.conn.execute(
+        self.connection().execute(
             "UPDATE anchors SET metadata = ?1 WHERE id = ?2",
             params![serde_json::to_string(&metadata).ok(), anchor_id],
         )?;
@@ -215,7 +215,7 @@ impl IndexStore {
         target_tree_size: u64,
         limit: usize,
     ) -> rusqlite::Result<Vec<Anchor>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.connection().prepare(
             "SELECT a.id, a.tree_size, a.anchor_type, a.anchored_hash, a.timestamp, a.token, a.metadata
              FROM anchors a
              INNER JOIN (
@@ -246,7 +246,7 @@ impl IndexStore {
         root_hash: &[u8; 32],
         tree_size: u64,
     ) -> rusqlite::Result<i64> {
-        let tx = self.conn.transaction()?;
+        let tx = self.connection().transaction()?;
         let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
 
         // Insert anchor
@@ -282,7 +282,7 @@ impl IndexStore {
         block_height: u64,
         block_time: u64,
     ) -> rusqlite::Result<()> {
-        let tx = self.conn.transaction()?;
+        let tx = self.connection().transaction()?;
 
         // Update anchor token
         tx.execute(
@@ -319,7 +319,7 @@ impl IndexStore {
 
     /// Get existing TSA anchor ID for a root hash (if any)
     pub fn get_tsa_anchor_for_hash(&self, root_hash: &[u8; 32]) -> rusqlite::Result<Option<i64>> {
-        self.conn
+        self.connection()
             .query_row(
                 "SELECT id FROM anchors WHERE anchored_hash = ?1 AND anchor_type = 'rfc3161' LIMIT 1",
                 [root_hash.as_slice()],
