@@ -29,7 +29,10 @@ impl Default for OtsConfig {
     fn default() -> Self {
         Self {
             calendar_urls: vec![
-                "https://a.pool.opentimestamps.org".to_string(),
+                "https://alice.btc.calendar.opentimestamps.org".to_string(),
+                "https://bob.btc.calendar.opentimestamps.org".to_string(),
+                "https://finney.calendar.eternitywall.com".to_string(),
+                "https://ots.btc.catallaxy.com".to_string(),
                 "https://b.pool.opentimestamps.org".to_string(),
             ],
             timeout_secs: 30,
@@ -72,7 +75,10 @@ impl OtsConfig {
             })
             .unwrap_or_else(|_| {
                 vec![
-                    "https://a.pool.opentimestamps.org".to_string(),
+                    "https://alice.btc.calendar.opentimestamps.org".to_string(),
+                    "https://bob.btc.calendar.opentimestamps.org".to_string(),
+                    "https://finney.calendar.eternitywall.com".to_string(),
+                    "https://ots.btc.catallaxy.com".to_string(),
                     "https://b.pool.opentimestamps.org".to_string(),
                 ]
             });
@@ -102,7 +108,7 @@ mod tests {
     #[test]
     fn test_ots_config_default() {
         let config = OtsConfig::default();
-        assert_eq!(config.calendar_urls.len(), 2);
+        assert_eq!(config.calendar_urls.len(), 5);
         assert_eq!(config.timeout_secs, 30);
         assert_eq!(config.min_confirmations, 6);
     }
@@ -116,8 +122,8 @@ mod tests {
 
         let config = OtsConfig::from_env();
 
-        assert_eq!(config.calendar_urls.len(), 2);
-        assert!(config.calendar_urls[0].contains("opentimestamps.org"));
+        assert_eq!(config.calendar_urls.len(), 5);
+        assert!(config.calendar_urls[0].contains("alice.btc"));
         assert_eq!(config.timeout_secs, 30);
         assert_eq!(config.min_confirmations, 6);
     }
