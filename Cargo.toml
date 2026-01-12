@@ -47,6 +47,9 @@ anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
 base64 = "0.22"
+crc = "3"
+memmap2 = "0.9"
+crc32fast = "1.4"
 
 # Logging
 tracing = "0.1"

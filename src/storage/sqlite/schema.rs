@@ -3,8 +3,8 @@
 use crate::error::ServerResult;
 use rusqlite::Connection;
 
-/// Current schema version
-pub const SCHEMA_VERSION: u32 = 3;
+/// Current schema version (v4: slab_id/slab_offset added, tree_nodes removed)
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Create all tables (idempotent)
 pub fn create_tables(conn: &Connection) -> ServerResult<()> {
@@ -42,6 +42,11 @@ pub fn migrate(conn: &Connection) -> ServerResult<()> {
     if current < 3 {
         // Migration from v2 to v3: remove FK constraint from anchors table
         migrate_v2_to_v3(conn)?;
+    }
+
+    if current < 4 {
+        // Migration from v3 to v4: add slab columns, drop tree_nodes
+        migrate_v3_to_v4(conn)?;
     }
 
     // Update schema version
@@ -104,6 +109,24 @@ fn migrate_v2_to_v3(conn: &Connection) -> ServerResult<()> {
     Ok(())
 }
 
+fn migrate_v3_to_v4(conn: &Connection) -> ServerResult<()> {
+    // Migration from v3 to v4: add slab_id/slab_offset, drop tree_nodes
+    // This prepares schema for HTS (High-Throughput Storage)
+
+    // Add new columns to entries (default to 0 for existing entries)
+    conn.execute_batch(
+        r#"
+        ALTER TABLE entries ADD COLUMN slab_id INTEGER DEFAULT 0;
+        ALTER TABLE entries ADD COLUMN slab_offset INTEGER DEFAULT 0;
+        "#,
+    )?;
+
+    // Drop tree_nodes table (will be migrated to Slab files in HTS)
+    conn.execute_batch("DROP TABLE IF EXISTS tree_nodes;")?;
+
+    Ok(())
+}
+
 const SCHEMA_SQL: &str = r#"
 -- Core configuration
 CREATE TABLE IF NOT EXISTS atl_config (
@@ -121,6 +144,8 @@ CREATE TABLE IF NOT EXISTS entries (
     external_id TEXT,                       -- Client correlation ID (optional)
     leaf_index INTEGER UNIQUE,              -- Position in tree
     leaf_hash BLOB NOT NULL,                -- Computed leaf hash (32 bytes)
+    slab_id INTEGER DEFAULT 0,              -- Which slab file (for HTS)
+    slab_offset INTEGER DEFAULT 0,          -- Offset in slab (for HTS)
     tree_id INTEGER,                        -- FK to trees.id
     created_at INTEGER NOT NULL             -- Unix nanoseconds
 );
