@@ -132,6 +132,22 @@ pub enum StorageError {
     #[cfg(feature = "sqlite")]
     #[error("SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
+
+    /// Database operation failed
+    #[error("Database error: {0}")]
+    Database(String),
+
+    /// Entity not found
+    #[error("Not found: {0}")]
+    NotFound(String),
+
+    /// Invalid range specified
+    #[error("Invalid range: {0}")]
+    InvalidRange(String),
+
+    /// Invalid index specified
+    #[error("Invalid index: {0}")]
+    InvalidIndex(String),
 }
 
 // Re-export AnchorError from anchoring module
