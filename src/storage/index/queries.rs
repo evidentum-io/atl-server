@@ -270,6 +270,21 @@ fn row_to_index_entry(row: &rusqlite::Row) -> rusqlite::Result<IndexEntry> {
     })
 }
 
+/// Convert IndexEntry to public Entry trait type
+impl From<IndexEntry> for crate::traits::storage::Entry {
+    fn from(idx: IndexEntry) -> Self {
+        Self {
+            id: idx.id,
+            payload_hash: idx.payload_hash,
+            metadata_hash: idx.metadata_hash,
+            metadata_cleartext: idx.metadata_cleartext,
+            leaf_index: Some(idx.leaf_index),
+            created_at: chrono::DateTime::from_timestamp_nanos(idx.created_at),
+            external_id: idx.external_id,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
