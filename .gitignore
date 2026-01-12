@@ -12,3 +12,4 @@ signing.key
 *.db-wal
 *.db-shm
 /.env.example
+/scripts
