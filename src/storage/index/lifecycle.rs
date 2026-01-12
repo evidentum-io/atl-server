@@ -275,4 +275,17 @@ impl IndexStore {
         let rows = stmt.query_map([], row_to_tree)?;
         rows.collect::<Result<Vec<_>, _>>()
     }
+
+    /// Update first_entry_at for active tree (idempotent - only updates if NULL)
+    ///
+    /// Called on every append_batch, but only affects the first batch in a new tree.
+    /// The WHERE clause ensures this is a no-op after the first batch.
+    pub fn update_first_entry_at_for_active_tree(&self) -> rusqlite::Result<()> {
+        let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        self.connection().execute(
+            "UPDATE trees SET first_entry_at = ?1 WHERE status = 'active' AND first_entry_at IS NULL",
+            params![now],
+        )?;
+        Ok(())
+    }
 }

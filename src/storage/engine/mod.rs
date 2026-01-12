@@ -216,6 +216,7 @@ impl Storage for StorageEngine {
             index.insert_batch(&batch_inserts)?;
             let new_tree_size = tree_size + params.len() as u64;
             index.set_tree_size(new_tree_size)?;
+            index.update_first_entry_at_for_active_tree()?;
         }
 
         // 5. Finalize
