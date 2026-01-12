@@ -64,6 +64,14 @@ impl IndexStore {
         })
     }
 
+    /// Create IndexStore from an existing connection (for testing)
+    #[cfg(test)]
+    pub(crate) fn from_connection(conn: Connection) -> Self {
+        Self {
+            conn: RefCell::new(conn),
+        }
+    }
+
     /// Initialize schema (create tables if needed)
     pub fn initialize(&self) -> rusqlite::Result<()> {
         self.conn.borrow().execute_batch(super::schema::SCHEMA_V3)?;

@@ -97,8 +97,9 @@ pub async fn check_and_close_if_needed(
         "Closing tree (timer started from first entry), OTS anchoring will be done by ots_job"
     );
 
-    // Close tree and create new one ATOMICALLY with chain link and genesis leaf
+    // Close tree and create new one ATOMICALLY with chain link
     // Tree is marked as 'pending_bitcoin', bitcoin_anchor_id will be set by ots_job
+    // NOTE: Genesis leaf insertion is NOT done here - will be done by rotate_tree() in TC-3-2
     let result = {
         let mut idx = index.lock().await;
         idx.close_tree_and_create_new(&origin_id, tree_head.tree_size, &tree_head.root_hash)
@@ -113,19 +114,17 @@ pub async fn check_and_close_if_needed(
         closed_tree_id = result.closed_tree_id,
         new_tree_id = result.new_tree_id,
         end_size = tree_head.tree_size,
-        genesis_leaf_index = ?result.genesis_leaf_index,
         prev_tree_id = ?result.closed_tree_metadata.prev_tree_id,
-        "Tree closed with chain link, new active tree created with genesis leaf, pending OTS anchoring by ots_job"
+        "Tree closed with chain link, new active tree created (genesis leaf will be inserted by rotate_tree), pending OTS anchoring by ots_job"
     );
 
     // TODO: Record closed tree in Chain Index DB (TC-4)
     // For now, we just log the metadata
     tracing::debug!(
-        "Chain Index metadata (not recorded yet - TC-4): tree_id={}, root_hash={}, tree_size={}, genesis_hash={:?}",
+        "Chain Index metadata (not recorded yet - TC-4): tree_id={}, root_hash={}, tree_size={}",
         result.closed_tree_metadata.tree_id,
         hex::encode(result.closed_tree_metadata.root_hash),
-        result.closed_tree_metadata.tree_size,
-        result.closed_tree_metadata.genesis_leaf_hash.map(hex::encode)
+        result.closed_tree_metadata.tree_size
     );
 
     Ok(())

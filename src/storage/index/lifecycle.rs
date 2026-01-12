@@ -14,10 +14,11 @@ use rusqlite::{params, OptionalExtension};
 /// Result of closing a tree and creating a new one
 #[derive(Debug, Clone)]
 pub struct TreeCloseResult {
+    /// ID of the tree that was closed
     pub closed_tree_id: i64,
+    /// ID of the newly created active tree
     pub new_tree_id: i64,
-    pub genesis_leaf_index: Option<u64>,
-    /// Metadata for Chain Index (caller should record this)
+    /// Metadata for Chain Index and genesis insertion
     pub closed_tree_metadata: ClosedTreeMetadata,
 }
 
@@ -30,7 +31,6 @@ pub struct ClosedTreeMetadata {
     pub root_hash: [u8; 32],
     pub tree_size: u64,
     pub prev_tree_id: Option<i64>,
-    pub genesis_leaf_hash: Option<[u8; 32]>,
     pub closed_at: i64,
 }
 
@@ -148,13 +148,14 @@ impl IndexStore {
 
     /// Close the active tree and create a new one atomically with chain link
     ///
-    /// The tree is marked as 'pending_bitcoin' with bitcoin_anchor_id = NULL.
+    /// **IMPORTANT:** This method does NOT insert genesis leaf.
+    /// The caller must use `StorageEngine::rotate_tree()` which coordinates
+    /// genesis leaf insertion into both Slab and SQLite.
+    ///
+    /// The closed tree is marked as 'pending_bitcoin' with bitcoin_anchor_id = NULL.
     /// The ots_job will create the anchor and set the bitcoin_anchor_id later.
     ///
-    /// **Tree Chaining:** The new tree starts with a genesis leaf that commits
-    /// to the closed tree's final state (root_hash + tree_size).
-    ///
-    /// Returns `TreeCloseResult` with metadata for Chain Index.
+    /// Returns TreeCloseResult with metadata for genesis insertion.
     pub fn close_tree_and_create_new(
         &mut self,
         origin_id: &[u8; 32],
@@ -172,7 +173,7 @@ impl IndexStore {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
 
-        // Update active tree to pending_bitcoin (bitcoin_anchor_id will be set by ots_job)
+        // Update active tree to pending_bitcoin
         tx.execute(
             "UPDATE trees SET status = 'pending_bitcoin', end_size = ?1, root_hash = ?2, closed_at = ?3
              WHERE id = ?4",
@@ -180,6 +181,7 @@ impl IndexStore {
         )?;
 
         // Create new active tree WITH chain link
+        // NOTE: start_size = end_size (genesis will be inserted by caller via rotate_tree)
         tx.execute(
             "INSERT INTO trees (origin_id, status, start_size, created_at, prev_tree_id)
              VALUES (?1, 'active', ?2, ?3, ?4)",
@@ -188,55 +190,24 @@ impl IndexStore {
 
         let new_tree_id = tx.last_insert_rowid();
 
-        // Compute genesis leaf hash for the new tree
-        let genesis_hash = atl_core::compute_genesis_leaf_hash(root_hash, end_size);
-
-        // Insert genesis leaf as special entry
-        let genesis_id = uuid::Uuid::new_v4();
-        let genesis_metadata = serde_json::json!({
-            "type": "genesis",
-            "prev_tree_id": active_tree_id,
-            "prev_root_hash": format!("sha256:{}", hex::encode(root_hash)),
-            "prev_tree_size": end_size
-        });
-        let genesis_metadata_str = genesis_metadata.to_string();
-
-        tx.execute(
-            "INSERT INTO entries (id, leaf_index, slab_id, slab_offset, payload_hash, metadata_hash, metadata_cleartext, tree_id, created_at)
-             VALUES (?1, ?2, 0, 0, ?3, ?3, ?4, ?5, ?6)",
-            params![
-                genesis_id.to_string(),
-                end_size as i64,  // Genesis leaf is at position = prev_tree_size
-                genesis_hash.as_slice(),
-                genesis_metadata_str,
-                new_tree_id,
-                now
-            ],
-        )?;
-
-        // Update new tree's first_entry_at (genesis counts as first entry)
-        tx.execute(
-            "UPDATE trees SET first_entry_at = ?1 WHERE id = ?2",
-            params![now, new_tree_id],
-        )?;
+        // NOTE: NO genesis leaf insertion here!
+        // Genesis is inserted by StorageEngine::rotate_tree() which coordinates Slab + SQLite
 
         tx.commit()?;
 
-        // Prepare metadata for Chain Index (caller will record this)
+        // Prepare metadata for caller (Chain Index + genesis insertion)
         let closed_tree_metadata = ClosedTreeMetadata {
             tree_id: active_tree_id,
             origin_id: *origin_id,
             root_hash: *root_hash,
             tree_size: end_size,
             prev_tree_id: prev_tree_id_of_active,
-            genesis_leaf_hash: Some(genesis_hash),
             closed_at: now,
         };
 
         Ok(TreeCloseResult {
             closed_tree_id: active_tree_id,
             new_tree_id,
-            genesis_leaf_index: Some(end_size),
             closed_tree_metadata,
         })
     }
@@ -365,5 +336,253 @@ impl IndexStore {
             params![now],
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn create_test_index_store() -> IndexStore {
+        let conn = Connection::open_in_memory().unwrap();
+
+        // Create tables schema
+        conn.execute(
+            "CREATE TABLE trees (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                origin_id BLOB NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                start_size INTEGER NOT NULL,
+                end_size INTEGER,
+                root_hash BLOB,
+                created_at INTEGER NOT NULL,
+                first_entry_at INTEGER,
+                closed_at INTEGER,
+                tsa_anchor_id INTEGER,
+                bitcoin_anchor_id INTEGER,
+                prev_tree_id INTEGER
+            )",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "CREATE UNIQUE INDEX idx_trees_active ON trees(status) WHERE status = 'active'",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "CREATE TABLE entries (
+                id TEXT PRIMARY KEY,
+                leaf_index INTEGER NOT NULL,
+                slab_id INTEGER NOT NULL,
+                slab_offset INTEGER NOT NULL,
+                payload_hash BLOB NOT NULL,
+                metadata_hash BLOB NOT NULL,
+                metadata_cleartext TEXT,
+                tree_id INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+
+        IndexStore::from_connection(conn)
+    }
+
+    #[test]
+    fn test_close_tree_does_not_insert_genesis() {
+        let mut store = create_test_index_store();
+        let origin_id = [1u8; 32];
+
+        // Create initial active tree
+        store.create_active_tree(&origin_id, 0).unwrap();
+
+        // Simulate some entries (we don't actually insert them, just for the test context)
+        let end_size = 100u64;
+        let root_hash = [2u8; 32];
+
+        // Get entry count before close
+        let count_before: i64 = store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
+            .unwrap();
+
+        // Close tree and create new one
+        let result = store
+            .close_tree_and_create_new(&origin_id, end_size, &root_hash)
+            .unwrap();
+
+        // Get entry count after close
+        let count_after: i64 = store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
+            .unwrap();
+
+        // Assert: no entry was inserted (genesis leaf not created)
+        assert_eq!(count_before, count_after);
+
+        // Assert: no entry exists at leaf_index = end_size (genesis position)
+        let entry_at_genesis: Option<i64> = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM entries WHERE leaf_index = ?1",
+                [end_size as i64],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(entry_at_genesis, Some(0));
+
+        // Verify result structure
+        assert!(result.closed_tree_id > 0);
+        assert!(result.new_tree_id > 0);
+        assert_ne!(result.closed_tree_id, result.new_tree_id);
+    }
+
+    #[test]
+    fn test_close_tree_result_has_metadata() {
+        let mut store = create_test_index_store();
+        let origin_id = [1u8; 32];
+
+        // Create and populate first tree
+        let tree_id = store.create_active_tree(&origin_id, 0).unwrap();
+
+        let end_size = 42u64;
+        let root_hash = [3u8; 32];
+
+        // Close tree
+        let result = store
+            .close_tree_and_create_new(&origin_id, end_size, &root_hash)
+            .unwrap();
+
+        // Assert: metadata contains correct values
+        assert_eq!(result.closed_tree_metadata.tree_id, tree_id);
+        assert_eq!(result.closed_tree_metadata.origin_id, origin_id);
+        assert_eq!(result.closed_tree_metadata.root_hash, root_hash);
+        assert_eq!(result.closed_tree_metadata.tree_size, end_size);
+        assert_eq!(result.closed_tree_metadata.prev_tree_id, None); // First tree has no prev
+        assert!(result.closed_tree_metadata.closed_at > 0);
+    }
+
+    #[test]
+    fn test_new_tree_first_entry_at_is_null() {
+        let mut store = create_test_index_store();
+        let origin_id = [1u8; 32];
+
+        // Create first tree
+        store.create_active_tree(&origin_id, 0).unwrap();
+
+        let end_size = 10u64;
+        let root_hash = [4u8; 32];
+
+        // Close tree
+        let result = store
+            .close_tree_and_create_new(&origin_id, end_size, &root_hash)
+            .unwrap();
+
+        // Query new tree
+        let first_entry_at: Option<i64> = store
+            .connection()
+            .query_row(
+                "SELECT first_entry_at FROM trees WHERE id = ?1",
+                [result.new_tree_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        // Assert: new tree has first_entry_at = NULL (genesis not counted)
+        assert_eq!(first_entry_at, None);
+    }
+
+    #[test]
+    fn test_closed_tree_status_is_pending_bitcoin() {
+        let mut store = create_test_index_store();
+        let origin_id = [1u8; 32];
+
+        // Create first tree
+        store.create_active_tree(&origin_id, 0).unwrap();
+
+        let end_size = 100u64;
+        let root_hash = [5u8; 32];
+
+        // Close tree
+        let result = store
+            .close_tree_and_create_new(&origin_id, end_size, &root_hash)
+            .unwrap();
+
+        // Query closed tree status
+        let status: String = store
+            .connection()
+            .query_row(
+                "SELECT status FROM trees WHERE id = ?1",
+                [result.closed_tree_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(status, "pending_bitcoin");
+    }
+
+    #[test]
+    fn test_new_tree_has_prev_tree_id_chain_link() {
+        let mut store = create_test_index_store();
+        let origin_id = [1u8; 32];
+
+        // Create first tree
+        let first_tree_id = store.create_active_tree(&origin_id, 0).unwrap();
+
+        let end_size = 50u64;
+        let root_hash = [6u8; 32];
+
+        // Close first tree
+        let result = store
+            .close_tree_and_create_new(&origin_id, end_size, &root_hash)
+            .unwrap();
+
+        // Query new tree's prev_tree_id
+        let prev_tree_id: Option<i64> = store
+            .connection()
+            .query_row(
+                "SELECT prev_tree_id FROM trees WHERE id = ?1",
+                [result.new_tree_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        // Assert: new tree has chain link to closed tree
+        assert_eq!(prev_tree_id, Some(first_tree_id));
+        assert_eq!(prev_tree_id, Some(result.closed_tree_id));
+    }
+
+    #[test]
+    fn test_new_tree_start_size_equals_closed_tree_end_size() {
+        let mut store = create_test_index_store();
+        let origin_id = [1u8; 32];
+
+        // Create first tree
+        store.create_active_tree(&origin_id, 0).unwrap();
+
+        let end_size = 123u64;
+        let root_hash = [7u8; 32];
+
+        // Close tree
+        let result = store
+            .close_tree_and_create_new(&origin_id, end_size, &root_hash)
+            .unwrap();
+
+        // Query new tree's start_size
+        let start_size: i64 = store
+            .connection()
+            .query_row(
+                "SELECT start_size FROM trees WHERE id = ?1",
+                [result.new_tree_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        // Assert: new tree starts where old tree ended
+        assert_eq!(start_size as u64, end_size);
     }
 }
