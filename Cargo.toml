@@ -78,7 +78,7 @@ sha2 = "0.10"
 bytes = "1"
 
 [features]
-default = ["rfc3161"]
+default = ["rfc3161", "ots"]
 rfc3161 = ["rasn", "rasn-cms", "reqwest"]
 ots = []  # Uses atl_core::ots (no external deps needed)
 monitoring = ["betteruptime-heartbeat"]  # Optional Better Uptime heartbeats
