@@ -146,6 +146,7 @@ impl SqliteStore {
     /// Returns anchors where tree_size >= target_tree_size,
     /// ordered by tree_size ascending (closest first).
     /// Only returns 'confirmed' status anchors.
+    /// For each anchor type, returns only the anchor with the minimum tree_size.
     pub(crate) fn get_anchors_covering_impl(
         &self,
         target_tree_size: u64,
@@ -154,10 +155,16 @@ impl SqliteStore {
         let conn = self.get_conn()?;
 
         let mut stmt = conn.prepare(
-            "SELECT id, tree_size, anchor_type, anchored_hash, timestamp, token, metadata
-             FROM anchors
-             WHERE tree_size >= ?1 AND status = 'confirmed'
-             ORDER BY tree_size ASC
+            "SELECT a.id, a.tree_size, a.anchor_type, a.anchored_hash, a.timestamp, a.token, a.metadata
+             FROM anchors a
+             INNER JOIN (
+                 SELECT anchor_type, MIN(tree_size) as min_tree_size
+                 FROM anchors
+                 WHERE tree_size >= ?1 AND status = 'confirmed'
+                 GROUP BY anchor_type
+             ) AS best ON a.anchor_type = best.anchor_type AND a.tree_size = best.min_tree_size
+             WHERE a.status = 'confirmed'
+             ORDER BY a.tree_size ASC
              LIMIT ?2",
         )?;
 

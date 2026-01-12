@@ -214,7 +214,7 @@ mod background_simulation {
             Arc::new(AsyncOtsClient::new().expect("client creation in async context failed"));
 
         // Verify trait object works
-        let hash = [1u8; 32];
+        let _hash = [1u8; 32];
 
         // We can't actually submit without network, but verify it compiles
         // and the Arc<dyn OtsClient> pattern works
