@@ -70,7 +70,7 @@ impl TsaAnchoringJob {
         // PART 1: Anchor active tree periodically
         self.process_active_tree_anchoring().await?;
 
-        // PART 2: Anchor closed trees that don't have final TSA anchor
+        // PART 2: Link TSA anchors to closed trees (find or create)
         let pending_trees = {
             let idx = self.index.lock().await;
             idx.get_trees_pending_tsa().map_err(|e| {
@@ -91,7 +91,7 @@ impl TsaAnchoringJob {
 
         tracing::info!(
             count = trees_to_process.len(),
-            "Processing closed trees for final TSA anchoring"
+            "Linking TSA anchors to closed trees"
         );
 
         for tree in trees_to_process {
@@ -104,7 +104,7 @@ impl TsaAnchoringJob {
                     tracing::info!(
                         tree_id = tree.id,
                         anchor_id = anchor_id,
-                        "Final TSA anchor created for closed tree"
+                        "TSA anchor linked to closed tree"
                     );
                 }
                 Err(e) => {
