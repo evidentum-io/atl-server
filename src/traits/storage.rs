@@ -205,6 +205,7 @@ pub trait Storage: Send + Sync + 'static {
     ) -> crate::error::ServerResult<ConsistencyProof>;
 
     /// Get anchors for a specific tree size
+    #[allow(dead_code)]
     fn get_anchors(
         &self,
         tree_size: u64,

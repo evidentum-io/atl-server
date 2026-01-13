@@ -13,8 +13,6 @@ mod options;
 #[allow(unused_imports)]
 pub use convert::convert_anchor_to_receipt;
 #[allow(unused_imports)]
-pub use generator::{
-    generate_receipt, generate_receipt_simple, CheckpointSigner, ReceiptGenerator,
-};
+pub use generator::{generate_receipt, CheckpointSigner};
 #[allow(unused_imports)]
 pub use options::ReceiptOptions;

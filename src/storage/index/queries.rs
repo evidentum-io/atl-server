@@ -207,37 +207,6 @@ impl IndexStore {
         Ok(())
     }
 
-    /// Get current slab ID
-    #[allow(dead_code)]
-    pub fn get_current_slab(&self) -> rusqlite::Result<u32> {
-        match self.conn.borrow().query_row(
-            "SELECT value FROM atl_config WHERE key = 'current_slab_id'",
-            [],
-            |row| row.get::<_, String>(0),
-        ) {
-            Ok(s) => Ok(s.parse().unwrap_or(0)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
-            Err(e) => Err(e),
-        }
-    }
-
-    /// Set current slab ID
-    #[allow(dead_code)]
-    pub fn set_current_slab(&self, slab_id: u32) -> rusqlite::Result<()> {
-        let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
-        self.conn.borrow().execute(
-            "INSERT OR REPLACE INTO atl_config (key, value, updated_at) VALUES ('current_slab_id', ?1, ?2)",
-            params![slab_id.to_string(), now],
-        )?;
-        Ok(())
-    }
-
-    /// Begin transaction
-    #[allow(dead_code)]
-    pub fn transaction(&mut self) -> rusqlite::Result<Transaction<'_>> {
-        self.conn.get_mut().transaction()
-    }
-
     /// Get a reference to the underlying database connection
     pub fn connection(&self) -> std::cell::Ref<'_, rusqlite::Connection> {
         self.conn.borrow()

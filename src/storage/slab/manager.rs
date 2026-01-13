@@ -74,60 +74,6 @@ impl SlabManager {
         })
     }
 
-    /// Open existing manager and load slab metadata
-    ///
-    /// Scans directory for existing slab files and reconstructs state.
-    ///
-    /// # Arguments
-    /// * `slab_dir` - Directory containing slab files
-    /// * `config` - Slab configuration
-    ///
-    /// # Errors
-    /// Returns IO error if directory doesn't exist or files are corrupted
-    #[allow(dead_code)]
-    pub fn open(slab_dir: PathBuf, config: SlabConfig) -> io::Result<Self> {
-        let mut manager = Self::new(slab_dir, config)?;
-
-        // Scan for existing slab files
-        let entries = std::fs::read_dir(&manager.slab_dir)?;
-        let mut slab_ids = Vec::new();
-
-        for entry in entries {
-            let entry = entry?;
-            let path = entry.path();
-
-            if path.extension().and_then(|s| s.to_str()) == Some("dat") {
-                if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
-                    if let Some(id_str) = name.strip_prefix("slab_") {
-                        if let Ok(id) = id_str.parse::<u32>() {
-                            slab_ids.push(id);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Sort and find active slab
-        slab_ids.sort_unstable();
-
-        if let Some(&last_id) = slab_ids.last() {
-            // Open last slab to check if it's full
-            let slab = manager.get_or_open_slab(last_id)?;
-            let is_full = slab.is_full();
-            let leaf_count = slab.leaf_count();
-            let max_leaves = manager.config.max_leaves;
-
-            if !is_full {
-                manager.active_slab = Some(last_id);
-            }
-
-            // Compute total tree size
-            manager.tree_size = (last_id as u64 - 1) * (max_leaves as u64) + (leaf_count as u64);
-        }
-
-        Ok(manager)
-    }
-
     /// Get node hash by global coordinates
     ///
     /// Automatically selects the correct slab.
@@ -263,8 +209,8 @@ impl SlabManager {
     }
 
     /// Get current tree size
-    #[allow(dead_code)]
     #[must_use]
+    #[allow(dead_code)]
     pub fn tree_size(&self) -> u64 {
         self.tree_size
     }
@@ -375,20 +321,6 @@ impl SlabManager {
         }
 
         let slab = self.get_or_open_slab(slab_id)?;
-
-        let leaves: Vec<[u8; 32]> = (0..leaf_count)
-            .map(|i| slab.get_node(0, u64::from(i)).unwrap_or([0u8; 32]))
-            .collect();
-
-        Ok(atl_core::core::merkle::compute_root(&leaves))
-    }
-
-    /// Get root hash for a single slab
-    #[allow(dead_code)]
-    fn get_slab_root(&self, slab: &SlabFile, leaf_count: u32) -> io::Result<[u8; 32]> {
-        if leaf_count == 0 {
-            return Ok([0u8; 32]);
-        }
 
         let leaves: Vec<[u8; 32]> = (0..leaf_count)
             .map(|i| slab.get_node(0, u64::from(i)).unwrap_or([0u8; 32]))
