@@ -360,10 +360,13 @@ impl SlabManager {
             return Ok([0u8; 32]);
         }
 
-        let height = SlabHeader::tree_height(self.config.max_leaves);
         let slab = self.get_or_open_slab(slab_id)?;
-        slab.get_node(height, 0)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "root node not found"))
+
+        let leaves: Vec<[u8; 32]> = (0..leaf_count)
+            .map(|i| slab.get_node(0, u64::from(i)).unwrap_or([0u8; 32]))
+            .collect();
+
+        Ok(atl_core::core::merkle::compute_root(&leaves))
     }
 
     /// Get root hash for a single slab
@@ -373,9 +376,11 @@ impl SlabManager {
             return Ok([0u8; 32]);
         }
 
-        let height = SlabHeader::tree_height(self.config.max_leaves);
-        slab.get_node(height, 0)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "root node not found"))
+        let leaves: Vec<[u8; 32]> = (0..leaf_count)
+            .map(|i| slab.get_node(0, u64::from(i)).unwrap_or([0u8; 32]))
+            .collect();
+
+        Ok(atl_core::core::merkle::compute_root(&leaves))
     }
 
     /// Compute cross-slab root by combining slab roots
@@ -558,5 +563,31 @@ mod tests {
 
         let path = manager.get_inclusion_path(5, 10).unwrap();
         assert!(!path.is_empty());
+    }
+
+    #[test]
+    fn test_root_matches_atl_core() {
+        for size in [1, 2, 3, 5, 7, 10, 15, 31, 50] {
+            let dir = tempdir().unwrap();
+            let mut manager = SlabManager::new(
+                dir.path().to_path_buf(),
+                SlabConfig {
+                    max_leaves: 100,
+                    max_open_slabs: 2,
+                },
+            )
+            .unwrap();
+
+            let leaves: Vec<[u8; 32]> = (0..size).map(|i| [i as u8; 32]).collect();
+            let root_from_manager = manager.append_leaves(&leaves).unwrap();
+
+            let leaf_hashes: Vec<[u8; 32]> = (0..size).map(|i| [i as u8; 32]).collect();
+            let expected_root = atl_core::core::merkle::compute_root(&leaf_hashes);
+
+            assert_eq!(
+                root_from_manager, expected_root,
+                "Root mismatch for size {size}"
+            );
+        }
     }
 }
