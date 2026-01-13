@@ -1,7 +1,9 @@
 //! atl-server - Autonomous notarization primitive for ATL Protocol v1
 
 use clap::{Parser, ValueEnum};
+use std::path::Path;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use uuid::Uuid;
 
 mod api;
 mod config;
@@ -106,6 +108,35 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+/// Get or create tree UUID from file or environment variable.
+///
+/// Priority:
+/// 1. Read from `{data_dir}/tree_uuid` file if exists
+/// 2. Use `ATL_TREE_UUID` environment variable if set
+/// 3. Generate new UUID and save to file
+fn get_or_create_tree_uuid(data_dir: &Path) -> anyhow::Result<Uuid> {
+    let uuid_file = data_dir.join("tree_uuid");
+
+    if uuid_file.exists() {
+        let uuid_str = std::fs::read_to_string(&uuid_file)?;
+        let uuid = Uuid::parse_str(uuid_str.trim())?;
+        tracing::info!("Tree UUID (from file): {}", uuid);
+        return Ok(uuid);
+    }
+
+    let uuid = if let Ok(env_uuid) = std::env::var("ATL_TREE_UUID") {
+        Uuid::parse_str(&env_uuid)?
+    } else {
+        Uuid::new_v4()
+    };
+
+    std::fs::create_dir_all(data_dir)?;
+    std::fs::write(&uuid_file, uuid.to_string())?;
+
+    tracing::info!("Tree UUID: {}", uuid);
+    Ok(uuid)
+}
+
 /// Run in STANDALONE mode
 async fn run_standalone(args: Args) -> anyhow::Result<()> {
     use std::path::PathBuf;
@@ -133,7 +164,10 @@ async fn run_standalone(args: Args) -> anyhow::Result<()> {
         fsync_enabled: true,
     };
 
-    let engine = crate::storage::StorageEngine::new(storage_config, *signer.key_id())
+    let tree_uuid = get_or_create_tree_uuid(&PathBuf::from(&args.database))?;
+    let origin_id = atl_core::compute_origin_id(&tree_uuid);
+
+    let engine = crate::storage::StorageEngine::new(storage_config, origin_id)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize storage engine: {}", e))?;
     let storage_engine = Arc::new(engine);
@@ -253,7 +287,10 @@ async fn run_sequencer(args: Args) -> anyhow::Result<()> {
         fsync_enabled: true,
     };
 
-    let engine = crate::storage::StorageEngine::new(storage_config, *signer.key_id())
+    let tree_uuid = get_or_create_tree_uuid(&PathBuf::from(&args.database))?;
+    let origin_id = atl_core::compute_origin_id(&tree_uuid);
+
+    let engine = crate::storage::StorageEngine::new(storage_config, origin_id)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize storage engine: {}", e))?;
     let storage_engine = Arc::new(engine);
