@@ -222,17 +222,31 @@ impl SlabManager {
             ));
         }
 
+        let num_slabs = self.num_slabs_for_size(tree_size);
+
+        if num_slabs == 1 {
+            // Single slab - delegate directly to atl-core
+            return self.get_local_inclusion_path(1, leaf_index, tree_size);
+        }
+
+        // Multi-slab case
         let slab_id = self.leaf_index_to_slab_id(leaf_index);
         let local_index = leaf_index % (self.config.max_leaves as u64);
 
-        // Get local path within slab (limited by actual tree size)
-        let mut path = self.get_local_inclusion_path(slab_id, local_index, tree_size)?;
+        // Calculate leaves in target slab
+        let max_leaves = self.config.max_leaves as u64;
+        let leaves_in_slab = if slab_id < num_slabs {
+            max_leaves
+        } else {
+            ((tree_size - 1) % max_leaves) + 1
+        };
 
-        // Add cross-slab path if needed
-        if self.num_slabs_for_size(tree_size) > 1 {
-            let cross_path = self.get_cross_slab_path(slab_id, tree_size)?;
-            path.extend(cross_path);
-        }
+        // Get local path within slab
+        let mut path = self.get_local_inclusion_path(slab_id, local_index, leaves_in_slab)?;
+
+        // Add cross-slab path
+        let cross_path = self.get_cross_slab_path(slab_id, tree_size)?;
+        path.extend(cross_path);
 
         Ok(path)
     }
@@ -403,36 +417,61 @@ impl SlabManager {
         Ok(Self::combine_roots(&roots))
     }
 
-    /// Get local inclusion path within a slab
+    /// Get local inclusion path within a slab using atl-core
     ///
-    /// The path is limited by the actual tree_size, not the slab's max capacity,
-    /// to produce RFC 6962 compliant proofs.
+    /// Generates RFC 6962 compliant proof by delegating to atl-core.
+    ///
+    /// # Arguments
+    /// * `slab_id` - Slab ID to generate proof from
+    /// * `local_index` - Leaf index within the slab
+    /// * `local_tree_size` - Tree size for proof (limited to this slab)
+    ///
+    /// # Errors
+    /// Returns IO error if tree_size is 0, index out of bounds, or proof generation fails
     fn get_local_inclusion_path(
         &mut self,
         slab_id: u32,
         local_index: u64,
-        tree_size: u64,
+        local_tree_size: u64,
     ) -> io::Result<Vec<[u8; 32]>> {
-        // Calculate actual tree height from tree_size (not max_leaves)
-        let actual_height = if tree_size <= 1 {
-            0
-        } else {
-            64 - (tree_size - 1).leading_zeros()
-        };
-
-        let slab = self.get_or_open_slab(slab_id)?;
-        let mut path = Vec::new();
-        let mut current_index = local_index;
-
-        for level in 0..actual_height {
-            let sibling_index = current_index ^ 1;
-            if let Some(sibling) = slab.get_node(level, sibling_index) {
-                path.push(sibling);
-            }
-            current_index /= 2;
+        if local_tree_size == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "tree_size cannot be 0",
+            ));
+        }
+        if local_index >= local_tree_size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "local_index >= local_tree_size",
+            ));
         }
 
-        Ok(path)
+        // Collect all leaves from the slab into a Vec for the callback
+        let slab = self.get_or_open_slab(slab_id)?;
+        let leaves: Vec<[u8; 32]> = (0..local_tree_size)
+            .map(|i| slab.get_node(0, i).unwrap_or([0u8; 32]))
+            .collect();
+
+        // Create callback for atl-core to fetch leaf nodes
+        let get_node = |level: u32, index: u64| -> Option<[u8; 32]> {
+            // atl-core's compute_subtree_root only requests level 0 (leaves)
+            if level == 0 && (index as usize) < leaves.len() {
+                Some(leaves[index as usize])
+            } else {
+                None
+            }
+        };
+
+        // Generate RFC 6962 compliant proof
+        let proof = atl_core::core::merkle::generate_inclusion_proof(
+            local_index,
+            local_tree_size,
+            get_node,
+        )
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+        Ok(proof.path)
     }
 
     /// Get cross-slab path (sibling slab roots)
@@ -589,5 +628,74 @@ mod tests {
                 "Root mismatch for size {size}"
             );
         }
+    }
+
+    #[test]
+    fn test_inclusion_proof_verifies_with_atl_core() {
+        // Test various tree sizes
+        for size in [1u64, 2, 3, 5, 7, 10, 15, 31, 50] {
+            let dir = tempdir().unwrap();
+            let mut manager = SlabManager::new(
+                dir.path().to_path_buf(),
+                SlabConfig {
+                    max_leaves: 100,
+                    max_open_slabs: 2,
+                },
+            )
+            .unwrap();
+
+            let leaves: Vec<[u8; 32]> = (0..size).map(|i| [i as u8; 32]).collect();
+            let root = manager.append_leaves(&leaves).unwrap();
+
+            // Test inclusion proof for each leaf
+            for leaf_idx in 0..size {
+                let path = manager.get_inclusion_path(leaf_idx, size).unwrap();
+
+                // Verify with atl-core
+                let proof = atl_core::core::merkle::InclusionProof {
+                    leaf_index: leaf_idx,
+                    tree_size: size,
+                    path: path.clone(),
+                };
+
+                let verified = atl_core::core::merkle::verify_inclusion(
+                    &leaves[leaf_idx as usize],
+                    &proof,
+                    &root,
+                )
+                .expect("verification should not error");
+
+                assert!(
+                    verified,
+                    "Proof failed for leaf {} in tree of size {}",
+                    leaf_idx, size
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_single_leaf_proof() {
+        let dir = tempdir().unwrap();
+        let mut manager = SlabManager::new(
+            dir.path().to_path_buf(),
+            SlabConfig {
+                max_leaves: 100,
+                max_open_slabs: 2,
+            },
+        )
+        .unwrap();
+
+        let leaves = vec![[42u8; 32]];
+        let root = manager.append_leaves(&leaves).unwrap();
+
+        let path = manager.get_inclusion_path(0, 1).unwrap();
+        assert!(
+            path.is_empty(),
+            "Single leaf tree should have empty proof path"
+        );
+
+        // Root should equal the single leaf
+        assert_eq!(root, leaves[0]);
     }
 }
