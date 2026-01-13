@@ -23,6 +23,7 @@ pub async fn recover(
     wal: &mut WalWriter,
     slabs: &mut SlabManager,
     index: &mut IndexStore,
+    slab_capacity: u64,
 ) -> Result<(), StorageError> {
     // Scan WAL directory for pending/committed batches
     let recovery = WalRecovery::new(wal.dir().to_path_buf());
@@ -60,7 +61,6 @@ pub async fn recover(
             .map(|(i, entry)| {
                 let leaf_index = batch.tree_size_before + i as u64;
                 let id = Uuid::from_bytes(entry.id);
-                let slab_capacity = 1_000_000u64; // Use default from config
                 let slab_id = (leaf_index / slab_capacity) as u32 + 1;
                 let slab_offset = (leaf_index % slab_capacity) * 32;
 

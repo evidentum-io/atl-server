@@ -10,8 +10,8 @@ use std::cell::RefCell;
 use std::path::Path;
 
 /// Entry with slab location
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct IndexEntry {
     pub id: uuid::Uuid,
     pub leaf_index: u64,
@@ -59,9 +59,21 @@ impl IndexStore {
             "#,
         )?;
 
-        Ok(Self {
+        let store = Self {
             conn: RefCell::new(conn),
-        })
+        };
+
+        store.migrate()?;
+
+        Ok(store)
+    }
+
+    /// Create IndexStore from an existing connection (for testing)
+    #[cfg(test)]
+    pub(crate) fn from_connection(conn: Connection) -> Self {
+        Self {
+            conn: RefCell::new(conn),
+        }
     }
 
     /// Initialize schema (create tables if needed)
@@ -78,9 +90,22 @@ impl IndexStore {
         Ok(())
     }
 
-    /// Run migrations from v2 to v3
-    #[allow(dead_code)]
+    /// Run migrations from v2 to latest
     pub fn migrate(&self) -> rusqlite::Result<()> {
+        let table_exists = self
+            .conn
+            .borrow()
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='atl_config'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+
+        if table_exists.is_none() {
+            return Ok(());
+        }
+
         let current: u32 = self
             .conn
             .borrow()
@@ -95,6 +120,12 @@ impl IndexStore {
             self.conn
                 .borrow()
                 .execute_batch(super::schema::MIGRATE_V2_TO_V3)?;
+        }
+
+        if current < 4 {
+            self.conn
+                .borrow()
+                .execute_batch(super::schema::MIGRATE_V3_TO_V4)?;
         }
 
         Ok(())
@@ -174,37 +205,6 @@ impl IndexStore {
             params![size.to_string(), now],
         )?;
         Ok(())
-    }
-
-    /// Get current slab ID
-    #[allow(dead_code)]
-    pub fn get_current_slab(&self) -> rusqlite::Result<u32> {
-        match self.conn.borrow().query_row(
-            "SELECT value FROM atl_config WHERE key = 'current_slab_id'",
-            [],
-            |row| row.get::<_, String>(0),
-        ) {
-            Ok(s) => Ok(s.parse().unwrap_or(0)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
-            Err(e) => Err(e),
-        }
-    }
-
-    /// Set current slab ID
-    #[allow(dead_code)]
-    pub fn set_current_slab(&self, slab_id: u32) -> rusqlite::Result<()> {
-        let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
-        self.conn.borrow().execute(
-            "INSERT OR REPLACE INTO atl_config (key, value, updated_at) VALUES ('current_slab_id', ?1, ?2)",
-            params![slab_id.to_string(), now],
-        )?;
-        Ok(())
-    }
-
-    /// Begin transaction
-    #[allow(dead_code)]
-    pub fn transaction(&mut self) -> rusqlite::Result<Transaction<'_>> {
-        self.conn.get_mut().transaction()
     }
 
     /// Get a reference to the underlying database connection

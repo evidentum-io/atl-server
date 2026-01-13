@@ -1,7 +1,5 @@
 //! Receipt generation implementation
 
-#![allow(dead_code)]
-
 use atl_core::{
     Checkpoint, CheckpointJson, Receipt, ReceiptEntry, ReceiptProof, RECEIPT_SPEC_VERSION,
 };
@@ -30,7 +28,6 @@ impl CheckpointSigner {
     /// # Arguments
     /// * `signing_key` - Ed25519 signing key
     #[must_use]
-    #[allow(dead_code)]
     pub fn new(signing_key: SigningKey) -> Self {
         let public_key = signing_key.verifying_key().to_bytes();
         let key_id = atl_core::compute_key_id(&public_key);
@@ -45,7 +42,6 @@ impl CheckpointSigner {
     /// # Arguments
     /// * `seed` - 32-byte Ed25519 seed
     #[must_use]
-    #[allow(dead_code)]
     pub fn from_bytes(seed: &[u8; 32]) -> Self {
         let signing_key = SigningKey::from_bytes(seed);
         Self::new(signing_key)
@@ -74,6 +70,7 @@ impl CheckpointSigner {
 
     /// Get the key ID (SHA256 of public key)
     #[must_use]
+    #[allow(dead_code)]
     pub const fn key_id(&self) -> &[u8; 32] {
         &self.key_id
     }
@@ -89,6 +86,7 @@ impl CheckpointSigner {
     ///
     /// Returns (key_id, public_key) tuple
     #[must_use]
+    #[allow(dead_code)]
     pub fn public_key_info(&self) -> ([u8; 32], [u8; 32]) {
         (self.key_id, self.public_key_bytes())
     }
@@ -153,60 +151,6 @@ impl std::fmt::Debug for CheckpointSigner {
     }
 }
 
-/// Builder for fine-grained receipt generation
-#[allow(dead_code)]
-pub struct ReceiptGenerator<'a, S: Storage> {
-    storage: &'a S,
-    signer: &'a CheckpointSigner,
-    options: ReceiptOptions,
-}
-
-impl<'a, S: Storage> ReceiptGenerator<'a, S> {
-    /// Create a new receipt generator
-    #[must_use]
-    #[allow(dead_code)]
-    pub const fn new(storage: &'a S, signer: &'a CheckpointSigner) -> Self {
-        Self {
-            storage,
-            signer,
-            options: ReceiptOptions::with_anchors(),
-        }
-    }
-
-    /// Include anchors in receipt
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn with_anchors(mut self) -> Self {
-        self.options.include_anchors = true;
-        self
-    }
-
-    /// Include consistency proof from given tree size
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn with_consistency_from(mut self, from_size: u64) -> Self {
-        self.options.consistency_from = Some(from_size);
-        self
-    }
-
-    /// Set custom timestamp
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn with_timestamp(mut self, timestamp: u64) -> Self {
-        self.options.timestamp = Some(timestamp);
-        self
-    }
-
-    /// Generate receipt for entry
-    ///
-    /// # Errors
-    /// Returns error if entry not found or proof generation fails
-    #[allow(dead_code)]
-    pub fn generate(&self, entry_id: &Uuid) -> ServerResult<Receipt> {
-        generate_receipt(entry_id, self.storage, self.signer, self.options.clone())
-    }
-}
-
 /// Generate a receipt for an entry
 ///
 /// # Arguments
@@ -222,6 +166,7 @@ impl<'a, S: Storage> ReceiptGenerator<'a, S> {
 /// * `ServerError::EntryNotFound` if entry doesn't exist
 /// * `ServerError::EntryNotInTree` if entry not yet indexed
 /// * `ServerError::Storage` for storage errors
+#[allow(dead_code)]
 pub fn generate_receipt<S: Storage + ?Sized>(
     entry_id: &Uuid,
     storage: &S,
@@ -310,22 +255,10 @@ pub fn generate_receipt<S: Storage + ?Sized>(
     })
 }
 
-/// Generate receipt with default options
-///
-/// # Errors
-/// Returns error if entry not found or proof generation fails
-#[allow(dead_code)]
-pub fn generate_receipt_simple<S: Storage + ?Sized>(
-    entry_id: &Uuid,
-    storage: &S,
-    signer: &CheckpointSigner,
-) -> ServerResult<Receipt> {
-    generate_receipt(entry_id, storage, signer, ReceiptOptions::default())
-}
-
 /// Create and sign a checkpoint
 ///
 /// Internal helper that builds a checkpoint and signs it.
+#[allow(dead_code)]
 fn create_signed_checkpoint(
     origin: [u8; 32],
     tree_size: u64,

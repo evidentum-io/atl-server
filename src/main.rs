@@ -1,7 +1,9 @@
 //! atl-server - Autonomous notarization primitive for ATL Protocol v1
 
 use clap::{Parser, ValueEnum};
+use std::path::Path;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use uuid::Uuid;
 
 mod api;
 mod config;
@@ -106,6 +108,35 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+/// Get or create tree UUID from file or environment variable.
+///
+/// Priority:
+/// 1. Read from `{data_dir}/tree_uuid` file if exists
+/// 2. Use `ATL_TREE_UUID` environment variable if set
+/// 3. Generate new UUID and save to file
+fn get_or_create_tree_uuid(data_dir: &Path) -> anyhow::Result<Uuid> {
+    let uuid_file = data_dir.join("tree_uuid");
+
+    if uuid_file.exists() {
+        let uuid_str = std::fs::read_to_string(&uuid_file)?;
+        let uuid = Uuid::parse_str(uuid_str.trim())?;
+        tracing::info!("Tree UUID (from file): {}", uuid);
+        return Ok(uuid);
+    }
+
+    let uuid = if let Ok(env_uuid) = std::env::var("ATL_TREE_UUID") {
+        Uuid::parse_str(&env_uuid)?
+    } else {
+        Uuid::new_v4()
+    };
+
+    std::fs::create_dir_all(data_dir)?;
+    std::fs::write(&uuid_file, uuid.to_string())?;
+
+    tracing::info!("Tree UUID: {}", uuid);
+    Ok(uuid)
+}
+
 /// Run in STANDALONE mode
 async fn run_standalone(args: Args) -> anyhow::Result<()> {
     use std::path::PathBuf;
@@ -127,17 +158,39 @@ async fn run_standalone(args: Args) -> anyhow::Result<()> {
         wal_dir: None,
         slab_dir: None,
         db_path: None,
-        slab_capacity: 1_000_000,
+        slab_capacity: crate::storage::StorageConfig::default().slab_capacity,
         max_open_slabs: 10,
         wal_keep_count: 2,
         fsync_enabled: true,
     };
 
-    let engine = crate::storage::StorageEngine::new(storage_config, *signer.key_id())
+    let tree_uuid = get_or_create_tree_uuid(&PathBuf::from(&args.database))?;
+    let origin_id = atl_core::compute_origin_id(&tree_uuid);
+
+    let engine = crate::storage::StorageEngine::new(storage_config, origin_id)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize storage engine: {}", e))?;
     let storage_engine = Arc::new(engine);
     let storage: Arc<dyn traits::Storage> = storage_engine.clone();
+
+    // Initialize Chain Index
+    let chain_index_path = PathBuf::from(&args.database).join("chain_index.db");
+    let chain_index = crate::storage::chain_index::ChainIndex::open(&chain_index_path)
+        .map_err(|e| anyhow::anyhow!("Failed to initialize Chain Index: {}", e))?;
+    let chain_index = Arc::new(tokio::sync::Mutex::new(chain_index));
+
+    // Sync Chain Index with main DB
+    {
+        let index = storage_engine.index_store();
+        let idx = index.lock().await;
+        let ci = chain_index.lock().await;
+        let synced = ci
+            .sync_with_main_db(&idx)
+            .map_err(|e| anyhow::anyhow!("Failed to sync Chain Index: {}", e))?;
+        if synced > 0 {
+            tracing::info!(synced_trees = synced, "Chain Index synced with main DB");
+        }
+    }
 
     // Create sequencer
     let sequencer_config = sequencer::SequencerConfig::from_env();
@@ -149,8 +202,11 @@ async fn run_standalone(args: Args) -> anyhow::Result<()> {
     });
 
     let background_config = background::BackgroundConfig::from_env();
-    let background_runner =
-        background::BackgroundJobRunner::new(storage_engine.clone(), background_config);
+    let background_runner = background::BackgroundJobRunner::new(
+        storage_engine.clone(),
+        chain_index.clone(),
+        background_config,
+    );
     let background_handles = background_runner.start().await?;
 
     // Create dispatcher
@@ -225,17 +281,39 @@ async fn run_sequencer(args: Args) -> anyhow::Result<()> {
         wal_dir: None,
         slab_dir: None,
         db_path: None,
-        slab_capacity: 1_000_000,
+        slab_capacity: crate::storage::StorageConfig::default().slab_capacity,
         max_open_slabs: 10,
         wal_keep_count: 2,
         fsync_enabled: true,
     };
 
-    let engine = crate::storage::StorageEngine::new(storage_config, *signer.key_id())
+    let tree_uuid = get_or_create_tree_uuid(&PathBuf::from(&args.database))?;
+    let origin_id = atl_core::compute_origin_id(&tree_uuid);
+
+    let engine = crate::storage::StorageEngine::new(storage_config, origin_id)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize storage engine: {}", e))?;
     let storage_engine = Arc::new(engine);
     let storage: Arc<dyn traits::Storage> = storage_engine.clone();
+
+    // Initialize Chain Index
+    let chain_index_path = PathBuf::from(&args.database).join("chain_index.db");
+    let chain_index = crate::storage::chain_index::ChainIndex::open(&chain_index_path)
+        .map_err(|e| anyhow::anyhow!("Failed to initialize Chain Index: {}", e))?;
+    let chain_index = Arc::new(tokio::sync::Mutex::new(chain_index));
+
+    // Sync Chain Index with main DB
+    {
+        let index = storage_engine.index_store();
+        let idx = index.lock().await;
+        let ci = chain_index.lock().await;
+        let synced = ci
+            .sync_with_main_db(&idx)
+            .map_err(|e| anyhow::anyhow!("Failed to sync Chain Index: {}", e))?;
+        if synced > 0 {
+            tracing::info!(synced_trees = synced, "Chain Index synced with main DB");
+        }
+    }
 
     // Create sequencer
     let sequencer_config = sequencer::SequencerConfig::from_env();
@@ -247,8 +325,11 @@ async fn run_sequencer(args: Args) -> anyhow::Result<()> {
     });
 
     let background_config = background::BackgroundConfig::from_env();
-    let background_runner =
-        background::BackgroundJobRunner::new(storage_engine.clone(), background_config);
+    let background_runner = background::BackgroundJobRunner::new(
+        storage_engine.clone(),
+        chain_index.clone(),
+        background_config,
+    );
     let background_handles = background_runner.start().await?;
 
     // Create gRPC server

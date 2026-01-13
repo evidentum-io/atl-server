@@ -11,12 +11,15 @@ pub struct ReceiptOptions {
     pub consistency_from: Option<u64>,
 
     /// Include anchors in receipt (default: true)
+    #[allow(dead_code)]
     pub include_anchors: bool,
 
     /// Custom timestamp for checkpoint (defaults to current time)
+    #[allow(dead_code)]
     pub timestamp: Option<u64>,
 
     /// Tree size to generate receipt at (defaults to current)
+    #[allow(dead_code)]
     pub at_tree_size: Option<u64>,
 
     /// Automatically find and include consistency proof from last anchor
@@ -40,6 +43,7 @@ impl Default for ReceiptOptions {
 impl ReceiptOptions {
     /// Create options with anchors included (explicit)
     #[must_use]
+    #[allow(dead_code)]
     pub const fn with_anchors() -> Self {
         Self {
             consistency_from: None,

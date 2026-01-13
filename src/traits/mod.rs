@@ -5,6 +5,7 @@ pub mod checkpoint;
 pub mod dispatcher;
 pub mod proof;
 pub mod storage;
+pub mod tree_rotator;
 
 // Re-export all types
 #[allow(unused_imports)]
@@ -30,3 +31,6 @@ pub use storage::{
     AppendParams, AppendResult, BatchResult, ConsistencyProof, Entry, EntryResult, InclusionProof,
     Storage, TreeHead,
 };
+
+#[allow(unused_imports)]
+pub use tree_rotator::TreeRotator;

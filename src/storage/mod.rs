@@ -5,6 +5,7 @@
 #![allow(unused_imports)]
 
 // High-Throughput Storage components
+pub mod chain_index;
 pub mod config;
 pub mod engine;
 pub mod index;

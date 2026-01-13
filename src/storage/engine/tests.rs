@@ -79,11 +79,7 @@ async fn test_crash_recovery() {
     assert_eq!(entry.payload_hash, [42u8; 32]);
 }
 
-// TODO: This test requires RFC 6962 compliant root computation.
-// Current slab implementation uses different tree structure.
-// Need to compute root via atl_core::compute_root for RFC 6962 compliance.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RFC 6962 root computation refactoring needed"]
 async fn test_inclusion_proof_verification() {
     let (engine, _dir) = create_test_engine([1u8; 32]).await;
 
@@ -127,4 +123,236 @@ async fn test_inclusion_proof_verification() {
     eprintln!("result: {:?}", result);
 
     assert!(result.is_ok() && result.unwrap());
+}
+
+// Tests for StorageEngine::rotate_tree()
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_rotate_tree_inserts_genesis_into_slab() {
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+
+    // Create initial active tree (normally done by tree_closer)
+    let origin_id = engine.origin_id();
+    {
+        let index = engine.index.lock().await;
+        index.create_active_tree(&origin_id, 0).unwrap();
+    }
+
+    // Append some entries first
+    let params: Vec<AppendParams> = (0..100)
+        .map(|i| AppendParams {
+            payload_hash: [i as u8; 32],
+            metadata_hash: [0u8; 32],
+            metadata_cleartext: None,
+            external_id: None,
+        })
+        .collect();
+    engine.append_batch(params).await.unwrap();
+
+    let head_before = engine.tree_head();
+    let end_size = head_before.tree_size;
+    let root_hash = head_before.root_hash;
+
+    // Get slab tree size before rotation
+    let tree_size_before = {
+        let slabs = engine.slabs.read().await;
+        slabs.tree_size()
+    };
+
+    // Rotate tree
+    let result = engine
+        .rotate_tree(&origin_id, end_size, &root_hash)
+        .await
+        .unwrap();
+
+    // Get slab tree size after rotation
+    let tree_size_after = {
+        let slabs = engine.slabs.read().await;
+        slabs.tree_size()
+    };
+
+    // Assert: slab tree_size increased by 1 (genesis leaf inserted)
+    assert_eq!(tree_size_after, tree_size_before + 1);
+    assert_eq!(result.new_tree_head.tree_size, end_size + 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_rotate_tree_inserts_genesis_into_sqlite() {
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+
+    // Create initial active tree (normally done by tree_closer)
+    let origin_id = engine.origin_id();
+    {
+        let index = engine.index.lock().await;
+        index.create_active_tree(&origin_id, 0).unwrap();
+    }
+
+    // Append some entries first
+    let params: Vec<AppendParams> = (0..50)
+        .map(|i| AppendParams {
+            payload_hash: [i as u8; 32],
+            metadata_hash: [0u8; 32],
+            metadata_cleartext: None,
+            external_id: None,
+        })
+        .collect();
+    engine.append_batch(params).await.unwrap();
+
+    let head_before = engine.tree_head();
+    let end_size = head_before.tree_size;
+    let root_hash = head_before.root_hash;
+
+    // Rotate tree
+    engine
+        .rotate_tree(&origin_id, end_size, &root_hash)
+        .await
+        .unwrap();
+
+    // Query genesis entry from SQLite
+    let genesis_entry = engine.get_entry_by_index(end_size).await.unwrap();
+
+    // Assert: entry exists at leaf_index = end_size
+    assert_eq!(genesis_entry.leaf_index, Some(end_size));
+
+    // Assert: entry has type="genesis" metadata
+    let metadata = genesis_entry.metadata_cleartext.unwrap();
+    let meta_type = metadata.get("type").unwrap().as_str().unwrap();
+    assert_eq!(meta_type, "genesis");
+
+    // Assert: metadata contains prev_tree info
+    assert!(metadata.get("prev_tree_id").is_some());
+    assert!(metadata.get("prev_root_hash").is_some());
+    assert!(metadata.get("prev_tree_size").is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_rotate_tree_updates_cache() {
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+
+    // Create initial active tree (normally done by tree_closer)
+    let origin_id = engine.origin_id();
+    {
+        let index = engine.index.lock().await;
+        index.create_active_tree(&origin_id, 0).unwrap();
+    }
+
+    // Append some entries first
+    let params: Vec<AppendParams> = (0..25)
+        .map(|i| AppendParams {
+            payload_hash: [i as u8; 32],
+            metadata_hash: [0u8; 32],
+            metadata_cleartext: None,
+            external_id: None,
+        })
+        .collect();
+    engine.append_batch(params).await.unwrap();
+
+    let head_before = engine.tree_head();
+    let end_size = head_before.tree_size;
+    let root_hash = head_before.root_hash;
+    let old_root = head_before.root_hash;
+
+    // Rotate tree
+    engine
+        .rotate_tree(&origin_id, end_size, &root_hash)
+        .await
+        .unwrap();
+
+    let head_after = engine.tree_head();
+
+    // Assert: tree_size increased by 1
+    assert_eq!(head_after.tree_size, end_size + 1);
+
+    // Assert: root_hash changed (genesis leaf changes the tree structure)
+    assert_ne!(head_after.root_hash, old_root);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_rotate_tree_returns_correct_metadata() {
+    let (engine, _dir) = create_test_engine([42u8; 32]).await;
+
+    // Create initial active tree (normally done by tree_closer)
+    let origin_id = engine.origin_id();
+    {
+        let index = engine.index.lock().await;
+        index.create_active_tree(&origin_id, 0).unwrap();
+    }
+
+    // Append some entries first
+    let params: Vec<AppendParams> = (0..10)
+        .map(|i| AppendParams {
+            payload_hash: [i as u8; 32],
+            metadata_hash: [0u8; 32],
+            metadata_cleartext: None,
+            external_id: None,
+        })
+        .collect();
+    engine.append_batch(params).await.unwrap();
+
+    let head_before = engine.tree_head();
+    let end_size = head_before.tree_size;
+    let root_hash = head_before.root_hash;
+
+    // Rotate tree
+    let result = engine
+        .rotate_tree(&origin_id, end_size, &root_hash)
+        .await
+        .unwrap();
+
+    // Assert: genesis_leaf_index == end_size
+    assert_eq!(result.genesis_leaf_index, end_size);
+
+    // Assert: closed_tree_metadata has correct values
+    assert_eq!(result.closed_tree_metadata.tree_size, end_size);
+    assert_eq!(result.closed_tree_metadata.root_hash, root_hash);
+    assert_eq!(result.closed_tree_metadata.origin_id, origin_id);
+
+    // Assert: new_tree_head matches current tree_head()
+    let head_after = engine.tree_head();
+    assert_eq!(result.new_tree_head.tree_size, head_after.tree_size);
+    assert_eq!(result.new_tree_head.root_hash, head_after.root_hash);
+    assert_eq!(result.new_tree_head.origin, head_after.origin);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_genesis_hash_matches_atl_core() {
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+
+    // Create initial active tree (normally done by tree_closer)
+    let origin_id = engine.origin_id();
+    {
+        let index = engine.index.lock().await;
+        index.create_active_tree(&origin_id, 0).unwrap();
+    }
+
+    // Append some entries first
+    let params: Vec<AppendParams> = (0..5)
+        .map(|i| AppendParams {
+            payload_hash: [i as u8; 32],
+            metadata_hash: [0u8; 32],
+            metadata_cleartext: None,
+            external_id: None,
+        })
+        .collect();
+    engine.append_batch(params).await.unwrap();
+
+    let head_before = engine.tree_head();
+    let end_size = head_before.tree_size;
+    let root_hash = head_before.root_hash;
+
+    // Compute expected genesis hash using atl-core
+    let expected_genesis_hash = atl_core::compute_genesis_leaf_hash(&root_hash, end_size);
+
+    // Rotate tree
+    engine
+        .rotate_tree(&origin_id, end_size, &root_hash)
+        .await
+        .unwrap();
+
+    // Get genesis entry from SQLite
+    let genesis_entry = engine.get_entry_by_index(end_size).await.unwrap();
+
+    // Assert: entry.payload_hash matches computed genesis hash
+    assert_eq!(genesis_entry.payload_hash, expected_genesis_hash);
+    assert_eq!(genesis_entry.metadata_hash, expected_genesis_hash);
 }

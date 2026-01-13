@@ -23,6 +23,7 @@ pub fn format_hash(hash: &[u8; 32]) -> String {
 /// # Returns
 /// * Formatted string "base64:{base64-encoded signature}"
 #[must_use]
+#[allow(dead_code)]
 pub fn format_signature(sig: &[u8; 64]) -> String {
     use base64::Engine;
     format!(
@@ -36,6 +37,7 @@ pub fn format_signature(sig: &[u8; 64]) -> String {
 /// # Panics
 /// Will panic if system time is before Unix epoch (extremely unlikely)
 #[must_use]
+#[allow(dead_code)]
 pub fn current_timestamp_nanos() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
