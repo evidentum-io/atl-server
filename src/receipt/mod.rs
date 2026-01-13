@@ -8,7 +8,6 @@ mod convert;
 mod format;
 mod generator;
 mod options;
-mod upgrade;
 
 // Re-export public API
 #[allow(unused_imports)]
@@ -19,5 +18,3 @@ pub use generator::{
 };
 #[allow(unused_imports)]
 pub use options::ReceiptOptions;
-#[allow(unused_imports)]
-pub use upgrade::{upgrade_receipt, UpgradeResult};
