@@ -79,11 +79,7 @@ async fn test_crash_recovery() {
     assert_eq!(entry.payload_hash, [42u8; 32]);
 }
 
-// TODO: This test requires RFC 6962 compliant root computation.
-// Current slab implementation uses different tree structure.
-// Need to compute root via atl_core::compute_root for RFC 6962 compliance.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RFC 6962 root computation refactoring needed"]
 async fn test_inclusion_proof_verification() {
     let (engine, _dir) = create_test_engine([1u8; 32]).await;
 

@@ -89,7 +89,6 @@ async fn test_genesis_leaf_in_both_slab_and_sqlite() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RFC 6962 root computation refactoring needed"]
 async fn test_merkle_tree_integrity_after_rotation() {
     let (engine, _dir) = create_test_engine().await;
     let origin_id = engine.origin_id();
@@ -130,8 +129,23 @@ async fn test_merkle_tree_integrity_after_rotation() {
         let proof = Storage::get_inclusion_proof(&engine, &entry.id, Some(12)).unwrap();
         assert_eq!(proof.leaf_index, i);
 
-        // Verify proof (using atl-core)
-        let leaf_hash = atl_core::compute_leaf_hash(&entry.payload_hash, &entry.metadata_hash);
+        // Determine leaf hash based on entry type
+        // Genesis entries store the pre-computed hash directly (payload_hash = metadata_hash = genesis_hash)
+        // Regular entries need compute_leaf_hash(payload, metadata)
+        let is_genesis = entry
+            .metadata_cleartext
+            .as_ref()
+            .and_then(|m| m.get("type"))
+            .and_then(|t| t.as_str())
+            == Some("genesis");
+
+        let leaf_hash = if is_genesis {
+            // Genesis leaf hash is stored directly in payload_hash
+            entry.payload_hash
+        } else {
+            atl_core::compute_leaf_hash(&entry.payload_hash, &entry.metadata_hash)
+        };
+
         let atl_proof = atl_core::InclusionProof {
             tree_size: proof.tree_size,
             leaf_index: proof.leaf_index,
@@ -264,7 +278,6 @@ async fn test_chain_link_integrity() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "RFC 6962 root computation refactoring needed"]
 async fn test_consistency_proof_across_rotation() {
     let (engine, _dir) = create_test_engine().await;
     let origin_id = engine.origin_id();
