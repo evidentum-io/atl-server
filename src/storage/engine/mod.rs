@@ -212,7 +212,10 @@ impl StorageEngine {
         // 5. Update tree_state cache
         let new_tree_size = end_size + 1;
         {
-            let mut state = self.tree_state.write().unwrap();
+            let mut state = self
+                .tree_state
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             state.tree_size = new_tree_size;
             state.root_hash = new_root;
         }
@@ -269,7 +272,11 @@ impl Storage for StorageEngine {
         }
 
         // 1. Prepare entries
-        let tree_size = self.tree_state.read().unwrap().tree_size;
+        let tree_size = self
+            .tree_state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .tree_size;
         let entries: Vec<_> = params
             .iter()
             .enumerate()
@@ -336,7 +343,10 @@ impl Storage for StorageEngine {
 
         // 6. Update cached state
         {
-            let mut state = self.tree_state.write().unwrap();
+            let mut state = self
+                .tree_state
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             state.tree_size = tree_size + params.len() as u64;
             state.root_hash = new_root;
         }
@@ -365,8 +375,10 @@ impl Storage for StorageEngine {
     }
 
     fn tree_head(&self) -> TreeHead {
-        // Fast path: read from cache using sync RwLock
-        let state = self.tree_state.read().unwrap();
+        let state = self
+            .tree_state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         TreeHead {
             tree_size: state.tree_size,
             root_hash: state.root_hash,
@@ -375,7 +387,10 @@ impl Storage for StorageEngine {
     }
 
     fn origin_id(&self) -> [u8; 32] {
-        self.tree_state.read().unwrap().origin
+        self.tree_state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .origin
     }
 
     fn is_healthy(&self) -> bool {
