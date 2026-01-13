@@ -10,8 +10,8 @@ use std::cell::RefCell;
 use std::path::Path;
 
 /// Entry with slab location
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct IndexEntry {
     pub id: uuid::Uuid,
     pub leaf_index: u64,
@@ -59,9 +59,13 @@ impl IndexStore {
             "#,
         )?;
 
-        Ok(Self {
+        let store = Self {
             conn: RefCell::new(conn),
-        })
+        };
+
+        store.migrate()?;
+
+        Ok(store)
     }
 
     /// Create IndexStore from an existing connection (for testing)
@@ -87,8 +91,21 @@ impl IndexStore {
     }
 
     /// Run migrations from v2 to latest
-    #[allow(dead_code)]
     pub fn migrate(&self) -> rusqlite::Result<()> {
+        let table_exists = self
+            .conn
+            .borrow()
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='atl_config'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+
+        if table_exists.is_none() {
+            return Ok(());
+        }
+
         let current: u32 = self
             .conn
             .borrow()

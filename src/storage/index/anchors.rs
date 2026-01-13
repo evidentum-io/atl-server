@@ -13,7 +13,6 @@ use crate::traits::{Anchor, AnchorType};
 use rusqlite::{params, OptionalExtension};
 
 /// Anchor with ID (for OTS poll job)
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct AnchorWithId {
     pub id: i64,
@@ -55,7 +54,6 @@ fn row_to_anchor(row: &rusqlite::Row) -> rusqlite::Result<Anchor> {
 }
 
 /// Convert database row to AnchorWithId
-#[allow(dead_code)]
 fn row_to_anchor_with_id(row: &rusqlite::Row) -> rusqlite::Result<AnchorWithId> {
     let id: i64 = row.get(0)?;
     let tree_size: i64 = row.get(1)?;
@@ -93,9 +91,9 @@ fn row_to_anchor_with_id(row: &rusqlite::Row) -> rusqlite::Result<AnchorWithId> 
     })
 }
 
-#[allow(dead_code)]
 impl IndexStore {
     /// Store an external anchor for a tree size
+    #[allow(dead_code)]
     pub fn store_anchor(&self, tree_size: u64, anchor: &Anchor) -> rusqlite::Result<()> {
         let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
 
@@ -179,6 +177,7 @@ impl IndexStore {
     }
 
     /// Update anchor status
+    #[allow(dead_code)]
     pub fn update_anchor_status(&self, anchor_id: i64, status: &str) -> rusqlite::Result<()> {
         self.connection().execute(
             "UPDATE anchors SET status = ?1 WHERE id = ?2",
@@ -197,6 +196,7 @@ impl IndexStore {
     }
 
     /// Update anchor metadata
+    #[allow(dead_code)]
     pub fn update_anchor_metadata(
         &self,
         anchor_id: i64,

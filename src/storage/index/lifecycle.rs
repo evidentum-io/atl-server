@@ -24,7 +24,6 @@ pub struct TreeCloseResult {
 
 /// Metadata for closed tree (for Chain Index recording)
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ClosedTreeMetadata {
     pub tree_id: i64,
     pub origin_id: [u8; 32],
@@ -36,7 +35,6 @@ pub struct ClosedTreeMetadata {
 
 /// Result of rotating a tree (closing old + creating new with genesis)
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct TreeRotationResult {
     /// ID of the tree that was closed
     pub closed_tree_id: i64,
@@ -51,8 +49,8 @@ pub struct TreeRotationResult {
 }
 
 /// Tree record from database
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TreeRecord {
     pub id: i64,
     pub origin_id: [u8; 32],
@@ -75,8 +73,8 @@ pub enum TreeStatus {
     Closed,
 }
 
-#[allow(dead_code)]
 impl TreeStatus {
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
             TreeStatus::Active => "active",
@@ -128,7 +126,6 @@ fn row_to_tree(row: &rusqlite::Row) -> rusqlite::Result<TreeRecord> {
     })
 }
 
-#[allow(dead_code)]
 impl IndexStore {
     /// Get the currently active tree
     pub fn get_active_tree(&self) -> rusqlite::Result<Option<TreeRecord>> {
@@ -229,6 +226,7 @@ impl IndexStore {
     }
 
     /// Set bitcoin anchor for a tree (called by ots_job after anchor creation)
+    #[allow(dead_code)]
     pub fn set_tree_bitcoin_anchor(&self, tree_id: i64, anchor_id: i64) -> rusqlite::Result<()> {
         self.connection().execute(
             "UPDATE trees SET bitcoin_anchor_id = ?1 WHERE id = ?2 AND status = 'pending_bitcoin'",
@@ -253,6 +251,7 @@ impl IndexStore {
     }
 
     /// Get trees pending Bitcoin confirmation
+    #[allow(dead_code)]
     pub fn get_trees_pending_bitcoin_confirmation(&self) -> rusqlite::Result<Vec<TreeRecord>> {
         let conn = self.connection();
         let mut stmt = conn.prepare(
@@ -266,6 +265,7 @@ impl IndexStore {
     }
 
     /// Mark tree as closed after Bitcoin confirmation
+    #[allow(dead_code)]
     pub fn mark_tree_closed(&self, tree_id: i64) -> rusqlite::Result<()> {
         self.connection().execute(
             "UPDATE trees SET status = 'closed' WHERE id = ?1 AND status = 'pending_bitcoin'",
@@ -284,6 +284,7 @@ impl IndexStore {
     }
 
     /// Get tree by ID
+    #[allow(dead_code)]
     pub fn get_tree(&self, tree_id: i64) -> rusqlite::Result<Option<TreeRecord>> {
         self.connection()
             .query_row(
@@ -297,6 +298,7 @@ impl IndexStore {
     }
 
     /// Get tree covering a specific entry
+    #[allow(dead_code)]
     pub fn get_tree_covering_entry(&self, leaf_index: u64) -> rusqlite::Result<Option<TreeRecord>> {
         self.connection()
             .query_row(
@@ -312,6 +314,7 @@ impl IndexStore {
     }
 
     /// Get tree by bitcoin anchor ID
+    #[allow(dead_code)]
     pub fn get_tree_by_bitcoin_anchor_id(
         &self,
         anchor_id: i64,
@@ -328,6 +331,7 @@ impl IndexStore {
     }
 
     /// Update tree first_entry_at (called on first entry append)
+    #[allow(dead_code)]
     pub fn update_tree_first_entry_at(&self, tree_id: i64) -> rusqlite::Result<()> {
         let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
 

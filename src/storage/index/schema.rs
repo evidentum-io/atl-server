@@ -88,7 +88,6 @@ CREATE INDEX IF NOT EXISTS idx_anchors_status ON anchors(status);
 "#;
 
 /// Migration from v2 to v3: remove tree_nodes, add slab columns
-#[allow(dead_code)]
 pub const MIGRATE_V2_TO_V3: &str = r#"
 -- Add new columns to entries
 ALTER TABLE entries ADD COLUMN slab_id INTEGER DEFAULT 0;
