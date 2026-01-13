@@ -88,7 +88,13 @@ impl StorageEngine {
         index.initialize()?;
 
         // Run crash recovery
-        recovery::recover(&mut wal, &mut slabs, &mut index).await?;
+        recovery::recover(
+            &mut wal,
+            &mut slabs,
+            &mut index,
+            u64::from(config.slab_capacity),
+        )
+        .await?;
 
         // Get tree size from index
         let tree_size = index.get_tree_size()?;
