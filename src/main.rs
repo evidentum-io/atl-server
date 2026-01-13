@@ -139,6 +139,25 @@ async fn run_standalone(args: Args) -> anyhow::Result<()> {
     let storage_engine = Arc::new(engine);
     let storage: Arc<dyn traits::Storage> = storage_engine.clone();
 
+    // Initialize Chain Index
+    let chain_index_path = PathBuf::from(&args.database).join("chain_index.db");
+    let chain_index = crate::storage::chain_index::ChainIndex::open(&chain_index_path)
+        .map_err(|e| anyhow::anyhow!("Failed to initialize Chain Index: {}", e))?;
+    let chain_index = Arc::new(tokio::sync::Mutex::new(chain_index));
+
+    // Sync Chain Index with main DB
+    {
+        let index = storage_engine.index_store();
+        let idx = index.lock().await;
+        let ci = chain_index.lock().await;
+        let synced = ci
+            .sync_with_main_db(&idx)
+            .map_err(|e| anyhow::anyhow!("Failed to sync Chain Index: {}", e))?;
+        if synced > 0 {
+            tracing::info!(synced_trees = synced, "Chain Index synced with main DB");
+        }
+    }
+
     // Create sequencer
     let sequencer_config = sequencer::SequencerConfig::from_env();
     let (sequencer_instance, sequencer_handle) =
@@ -149,8 +168,11 @@ async fn run_standalone(args: Args) -> anyhow::Result<()> {
     });
 
     let background_config = background::BackgroundConfig::from_env();
-    let background_runner =
-        background::BackgroundJobRunner::new(storage_engine.clone(), background_config);
+    let background_runner = background::BackgroundJobRunner::new(
+        storage_engine.clone(),
+        chain_index.clone(),
+        background_config,
+    );
     let background_handles = background_runner.start().await?;
 
     // Create dispatcher
@@ -237,6 +259,25 @@ async fn run_sequencer(args: Args) -> anyhow::Result<()> {
     let storage_engine = Arc::new(engine);
     let storage: Arc<dyn traits::Storage> = storage_engine.clone();
 
+    // Initialize Chain Index
+    let chain_index_path = PathBuf::from(&args.database).join("chain_index.db");
+    let chain_index = crate::storage::chain_index::ChainIndex::open(&chain_index_path)
+        .map_err(|e| anyhow::anyhow!("Failed to initialize Chain Index: {}", e))?;
+    let chain_index = Arc::new(tokio::sync::Mutex::new(chain_index));
+
+    // Sync Chain Index with main DB
+    {
+        let index = storage_engine.index_store();
+        let idx = index.lock().await;
+        let ci = chain_index.lock().await;
+        let synced = ci
+            .sync_with_main_db(&idx)
+            .map_err(|e| anyhow::anyhow!("Failed to sync Chain Index: {}", e))?;
+        if synced > 0 {
+            tracing::info!(synced_trees = synced, "Chain Index synced with main DB");
+        }
+    }
+
     // Create sequencer
     let sequencer_config = sequencer::SequencerConfig::from_env();
     let (sequencer_instance, sequencer_handle) =
@@ -247,8 +288,11 @@ async fn run_sequencer(args: Args) -> anyhow::Result<()> {
     });
 
     let background_config = background::BackgroundConfig::from_env();
-    let background_runner =
-        background::BackgroundJobRunner::new(storage_engine.clone(), background_config);
+    let background_runner = background::BackgroundJobRunner::new(
+        storage_engine.clone(),
+        chain_index.clone(),
+        background_config,
+    );
     let background_handles = background_runner.start().await?;
 
     // Create gRPC server

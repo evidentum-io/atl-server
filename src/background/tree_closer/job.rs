@@ -7,6 +7,7 @@ use tokio::time::interval;
 
 use super::config::TreeCloserConfig;
 use super::logic;
+use crate::storage::chain_index::ChainIndex;
 use crate::storage::index::IndexStore;
 use crate::traits::{Storage, TreeRotator};
 
@@ -20,11 +21,13 @@ use crate::traits::{Storage, TreeRotator};
 /// 1. Closes tree with status='pending_bitcoin'
 /// 2. Atomically creates new active tree with genesis leaf (via TreeRotator)
 /// 3. Genesis leaf is inserted into BOTH Slab and SQLite
-/// 4. OTS anchoring will be handled by ots_job separately
+/// 4. Records closed tree in Chain Index
+/// 5. OTS anchoring will be handled by ots_job separately
 pub struct TreeCloser {
     index: Arc<Mutex<IndexStore>>,
     storage: Arc<dyn Storage>,
     rotator: Arc<dyn TreeRotator>,
+    chain_index: Arc<Mutex<ChainIndex>>,
     config: TreeCloserConfig,
 }
 
@@ -33,12 +36,14 @@ impl TreeCloser {
         index: Arc<Mutex<IndexStore>>,
         storage: Arc<dyn Storage>,
         rotator: Arc<dyn TreeRotator>,
+        chain_index: Arc<Mutex<ChainIndex>>,
         config: TreeCloserConfig,
     ) -> Self {
         Self {
             index,
             storage,
             rotator,
+            chain_index,
             config,
         }
     }
@@ -56,6 +61,7 @@ impl TreeCloser {
                         &self.index,
                         &self.storage,
                         &self.rotator,
+                        &self.chain_index,
                         self.config.tree_lifetime_secs,
                     ).await {
                         tracing::error!(error = %e, "Tree close check failed");

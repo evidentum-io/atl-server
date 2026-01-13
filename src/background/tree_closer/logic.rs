@@ -1,6 +1,7 @@
 // File: src/background/tree_closer/logic.rs
 
 use crate::error::ServerResult;
+use crate::storage::chain_index::ChainIndex;
 use crate::storage::index::IndexStore;
 use crate::traits::{Storage, TreeRotator};
 use std::sync::Arc;
@@ -14,11 +15,13 @@ use tokio::sync::Mutex;
 /// 3. Empty trees (first_entry_at = NULL) are NEVER closed
 /// 4. Close tree and create new one with genesis leaf (via TreeRotator)
 /// 5. Genesis leaf is inserted into BOTH Slab and SQLite
-/// 6. OTS anchoring will be done by ots_job separately
+/// 6. Record closed tree in Chain Index
+/// 7. OTS anchoring will be done by ots_job separately
 pub async fn check_and_close_if_needed(
     index: &Arc<Mutex<IndexStore>>,
     storage: &Arc<dyn Storage>,
     rotator: &Arc<dyn TreeRotator>,
+    chain_index: &Arc<Mutex<ChainIndex>>,
     tree_lifetime_secs: u64,
 ) -> ServerResult<()> {
     let tree_head = storage.tree_head();
@@ -115,13 +118,25 @@ pub async fn check_and_close_if_needed(
         "Tree rotated with genesis leaf in both Slab and SQLite, pending OTS anchoring by ots_job"
     );
 
-    // TODO: Record closed tree in Chain Index DB
-    // For now, we just log the metadata
-    tracing::debug!(
-        "Chain Index metadata (not recorded yet): tree_id={}, root_hash={}, tree_size={}",
-        result.closed_tree_metadata.tree_id,
-        hex::encode(result.closed_tree_metadata.root_hash),
-        result.closed_tree_metadata.tree_size
+    let genesis_leaf_hash = atl_core::compute_genesis_leaf_hash(
+        &result.closed_tree_metadata.root_hash,
+        result.closed_tree_metadata.tree_size,
+    );
+
+    {
+        let ci = chain_index.lock().await;
+        ci.record_closed_tree(&result.closed_tree_metadata, genesis_leaf_hash)
+            .map_err(|e| {
+                crate::error::ServerError::Storage(crate::error::StorageError::Database(
+                    e.to_string(),
+                ))
+            })?;
+    }
+
+    tracing::info!(
+        tree_id = result.closed_tree_metadata.tree_id,
+        genesis_hash = %hex::encode(genesis_leaf_hash),
+        "Recorded closed tree in Chain Index"
     );
 
     Ok(())

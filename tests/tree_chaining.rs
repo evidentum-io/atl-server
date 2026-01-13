@@ -355,11 +355,19 @@ async fn test_tree_closer_uses_rotate_tree() {
         .collect();
     storage_trait.append_batch(entries).await.unwrap();
 
+    // Create mock Chain Index
+    let chain_index_dir = tempfile::tempdir().unwrap();
+    let chain_index_path = chain_index_dir.path().join("chain_index.db");
+    let chain_index =
+        atl_server::storage::chain_index::ChainIndex::open(&chain_index_path).unwrap();
+    let chain_index = std::sync::Arc::new(tokio::sync::Mutex::new(chain_index));
+
     // Run tree_closer logic with tree_lifetime_secs = 0 (close immediately)
     atl_server::background::tree_closer::logic::check_and_close_if_needed(
         &index,
         &storage_trait,
         &rotator,
+        &chain_index,
         0, // Close immediately
     )
     .await

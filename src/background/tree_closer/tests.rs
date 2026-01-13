@@ -1,7 +1,5 @@
 //! Unit tests for tree closer logic with TreeRotator trait
 
-#![cfg(test)]
-
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
