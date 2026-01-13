@@ -206,7 +206,9 @@ impl StorageEngine {
             let mut index = self.index.lock().await;
             index.insert_batch(&[batch_insert])?;
             index.set_tree_size(end_size + 1)?;
-            index.update_first_entry_at_for_active_tree()?;
+            // NOTE: Do NOT call update_first_entry_at_for_active_tree() here!
+            // Genesis leaf should not start the tree lifetime timer.
+            // Only user entries (via append_batch) should trigger first_entry_at.
         }
 
         // 5. Update tree_state cache
