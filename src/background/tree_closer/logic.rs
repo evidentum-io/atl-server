@@ -119,14 +119,9 @@ pub async fn check_and_close_if_needed(
         "Tree rotated with Super-Tree append, pending OTS anchoring by ots_job"
     );
 
-    let genesis_leaf_hash = atl_core::compute_genesis_leaf_hash(
-        &result.closed_tree_metadata.root_hash,
-        result.closed_tree_metadata.tree_size,
-    );
-
     {
         let ci = chain_index.lock().await;
-        ci.record_closed_tree(&result.closed_tree_metadata, genesis_leaf_hash)
+        ci.record_closed_tree(&result.closed_tree_metadata)
             .map_err(|e| {
                 crate::error::ServerError::Storage(crate::error::StorageError::Database(
                     e.to_string(),
@@ -136,7 +131,7 @@ pub async fn check_and_close_if_needed(
 
     tracing::info!(
         tree_id = result.closed_tree_metadata.tree_id,
-        genesis_hash = %hex::encode(genesis_leaf_hash),
+        data_tree_index = result.data_tree_index,
         "Recorded closed tree in Chain Index"
     );
 

@@ -19,7 +19,9 @@ pub struct ChainVerificationResult {
 impl ChainIndex {
     /// Verify a single chain link between two trees
     ///
-    /// Checks that tree_next's genesis leaf commits to tree_prev's final state.
+    /// Checks that:
+    /// 1. tree_next.prev_tree_id points to tree_prev
+    /// 2. tree_next.data_tree_index = tree_prev.data_tree_index + 1 (sequential Super-Tree indices)
     #[allow(dead_code)]
     pub fn verify_chain_link(
         &self,
@@ -33,19 +35,20 @@ impl ChainIndex {
             ));
         }
 
-        let genesis_hash = tree_next
-            .genesis_leaf_hash
-            .ok_or_else(|| format!("Tree {} missing genesis_leaf_hash", tree_next.tree_id))?;
+        let data_tree_index_next = tree_next
+            .data_tree_index
+            .ok_or_else(|| format!("Tree {} missing data_tree_index", tree_next.tree_id))?;
 
-        let expected_hash =
-            atl_core::compute_genesis_leaf_hash(&tree_prev.root_hash, tree_prev.tree_size);
+        let data_tree_index_prev = tree_prev
+            .data_tree_index
+            .ok_or_else(|| format!("Tree {} missing data_tree_index", tree_prev.tree_id))?;
 
-        if genesis_hash != expected_hash {
+        let expected_index = data_tree_index_prev + 1;
+
+        if data_tree_index_next != expected_index {
             return Err(format!(
-                "Genesis hash mismatch for tree {}: expected {}, got {}",
-                tree_next.tree_id,
-                hex::encode(expected_hash),
-                hex::encode(genesis_hash)
+                "Data tree index mismatch for tree {}: expected {}, got {}",
+                tree_next.tree_id, expected_index, data_tree_index_next
             ));
         }
 
@@ -112,7 +115,7 @@ impl ChainIndex {
     #[allow(dead_code)]
     pub fn verify_chain_up_to(&self, tree_id: i64) -> rusqlite::Result<ChainVerificationResult> {
         let mut stmt = self.conn.prepare(
-            "SELECT tree_id, origin_id, root_hash, tree_size, prev_tree_id, genesis_leaf_hash,
+            "SELECT tree_id, origin_id, root_hash, tree_size, prev_tree_id, data_tree_index,
                     status, bitcoin_txid, archive_location, created_at, closed_at, archived_at
              FROM trees WHERE tree_id <= ?1 ORDER BY tree_id ASC",
         )?;

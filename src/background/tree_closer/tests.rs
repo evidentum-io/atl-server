@@ -62,6 +62,7 @@ impl TreeRotator for MockTreeRotator {
                 tree_size: end_size,
                 prev_tree_id: None,
                 closed_at: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+                data_tree_index: 0,
             },
             new_tree_head: TreeHead {
                 tree_size: end_size,

@@ -214,7 +214,7 @@ impl StorageEngine {
         let close_result = {
             let mut index = self.index.lock().await;
             index
-                .close_tree_and_create_new(origin_id, end_size, root_hash)
+                .close_tree_and_create_new(origin_id, end_size, root_hash, data_tree_index)
                 .map_err(|e| StorageError::Database(e.to_string()))?
         };
 

@@ -16,7 +16,7 @@ pub struct ChainTreeRecord {
     pub root_hash: [u8; 32],
     pub tree_size: u64,
     pub prev_tree_id: Option<i64>,
-    pub genesis_leaf_hash: Option<[u8; 32]>,
+    pub data_tree_index: Option<u64>,
     pub status: ChainTreeStatus,
     pub bitcoin_txid: Option<String>,
     pub archive_location: Option<String>,
@@ -84,18 +84,8 @@ impl ChainIndex {
     /// Called by tree_closer job after `TreeRotator::rotate_tree()`.
     ///
     /// # Arguments
-    /// * `metadata` - `ClosedTreeMetadata` from `TreeRotationResult`
-    /// * `genesis_leaf_hash` - Computed by caller: `atl_core::compute_genesis_leaf_hash(&metadata.root_hash, metadata.tree_size)`
-    ///
-    /// # Why genesis_leaf_hash is passed separately
-    /// `ClosedTreeMetadata` (from lifecycle.rs) does not contain genesis_leaf_hash.
-    /// The caller must compute it and pass it here. This keeps the Chain Index
-    /// independent of atl_core dependencies.
-    pub fn record_closed_tree(
-        &self,
-        metadata: &ClosedTreeMetadata,
-        genesis_leaf_hash: [u8; 32],
-    ) -> rusqlite::Result<()> {
+    /// * `metadata` - `ClosedTreeMetadata` from `TreeRotationResult`, contains data_tree_index
+    pub fn record_closed_tree(&self, metadata: &ClosedTreeMetadata) -> rusqlite::Result<()> {
         let closed_at_secs = metadata.closed_at / 1_000_000_000;
         let closed_at = chrono::DateTime::from_timestamp(closed_at_secs, 0)
             .map(|dt| dt.to_rfc3339())
@@ -105,13 +95,13 @@ impl ChainIndex {
             r#"
             INSERT INTO trees (
                 tree_id, origin_id, root_hash, tree_size,
-                prev_tree_id, genesis_leaf_hash, status,
+                prev_tree_id, data_tree_index, status,
                 created_at, closed_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'closed', ?7, ?7)
             ON CONFLICT(tree_id) DO UPDATE SET
                 root_hash = excluded.root_hash,
                 tree_size = excluded.tree_size,
-                genesis_leaf_hash = excluded.genesis_leaf_hash,
+                data_tree_index = excluded.data_tree_index,
                 status = 'closed',
                 closed_at = excluded.closed_at
             "#,
@@ -121,7 +111,7 @@ impl ChainIndex {
                 metadata.root_hash.as_slice(),
                 metadata.tree_size as i64,
                 metadata.prev_tree_id,
-                genesis_leaf_hash.as_slice(),
+                metadata.data_tree_index as i64,
                 closed_at,
             ],
         )?;
@@ -133,7 +123,7 @@ impl ChainIndex {
     pub fn get_tree(&self, tree_id: i64) -> rusqlite::Result<Option<ChainTreeRecord>> {
         self.conn
             .query_row(
-                "SELECT tree_id, origin_id, root_hash, tree_size, prev_tree_id, genesis_leaf_hash,
+                "SELECT tree_id, origin_id, root_hash, tree_size, prev_tree_id, data_tree_index,
                         status, bitcoin_txid, archive_location, created_at, closed_at, archived_at
                  FROM trees WHERE tree_id = ?1",
                 params![tree_id],
@@ -146,7 +136,7 @@ impl ChainIndex {
     #[allow(dead_code)]
     pub fn get_all_trees(&self) -> rusqlite::Result<Vec<ChainTreeRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT tree_id, origin_id, root_hash, tree_size, prev_tree_id, genesis_leaf_hash,
+            "SELECT tree_id, origin_id, root_hash, tree_size, prev_tree_id, data_tree_index,
                     status, bitcoin_txid, archive_location, created_at, closed_at, archived_at
              FROM trees ORDER BY tree_id ASC",
         )?;
@@ -161,7 +151,7 @@ impl ChainIndex {
         status: ChainTreeStatus,
     ) -> rusqlite::Result<Vec<ChainTreeRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT tree_id, origin_id, root_hash, tree_size, prev_tree_id, genesis_leaf_hash,
+            "SELECT tree_id, origin_id, root_hash, tree_size, prev_tree_id, data_tree_index,
                     status, bitcoin_txid, archive_location, created_at, closed_at, archived_at
              FROM trees WHERE status = ?1 ORDER BY tree_id ASC",
         )?;
@@ -184,7 +174,7 @@ impl ChainIndex {
     pub fn get_first_tree(&self) -> rusqlite::Result<Option<ChainTreeRecord>> {
         self.conn
             .query_row(
-                "SELECT tree_id, origin_id, root_hash, tree_size, prev_tree_id, genesis_leaf_hash,
+                "SELECT tree_id, origin_id, root_hash, tree_size, prev_tree_id, data_tree_index,
                         status, bitcoin_txid, archive_location, created_at, closed_at, archived_at
                  FROM trees WHERE prev_tree_id IS NULL ORDER BY tree_id ASC LIMIT 1",
                 [],
@@ -198,7 +188,7 @@ impl ChainIndex {
     pub fn get_latest_tree(&self) -> rusqlite::Result<Option<ChainTreeRecord>> {
         self.conn
             .query_row(
-                "SELECT tree_id, origin_id, root_hash, tree_size, prev_tree_id, genesis_leaf_hash,
+                "SELECT tree_id, origin_id, root_hash, tree_size, prev_tree_id, data_tree_index,
                         status, bitcoin_txid, archive_location, created_at, closed_at, archived_at
                  FROM trees ORDER BY tree_id DESC LIMIT 1",
                 [],
@@ -219,9 +209,9 @@ impl ChainIndex {
     /// Called on startup to ensure Chain Index is consistent.
     /// Inserts any trees from main DB that are missing from Chain Index.
     ///
-    /// # Genesis Hash Computation
-    /// For synced trees, genesis_leaf_hash is computed from root_hash and tree_size.
-    /// This works because the formula is deterministic.
+    /// # Data Tree Index
+    /// For synced trees, data_tree_index is derived from tree_id (tree_id - 1).
+    /// This assumes sequential tree IDs starting from 1 (legacy behavior).
     pub fn sync_with_main_db(
         &self,
         index_store: &crate::storage::index::IndexStore,
@@ -234,6 +224,9 @@ impl ChainIndex {
                 let root_hash = tree.root_hash.unwrap_or([0u8; 32]);
                 let tree_size = tree.end_size.unwrap_or(0);
 
+                // Legacy: derive data_tree_index from tree_id (assuming sequential IDs)
+                let data_tree_index = if tree.id > 0 { (tree.id - 1) as u64 } else { 0 };
+
                 let metadata = ClosedTreeMetadata {
                     tree_id: tree.id,
                     origin_id: tree.origin_id,
@@ -241,11 +234,10 @@ impl ChainIndex {
                     tree_size,
                     prev_tree_id: tree.prev_tree_id,
                     closed_at: tree.closed_at.unwrap_or(0),
+                    data_tree_index,
                 };
 
-                let genesis_leaf_hash = atl_core::compute_genesis_leaf_hash(&root_hash, tree_size);
-
-                self.record_closed_tree(&metadata, genesis_leaf_hash)?;
+                self.record_closed_tree(&metadata)?;
                 synced += 1;
 
                 tracing::info!(tree_id = tree.id, "Synced missing tree to Chain Index");
@@ -263,7 +255,7 @@ pub(super) fn row_to_chain_tree(row: &rusqlite::Row) -> rusqlite::Result<ChainTr
     let root_hash: Vec<u8> = row.get(2)?;
     let tree_size: i64 = row.get(3)?;
     let prev_tree_id: Option<i64> = row.get(4)?;
-    let genesis_leaf_hash: Option<Vec<u8>> = row.get(5)?;
+    let data_tree_index: Option<i64> = row.get(5)?;
     let status: String = row.get(6)?;
     let bitcoin_txid: Option<String> = row.get(7)?;
     let archive_location: Option<String> = row.get(8)?;
@@ -281,7 +273,7 @@ pub(super) fn row_to_chain_tree(row: &rusqlite::Row) -> rusqlite::Result<ChainTr
         })?,
         tree_size: tree_size as u64,
         prev_tree_id,
-        genesis_leaf_hash: genesis_leaf_hash.and_then(|h| h.try_into().ok()),
+        data_tree_index: data_tree_index.map(|i| i as u64),
         status: ChainTreeStatus::parse(&status).unwrap_or(ChainTreeStatus::Closed),
         bitcoin_txid,
         archive_location,
@@ -316,17 +308,16 @@ mod tests {
             tree_size: 100,
             prev_tree_id: None,
             closed_at: 1_234_567_890_000_000_000,
+            data_tree_index: 0,
         };
 
-        let genesis_hash =
-            atl_core::compute_genesis_leaf_hash(&metadata.root_hash, metadata.tree_size);
-        ci.record_closed_tree(&metadata, genesis_hash).unwrap();
+        ci.record_closed_tree(&metadata).unwrap();
 
         let tree = ci.get_tree(1).unwrap().unwrap();
         assert_eq!(tree.tree_id, 1);
         assert_eq!(tree.tree_size, 100);
         assert_eq!(tree.prev_tree_id, None);
-        assert_eq!(tree.genesis_leaf_hash, Some(genesis_hash));
+        assert_eq!(tree.data_tree_index, Some(0));
     }
 
     #[test]
@@ -341,11 +332,10 @@ mod tests {
             tree_size: 100,
             prev_tree_id: None,
             closed_at: 1_000_000_000_000,
+            data_tree_index: 0,
         };
-        let genesis_hash_1 = atl_core::compute_genesis_leaf_hash(&m1.root_hash, m1.tree_size);
-        ci.record_closed_tree(&m1, genesis_hash_1).unwrap();
+        ci.record_closed_tree(&m1).unwrap();
 
-        let genesis_hash_2 = atl_core::compute_genesis_leaf_hash(&[0x11; 32], 100);
         let m2 = ClosedTreeMetadata {
             tree_id: 2,
             origin_id: [0xaa; 32],
@@ -353,8 +343,9 @@ mod tests {
             tree_size: 200,
             prev_tree_id: Some(1),
             closed_at: 2_000_000_000_000,
+            data_tree_index: 1,
         };
-        ci.record_closed_tree(&m2, genesis_hash_2).unwrap();
+        ci.record_closed_tree(&m2).unwrap();
 
         let result = ci.verify_full_chain().unwrap();
         assert!(result.valid);
@@ -373,9 +364,9 @@ mod tests {
             tree_size: 100,
             prev_tree_id: None,
             closed_at: 1_000_000_000_000,
+            data_tree_index: 0,
         };
-        let genesis_hash_1 = atl_core::compute_genesis_leaf_hash(&m1.root_hash, m1.tree_size);
-        ci.record_closed_tree(&m1, genesis_hash_1).unwrap();
+        ci.record_closed_tree(&m1).unwrap();
 
         let m2 = ClosedTreeMetadata {
             tree_id: 2,
@@ -384,9 +375,9 @@ mod tests {
             tree_size: 200,
             prev_tree_id: Some(1),
             closed_at: 2_000_000_000_000,
+            data_tree_index: 999, // Wrong index (should be 1)
         };
-        let wrong_genesis_hash = [0xff; 32];
-        ci.record_closed_tree(&m2, wrong_genesis_hash).unwrap();
+        ci.record_closed_tree(&m2).unwrap();
 
         let result = ci.verify_full_chain().unwrap();
         assert!(!result.valid);

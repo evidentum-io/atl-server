@@ -31,6 +31,8 @@ pub struct ClosedTreeMetadata {
     pub tree_size: u64,
     pub prev_tree_id: Option<i64>,
     pub closed_at: i64,
+    /// Position in Super-Tree (data tree index)
+    pub data_tree_index: u64,
 }
 
 /// Result of rotating a tree (closing old + creating new)
@@ -176,6 +178,7 @@ impl IndexStore {
         origin_id: &[u8; 32],
         end_size: u64,
         root_hash: &[u8; 32],
+        data_tree_index: u64,
     ) -> rusqlite::Result<TreeCloseResult> {
         let mut conn = self.connection_mut();
         let tx = conn.transaction()?;
@@ -218,6 +221,7 @@ impl IndexStore {
             tree_size: end_size,
             prev_tree_id: prev_tree_id_of_active,
             closed_at: now,
+            data_tree_index,
         };
 
         Ok(TreeCloseResult {
@@ -462,7 +466,7 @@ mod tests {
 
         // Close tree and create new one
         let result = store
-            .close_tree_and_create_new(&origin_id, end_size, &root_hash)
+            .close_tree_and_create_new(&origin_id, end_size, &root_hash, 0)
             .unwrap();
 
         // Get entry count after close
@@ -504,7 +508,7 @@ mod tests {
 
         // Close tree
         let result = store
-            .close_tree_and_create_new(&origin_id, end_size, &root_hash)
+            .close_tree_and_create_new(&origin_id, end_size, &root_hash, 0)
             .unwrap();
 
         // Assert: metadata contains correct values
@@ -514,6 +518,7 @@ mod tests {
         assert_eq!(result.closed_tree_metadata.tree_size, end_size);
         assert_eq!(result.closed_tree_metadata.prev_tree_id, None); // First tree has no prev
         assert!(result.closed_tree_metadata.closed_at > 0);
+        assert_eq!(result.closed_tree_metadata.data_tree_index, 0);
     }
 
     #[test]
@@ -529,7 +534,7 @@ mod tests {
 
         // Close tree
         let result = store
-            .close_tree_and_create_new(&origin_id, end_size, &root_hash)
+            .close_tree_and_create_new(&origin_id, end_size, &root_hash, 0)
             .unwrap();
 
         // Query new tree
@@ -559,7 +564,7 @@ mod tests {
 
         // Close tree
         let result = store
-            .close_tree_and_create_new(&origin_id, end_size, &root_hash)
+            .close_tree_and_create_new(&origin_id, end_size, &root_hash, 0)
             .unwrap();
 
         // Query closed tree status
@@ -588,7 +593,7 @@ mod tests {
 
         // Close first tree
         let result = store
-            .close_tree_and_create_new(&origin_id, end_size, &root_hash)
+            .close_tree_and_create_new(&origin_id, end_size, &root_hash, 0)
             .unwrap();
 
         // Query new tree's prev_tree_id
@@ -619,7 +624,7 @@ mod tests {
 
         // Close tree
         let result = store
-            .close_tree_and_create_new(&origin_id, end_size, &root_hash)
+            .close_tree_and_create_new(&origin_id, end_size, &root_hash, 0)
             .unwrap();
 
         // Query new tree's start_size

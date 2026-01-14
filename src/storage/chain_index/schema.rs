@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS trees (
     root_hash BLOB NOT NULL,          -- 32 bytes
     tree_size INTEGER NOT NULL,
     prev_tree_id INTEGER,             -- FK (nullable for first tree)
-    genesis_leaf_hash BLOB,           -- 32 bytes (nullable for first)
+    data_tree_index INTEGER,          -- Position in Super-Tree (nullable for first)
     status TEXT NOT NULL,             -- 'active', 'closed', 'archived'
     bitcoin_txid TEXT,                -- nullable, hex string
     archive_location TEXT,            -- nullable, S3 URI or disk path
