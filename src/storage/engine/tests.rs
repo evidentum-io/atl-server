@@ -356,3 +356,113 @@ async fn test_genesis_hash_matches_atl_core() {
     assert_eq!(genesis_entry.payload_hash, expected_genesis_hash);
     assert_eq!(genesis_entry.metadata_hash, expected_genesis_hash);
 }
+
+// Tests for SUPER-1: Super-Tree Storage Integration
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_super_slabs_directory_created_on_startup() {
+    let dir = tempdir().unwrap();
+    let config = StorageConfig {
+        data_dir: dir.path().to_path_buf(),
+        ..Default::default()
+    };
+    let expected_path = dir.path().join("super_tree").join("slabs");
+
+    let _storage = StorageEngine::new(config, [0u8; 32]).await.unwrap();
+
+    assert!(
+        expected_path.exists(),
+        "Super-Tree slab directory should exist"
+    );
+    assert!(expected_path.is_dir(), "Should be a directory");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_super_genesis_root_initially_none() {
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+
+    let result = engine
+        .index_store()
+        .lock()
+        .await
+        .get_super_genesis_root()
+        .unwrap();
+
+    assert!(
+        result.is_none(),
+        "Genesis root should be None before first rotation"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_set_super_genesis_root_once_only() {
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+    let first_root = [1u8; 32];
+    let second_root = [2u8; 32];
+
+    {
+        let index_store = engine.index_store();
+        let index = index_store.lock().await;
+        index.set_super_genesis_root(&first_root).unwrap();
+        index.set_super_genesis_root(&second_root).unwrap();
+    }
+    let result = engine
+        .index_store()
+        .lock()
+        .await
+        .get_super_genesis_root()
+        .unwrap();
+
+    assert_eq!(
+        result,
+        Some(first_root),
+        "Genesis should be first value, not overwritten"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_super_tree_size_initially_zero() {
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+
+    let size = engine
+        .index_store()
+        .lock()
+        .await
+        .get_super_tree_size()
+        .unwrap();
+
+    assert_eq!(size, 0, "Size should be 0 before any rotations");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_set_super_tree_size_increments_correctly() {
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+
+    {
+        let index_store = engine.index_store();
+        let index = index_store.lock().await;
+        index.set_super_tree_size(1).unwrap();
+        index.set_super_tree_size(2).unwrap();
+        index.set_super_tree_size(3).unwrap();
+    }
+    let result = engine
+        .index_store()
+        .lock()
+        .await
+        .get_super_tree_size()
+        .unwrap();
+
+    assert_eq!(result, 3, "Size should be last set value");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_storage_engine_has_super_slabs_accessor() {
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+
+    let super_slabs = engine.super_slabs();
+
+    assert!(
+        Arc::strong_count(super_slabs) >= 1,
+        "super_slabs should be accessible"
+    );
+}

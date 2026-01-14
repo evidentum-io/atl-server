@@ -46,8 +46,11 @@ pub struct StorageEngine {
     /// WAL writer
     wal: Arc<RwLock<WalWriter>>,
 
-    /// Slab manager
+    /// Slab manager (Data Tree slabs)
     slabs: Arc<RwLock<SlabManager>>,
+
+    /// Super-Tree slab manager
+    super_slabs: Arc<RwLock<SlabManager>>,
 
     /// SQLite index (Mutex because Connection is not Sync)
     index: Arc<Mutex<IndexStore>>,
@@ -74,10 +77,23 @@ impl StorageEngine {
         std::fs::create_dir_all(config.slab_dir())?;
         std::fs::create_dir_all(&config.data_dir)?;
 
+        // Create Super-Tree slab directory
+        let super_slab_dir = config.data_dir.join("super_tree").join("slabs");
+        std::fs::create_dir_all(&super_slab_dir)?;
+
         // Initialize components
         let mut wal = WalWriter::new(config.wal_dir())?;
         let mut slabs = SlabManager::new(
             config.slab_dir(),
+            SlabConfig {
+                max_leaves: config.slab_capacity,
+                max_open_slabs: config.max_open_slabs,
+            },
+        )?;
+
+        // Initialize Super-Tree SlabManager
+        let super_slabs = SlabManager::new(
+            super_slab_dir,
             SlabConfig {
                 max_leaves: config.slab_capacity,
                 max_open_slabs: config.max_open_slabs,
@@ -116,6 +132,7 @@ impl StorageEngine {
             config,
             wal: Arc::new(RwLock::new(wal)),
             slabs: Arc::new(RwLock::new(slabs)),
+            super_slabs: Arc::new(RwLock::new(super_slabs)),
             index: Arc::new(Mutex::new(index)),
             tree_state: StdRwLock::new(tree_state),
             healthy: AtomicBool::new(true),
@@ -130,6 +147,11 @@ impl StorageEngine {
     /// NOT part of Storage trait — internal server mechanics only.
     pub fn index_store(&self) -> Arc<Mutex<IndexStore>> {
         Arc::clone(&self.index)
+    }
+
+    /// Get reference to Super-Tree SlabManager for proofs
+    pub fn super_slabs(&self) -> &Arc<RwLock<SlabManager>> {
+        &self.super_slabs
     }
 
     /// Rotate the tree: close active tree and create new one with genesis leaf

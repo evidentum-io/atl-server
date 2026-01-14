@@ -216,6 +216,70 @@ impl IndexStore {
     pub fn connection_mut(&self) -> std::cell::RefMut<'_, rusqlite::Connection> {
         self.conn.borrow_mut()
     }
+
+    /// Get Super-Tree genesis root (None if no trees closed yet)
+    #[allow(dead_code)]
+    pub fn get_super_genesis_root(&self) -> rusqlite::Result<Option<[u8; 32]>> {
+        match self.conn.borrow().query_row(
+            "SELECT value FROM atl_config WHERE key = 'super_genesis_root'",
+            [],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(hex) => {
+                let bytes = hex::decode(&hex).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+                if bytes.len() != 32 {
+                    return Ok(None);
+                }
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                Ok(Some(arr))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Set Super-Tree genesis root (once only)
+    #[allow(dead_code)]
+    pub fn set_super_genesis_root(&self, root: &[u8; 32]) -> rusqlite::Result<()> {
+        let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        self.conn.borrow().execute(
+            "INSERT OR IGNORE INTO atl_config (key, value, updated_at) VALUES ('super_genesis_root', ?1, ?2)",
+            params![hex::encode(root), now],
+        )?;
+        Ok(())
+    }
+
+    /// Get Super-Tree size
+    #[allow(dead_code)]
+    pub fn get_super_tree_size(&self) -> rusqlite::Result<u64> {
+        match self.conn.borrow().query_row(
+            "SELECT value FROM atl_config WHERE key = 'super_tree_size'",
+            [],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(s) => Ok(s.parse().unwrap_or(0)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Set Super-Tree size
+    #[allow(dead_code)]
+    pub fn set_super_tree_size(&self, size: u64) -> rusqlite::Result<()> {
+        let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        self.conn.borrow().execute(
+            "INSERT OR REPLACE INTO atl_config (key, value, updated_at) VALUES ('super_tree_size', ?1, ?2)",
+            params![size.to_string(), now],
+        )?;
+        Ok(())
+    }
 }
 
 /// Insert batch using prepared statement

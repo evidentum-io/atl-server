@@ -1,6 +1,6 @@
 [package]
 name = "atl-server"
-version = "0.13.2"
+version = "0.14.0"
 edition = "2021"
 rust-version = "1.92.0"
 authors = ["Dmitrii Zatona <dmitrii@zatona.dev>"]
@@ -12,7 +12,7 @@ categories = ["cryptography", "web-programming"]
 
 [dependencies]
 # Core ATL library
-atl-core = { path = "../atl-core", version = "0.10", features = ["bitcoin-ots"] }
+atl-core = { path = "../atl-core", version = "0.21", features = ["bitcoin-ots"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

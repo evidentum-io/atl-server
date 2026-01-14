@@ -1,8 +1,6 @@
 //! Receipt generation implementation
 
-use atl_core::{
-    Checkpoint, CheckpointJson, Receipt, ReceiptEntry, ReceiptProof, RECEIPT_SPEC_VERSION,
-};
+use atl_core::{Checkpoint, CheckpointJson, Receipt, ReceiptEntry, ReceiptProof};
 use ed25519_dalek::{Signer, SigningKey};
 use uuid::Uuid;
 
@@ -237,7 +235,8 @@ pub fn generate_receipt<S: Storage + ?Sized>(
 
     // 9. Assemble receipt
     Ok(Receipt {
-        spec_version: RECEIPT_SPEC_VERSION.to_string(),
+        spec_version: "2.0.0".to_string(),
+        upgrade_url: None,
         entry: ReceiptEntry {
             id: entry.id,
             payload_hash: format_hash(&entry.payload_hash),
@@ -250,6 +249,14 @@ pub fn generate_receipt<S: Storage + ?Sized>(
             leaf_index,
             checkpoint: checkpoint_json,
             consistency_proof,
+        },
+        super_proof: atl_core::SuperProof {
+            genesis_super_root: format_hash(&[0u8; 32]),
+            data_tree_index: 0,
+            super_tree_size: 1,
+            super_root: format_hash(&root_hash),
+            inclusion: vec![],
+            consistency_to_origin: vec![],
         },
         anchors,
     })
