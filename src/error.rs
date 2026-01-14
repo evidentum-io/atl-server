@@ -29,6 +29,14 @@ pub enum ServerError {
     #[error("tree size mismatch: expected {expected}, got {actual}")]
     TreeSizeMismatch { expected: u64, actual: u64 },
 
+    /// Super-Tree not initialized
+    #[error("Super-Tree not initialized - no trees have been closed yet")]
+    SuperTreeNotInitialized,
+
+    /// Entry's tree not yet in Super-Tree
+    #[error("Entry's tree is still active, not yet in Super-Tree")]
+    TreeNotClosed,
+
     // ========== Validation Errors ==========
     /// Invalid argument
     #[error("invalid argument: {0}")]
@@ -173,7 +181,9 @@ impl ServerError {
             | ServerError::InvalidUuid(_)
             | ServerError::LeafIndexOutOfBounds { .. }
             | ServerError::TreeSizeMismatch { .. }
-            | ServerError::EntryNotInTree(_) => StatusCode::BAD_REQUEST,
+            | ServerError::EntryNotInTree(_)
+            | ServerError::SuperTreeNotInitialized
+            | ServerError::TreeNotClosed => StatusCode::BAD_REQUEST,
 
             // 401 Unauthorized
             ServerError::AuthMissing | ServerError::AuthInvalid => StatusCode::UNAUTHORIZED,
@@ -215,6 +225,8 @@ impl ServerError {
             ServerError::EntryNotInTree(_) => "ENTRY_NOT_IN_TREE",
             ServerError::LeafIndexOutOfBounds { .. } => "INDEX_OUT_OF_BOUNDS",
             ServerError::TreeSizeMismatch { .. } => "TREE_SIZE_MISMATCH",
+            ServerError::SuperTreeNotInitialized => "SUPER_TREE_NOT_INITIALIZED",
+            ServerError::TreeNotClosed => "TREE_NOT_CLOSED",
             ServerError::InvalidArgument(_) => "INVALID_ARGUMENT",
             ServerError::InvalidHash(_) => "INVALID_HASH",
             ServerError::InvalidSignature(_) => "INVALID_SIGNATURE",

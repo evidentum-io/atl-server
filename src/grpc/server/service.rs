@@ -11,15 +11,15 @@ use crate::grpc::proto::sequencer_service_server::{SequencerService, SequencerSe
 use crate::grpc::proto::*;
 use crate::receipt::CheckpointSigner;
 use crate::sequencer::SequencerHandle;
-use crate::traits::Storage;
+use crate::storage::engine::StorageEngine;
 
 /// gRPC server implementation for SEQUENCER role
 pub struct SequencerGrpcServer {
     /// Handle to the local SequencerCore
     sequencer_handle: SequencerHandle,
 
-    /// Storage for query operations
-    storage: Arc<dyn Storage>,
+    /// Storage for query operations (concrete StorageEngine for v2.0 receipts)
+    storage: Arc<StorageEngine>,
 
     /// Checkpoint signer
     signer: Arc<CheckpointSigner>,
@@ -37,12 +37,12 @@ impl SequencerGrpcServer {
     /// # Arguments
     ///
     /// * `sequencer_handle` - Handle to the SequencerCore for submitting requests
-    /// * `storage` - Storage backend for queries
+    /// * `storage` - Storage backend for queries (StorageEngine for v2.0 receipts)
     /// * `signer` - Checkpoint signer for creating signed tree heads
     /// * `expected_token` - Optional shared secret for authentication
     pub fn new(
         sequencer_handle: SequencerHandle,
-        storage: Arc<dyn Storage>,
+        storage: Arc<StorageEngine>,
         signer: Arc<CheckpointSigner>,
         expected_token: Option<String>,
     ) -> Self {
@@ -101,7 +101,7 @@ impl SequencerGrpcServer {
     }
 
     /// Helper: Get the storage
-    pub(super) fn storage(&self) -> &Arc<dyn Storage> {
+    pub(super) fn storage(&self) -> &Arc<StorageEngine> {
         &self.storage
     }
 

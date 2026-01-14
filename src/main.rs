@@ -170,8 +170,7 @@ async fn run_standalone(args: Args) -> anyhow::Result<()> {
     let engine = crate::storage::StorageEngine::new(storage_config, origin_id)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize storage engine: {}", e))?;
-    let storage_engine = Arc::new(engine);
-    let storage: Arc<dyn traits::Storage> = storage_engine.clone();
+    let storage = Arc::new(engine);
 
     // Initialize Chain Index
     let chain_index_path = PathBuf::from(&args.database).join("chain_index.db");
@@ -181,7 +180,7 @@ async fn run_standalone(args: Args) -> anyhow::Result<()> {
 
     // Sync Chain Index with main DB
     {
-        let index = storage_engine.index_store();
+        let index = storage.index_store();
         let idx = index.lock().await;
         let ci = chain_index.lock().await;
         let synced = ci
@@ -203,7 +202,7 @@ async fn run_standalone(args: Args) -> anyhow::Result<()> {
 
     let background_config = background::BackgroundConfig::from_env();
     let background_runner = background::BackgroundJobRunner::new(
-        storage_engine.clone(),
+        storage.clone(),
         chain_index.clone(),
         background_config,
     );
@@ -293,8 +292,7 @@ async fn run_sequencer(args: Args) -> anyhow::Result<()> {
     let engine = crate::storage::StorageEngine::new(storage_config, origin_id)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize storage engine: {}", e))?;
-    let storage_engine = Arc::new(engine);
-    let storage: Arc<dyn traits::Storage> = storage_engine.clone();
+    let storage = Arc::new(engine);
 
     // Initialize Chain Index
     let chain_index_path = PathBuf::from(&args.database).join("chain_index.db");
@@ -304,7 +302,7 @@ async fn run_sequencer(args: Args) -> anyhow::Result<()> {
 
     // Sync Chain Index with main DB
     {
-        let index = storage_engine.index_store();
+        let index = storage.index_store();
         let idx = index.lock().await;
         let ci = chain_index.lock().await;
         let synced = ci
@@ -326,7 +324,7 @@ async fn run_sequencer(args: Args) -> anyhow::Result<()> {
 
     let background_config = background::BackgroundConfig::from_env();
     let background_runner = background::BackgroundJobRunner::new(
-        storage_engine.clone(),
+        storage.clone(),
         chain_index.clone(),
         background_config,
     );
