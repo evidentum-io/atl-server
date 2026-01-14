@@ -286,7 +286,6 @@ impl ChainIndex {
                     origin_id: tree.origin_id,
                     root_hash,
                     tree_size,
-                    prev_tree_id: tree.prev_tree_id,
                     closed_at: tree.closed_at.unwrap_or(0),
                     data_tree_index,
                 };
@@ -358,7 +357,6 @@ mod tests {
             origin_id: [0xaa; 32],
             root_hash: [0xbb; 32],
             tree_size: 100,
-            prev_tree_id: None,
             closed_at: 1_234_567_890_000_000_000,
             data_tree_index: 0,
         };
@@ -381,7 +379,6 @@ mod tests {
             origin_id: [0xaa; 32],
             root_hash: [0x11; 32],
             tree_size: 100,
-            prev_tree_id: None,
             closed_at: 1_000_000_000_000,
             data_tree_index: 0,
         };
@@ -392,7 +389,6 @@ mod tests {
             origin_id: [0xaa; 32],
             root_hash: [0x22; 32],
             tree_size: 200,
-            prev_tree_id: Some(1),
             closed_at: 2_000_000_000_000,
             data_tree_index: 1,
         };
@@ -413,7 +409,6 @@ mod tests {
             origin_id: [0xaa; 32],
             root_hash: [0x11; 32],
             tree_size: 100,
-            prev_tree_id: None,
             closed_at: 1_000_000_000_000,
             data_tree_index: 0,
         };
@@ -424,7 +419,6 @@ mod tests {
             origin_id: [0xaa; 32],
             root_hash: [0x22; 32],
             tree_size: 200,
-            prev_tree_id: Some(1),
             closed_at: 2_000_000_000_000,
             data_tree_index: 999, // Wrong index (should be 1)
         };
@@ -448,7 +442,6 @@ mod tests {
             origin_id: [0xaa; 32],
             root_hash: root1,
             tree_size: 50,
-            prev_tree_id: None,
             closed_at: 1_000_000_000_000,
             data_tree_index: 0,
         };
@@ -459,7 +452,6 @@ mod tests {
             origin_id: [0xaa; 32],
             root_hash: root2,
             tree_size: 100,
-            prev_tree_id: Some(1),
             closed_at: 2_000_000_000_000,
             data_tree_index: 1,
         };
@@ -485,7 +477,6 @@ mod tests {
                 origin_id: [0xaa; 32],
                 root_hash: [i as u8; 32],
                 tree_size: (i + 1) * 100,
-                prev_tree_id: if i == 0 { None } else { Some(i as i64) },
                 closed_at: ((i + 1) * 1_000_000_000_000) as i64,
                 data_tree_index: i,
             };
@@ -526,7 +517,6 @@ mod tests {
             origin_id: [0xaa; 32],
             root_hash: [0x11; 32],
             tree_size: 100,
-            prev_tree_id: None,
             closed_at: 1_000_000_000_000,
             data_tree_index: 0,
         };
@@ -537,7 +527,6 @@ mod tests {
             origin_id: [0xbb; 32],
             root_hash: [0x22; 32],
             tree_size: 200,
-            prev_tree_id: Some(1),
             closed_at: 2_000_000_000_000,
             data_tree_index: 0, // Duplicate index
         };

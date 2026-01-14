@@ -224,23 +224,33 @@ async fn test_chain_link_integrity() {
         tree_ids.push((result.closed_tree_id, result.new_tree_id));
     }
 
-    // Verify chain links
+    // Verify chain links via Super-Tree (prev_tree_id removed in v2.0)
+    // Chain tracking is now implicit through data_tree_index in Super-Tree
     let index = engine.index_store();
     let idx = index.lock().await;
 
-    // Tree 1: prev_tree_id = NULL (first tree)
+    // Verify trees exist and have correct data_tree_index
     let tree1 = idx.get_tree(tree_ids[0].0).unwrap().unwrap();
-    assert!(tree1.prev_tree_id.is_none());
-
-    // Tree 2: prev_tree_id = Tree 1
     let tree2 = idx.get_tree(tree_ids[1].0).unwrap().unwrap();
-    assert_eq!(tree2.prev_tree_id, Some(tree_ids[0].0));
-
-    // Tree 3: prev_tree_id = Tree 2
     let tree3 = idx.get_tree(tree_ids[2].0).unwrap().unwrap();
-    assert_eq!(tree3.prev_tree_id, Some(tree_ids[1].0));
 
-    // NO genesis leaves anymore - chain tracking moved to Super-Tree
+    // Verify data_tree_index is sequential (implicit chain)
+    let index1 = idx.get_tree_data_tree_index(tree1.id).unwrap().unwrap();
+    let index2 = idx.get_tree_data_tree_index(tree2.id).unwrap().unwrap();
+    let index3 = idx.get_tree_data_tree_index(tree3.id).unwrap().unwrap();
+
+    assert_eq!(index1, 0);
+    assert_eq!(index2, 1);
+    assert_eq!(index3, 2);
+
+    // Verify Super-Tree contains all three tree roots in order
+    let mut super_slabs = engine.super_slabs().write().await;
+    for (i, root_hash) in root_hashes.iter().enumerate() {
+        let super_leaf = super_slabs.get_node(0, i as u64).unwrap().unwrap();
+        assert_eq!(super_leaf, *root_hash, "Super-Tree leaf {} mismatch", i);
+    }
+
+    // Chain tracking moved to Super-Tree (no more prev_tree_id)
 }
 
 #[tokio::test(flavor = "multi_thread")]

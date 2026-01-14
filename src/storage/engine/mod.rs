@@ -237,7 +237,7 @@ impl StorageEngine {
             state.root_hash = new_root_hash;
         }
 
-        // 4. Return result (UPDATED - no genesis_leaf_index)
+        // 4. Return result
         let new_tree_head = TreeHead {
             tree_size: new_tree_size,
             root_hash: new_root_hash,

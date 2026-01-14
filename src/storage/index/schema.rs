@@ -62,10 +62,8 @@ CREATE TABLE IF NOT EXISTS trees (
     closed_at INTEGER,
     tsa_anchor_id INTEGER,
     bitcoin_anchor_id INTEGER,
-    prev_tree_id INTEGER,             -- Chain link to previous tree (NULL for first tree)
     FOREIGN KEY (tsa_anchor_id) REFERENCES anchors(id),
-    FOREIGN KEY (bitcoin_anchor_id) REFERENCES anchors(id),
-    FOREIGN KEY (prev_tree_id) REFERENCES trees(id)
+    FOREIGN KEY (bitcoin_anchor_id) REFERENCES anchors(id)
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_trees_active ON trees(status) WHERE status = 'active';
@@ -104,16 +102,6 @@ DROP TABLE IF EXISTS tree_nodes;
 -- Update schema version
 INSERT OR REPLACE INTO atl_config (key, value, updated_at)
 VALUES ('schema_version', '3', strftime('%s', 'now') * 1000000000);
-"#;
-
-/// Migration from v3 to v4: add tree chaining support
-pub const MIGRATE_V3_TO_V4: &str = r#"
--- Add chain link column
-ALTER TABLE trees ADD COLUMN prev_tree_id INTEGER REFERENCES trees(id);
-
--- Update schema version
-INSERT OR REPLACE INTO atl_config (key, value, updated_at)
-VALUES ('schema_version', '4', strftime('%s', 'now') * 1000000000);
 "#;
 
 /// Migration from v4 to v5: add data_tree_index for Super-Tree integration
