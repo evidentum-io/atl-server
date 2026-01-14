@@ -191,11 +191,11 @@ impl IndexStore {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
 
-        // Update active tree to pending_bitcoin
+        // Update active tree to pending_bitcoin with data_tree_index
         tx.execute(
-            "UPDATE trees SET status = 'pending_bitcoin', end_size = ?1, root_hash = ?2, closed_at = ?3
-             WHERE id = ?4",
-            params![end_size as i64, root_hash.as_slice(), now, active_tree_id],
+            "UPDATE trees SET status = 'pending_bitcoin', end_size = ?1, root_hash = ?2, closed_at = ?3, data_tree_index = ?4
+             WHERE id = ?5",
+            params![end_size as i64, root_hash.as_slice(), now, data_tree_index as i64, active_tree_id],
         )?;
 
         // Create new active tree WITH chain link
@@ -391,6 +391,20 @@ impl IndexStore {
         let rows = stmt.query_map([], row_to_tree)?;
         rows.collect::<Result<Vec<_>, _>>()
     }
+
+    /// Get data_tree_index for a tree (used by RECEIPT-1)
+    ///
+    /// Returns None if tree is still active or not found.
+    #[allow(dead_code)]
+    pub fn get_tree_data_tree_index(&self, tree_id: i64) -> rusqlite::Result<Option<u64>> {
+        self.connection()
+            .query_row(
+                "SELECT data_tree_index FROM trees WHERE id = ?1",
+                params![tree_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .map(|opt| opt.map(|v| v as u64))
+    }
 }
 
 #[cfg(test)]
@@ -410,6 +424,7 @@ mod tests {
                 start_size INTEGER NOT NULL,
                 end_size INTEGER,
                 root_hash BLOB,
+                data_tree_index INTEGER,
                 created_at INTEGER NOT NULL,
                 first_entry_at INTEGER,
                 closed_at INTEGER,
@@ -639,5 +654,76 @@ mod tests {
 
         // Assert: new tree starts where old tree ended
         assert_eq!(start_size as u64, end_size);
+    }
+
+    #[test]
+    fn test_close_tree_stores_data_tree_index() {
+        let mut store = create_test_index_store();
+        let origin_id = [1u8; 32];
+        store.create_active_tree(&origin_id, 0).unwrap();
+
+        let end_size = 100u64;
+        let root_hash = [8u8; 32];
+        let data_tree_index = 0u64;
+
+        let result = store
+            .close_tree_and_create_new(&origin_id, end_size, &root_hash, data_tree_index)
+            .unwrap();
+
+        // Query closed tree's data_tree_index
+        let stored_index: Option<i64> = store
+            .connection()
+            .query_row(
+                "SELECT data_tree_index FROM trees WHERE id = ?1",
+                [result.closed_tree_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(stored_index, Some(data_tree_index as i64));
+    }
+
+    #[test]
+    fn test_get_tree_data_tree_index_returns_correct_value() {
+        let mut store = create_test_index_store();
+        let origin_id = [1u8; 32];
+        store.create_active_tree(&origin_id, 0).unwrap();
+
+        let result = store
+            .close_tree_and_create_new(&origin_id, 100, &[9u8; 32], 0)
+            .unwrap();
+
+        let index = store
+            .get_tree_data_tree_index(result.closed_tree_id)
+            .unwrap();
+        assert_eq!(index, Some(0));
+    }
+
+    #[test]
+    fn test_get_tree_data_tree_index_returns_none_for_active() {
+        let store = create_test_index_store();
+        let origin_id = [1u8; 32];
+        let tree_id = store.create_active_tree(&origin_id, 0).unwrap();
+
+        let index = store.get_tree_data_tree_index(tree_id).unwrap();
+        assert_eq!(index, None, "Active tree should not have data_tree_index");
+    }
+
+    #[test]
+    fn test_data_tree_index_increments_for_multiple_closes() {
+        let mut store = create_test_index_store();
+        let origin_id = [0u8; 32];
+        store.create_active_tree(&origin_id, 0).unwrap();
+
+        for i in 0..3 {
+            let result = store
+                .close_tree_and_create_new(&origin_id, (i + 1) * 100, &[i as u8; 32], i)
+                .unwrap();
+
+            let stored = store
+                .get_tree_data_tree_index(result.closed_tree_id)
+                .unwrap();
+            assert_eq!(stored, Some(i));
+        }
     }
 }

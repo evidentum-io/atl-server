@@ -5,8 +5,8 @@
 //! This schema removes `tree_nodes` table (moved to Slab files) and adds
 //! `slab_id`, `slab_offset` columns to entries.
 
-/// Current schema version (v4: tree chaining with prev_tree_id)
-pub const SCHEMA_VERSION: u32 = 4;
+/// Current schema version (v5: add data_tree_index)
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Schema v3: SQLite as index/metadata store only
 pub const SCHEMA_V3: &str = r#"
@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS trees (
     start_size INTEGER NOT NULL,
     end_size INTEGER,
     root_hash BLOB,
+    data_tree_index INTEGER,          -- Position in Super-Tree (NULL for active tree)
     created_at INTEGER NOT NULL,
     first_entry_at INTEGER,
     closed_at INTEGER,
@@ -69,6 +70,7 @@ CREATE TABLE IF NOT EXISTS trees (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_trees_active ON trees(status) WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS idx_trees_status ON trees(status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_trees_data_tree_index ON trees(data_tree_index) WHERE data_tree_index IS NOT NULL;
 
 -- Anchors (TSA, Bitcoin)
 CREATE TABLE IF NOT EXISTS anchors (
@@ -109,4 +111,27 @@ ALTER TABLE trees ADD COLUMN prev_tree_id INTEGER REFERENCES trees(id);
 -- Update schema version
 INSERT OR REPLACE INTO atl_config (key, value, updated_at)
 VALUES ('schema_version', '4', strftime('%s', 'now') * 1000000000);
+"#;
+
+/// Migration from v4 to v5: add data_tree_index for Super-Tree integration
+pub const MIGRATE_V4_TO_V5: &str = r#"
+-- Add data_tree_index column (NULL for active tree)
+ALTER TABLE trees ADD COLUMN data_tree_index INTEGER;
+
+-- Populate data_tree_index for closed trees only
+-- Trees are ordered by id (auto-increment), so assign sequential indices
+UPDATE trees SET data_tree_index = (
+    SELECT COUNT(*) - 1
+    FROM trees t2
+    WHERE t2.status IN ('pending_bitcoin', 'closed') AND t2.id <= trees.id
+)
+WHERE status IN ('pending_bitcoin', 'closed');
+
+-- Create partial unique index (only for closed trees with data_tree_index)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_trees_data_tree_index
+    ON trees(data_tree_index) WHERE data_tree_index IS NOT NULL;
+
+-- Update schema version
+INSERT OR REPLACE INTO atl_config (key, value, updated_at)
+VALUES ('schema_version', '5', strftime('%s', 'now') * 1000000000);
 "#;

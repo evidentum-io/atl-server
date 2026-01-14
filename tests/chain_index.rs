@@ -64,7 +64,7 @@ async fn test_chain_index_lifecycle() {
     let tree = tree.unwrap();
     assert_eq!(tree.tree_id, result.closed_tree_id);
     assert_eq!(tree.tree_size, 10);
-    assert_eq!(tree.data_tree_index, Some(result.data_tree_index));
+    assert_eq!(tree.data_tree_index, result.data_tree_index);
 
     let result = chain_index.verify_full_chain().unwrap();
     assert!(result.valid);

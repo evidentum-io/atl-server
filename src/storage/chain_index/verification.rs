@@ -20,35 +20,19 @@ impl ChainIndex {
     /// Verify a single chain link between two trees
     ///
     /// Checks that:
-    /// 1. tree_next.prev_tree_id points to tree_prev
-    /// 2. tree_next.data_tree_index = tree_prev.data_tree_index + 1 (sequential Super-Tree indices)
+    /// 1. tree_next.data_tree_index = tree_prev.data_tree_index + 1 (sequential Super-Tree indices)
     #[allow(dead_code)]
     pub fn verify_chain_link(
         &self,
         tree_prev: &ChainTreeRecord,
         tree_next: &ChainTreeRecord,
     ) -> Result<bool, String> {
-        if tree_next.prev_tree_id != Some(tree_prev.tree_id) {
-            return Err(format!(
-                "Chain broken: tree {} prev_tree_id ({:?}) != expected ({})",
-                tree_next.tree_id, tree_next.prev_tree_id, tree_prev.tree_id
-            ));
-        }
+        let expected_index = tree_prev.data_tree_index + 1;
 
-        let data_tree_index_next = tree_next
-            .data_tree_index
-            .ok_or_else(|| format!("Tree {} missing data_tree_index", tree_next.tree_id))?;
-
-        let data_tree_index_prev = tree_prev
-            .data_tree_index
-            .ok_or_else(|| format!("Tree {} missing data_tree_index", tree_prev.tree_id))?;
-
-        let expected_index = data_tree_index_prev + 1;
-
-        if data_tree_index_next != expected_index {
+        if tree_next.data_tree_index != expected_index {
             return Err(format!(
                 "Data tree index mismatch for tree {}: expected {}, got {}",
-                tree_next.tree_id, expected_index, data_tree_index_next
+                tree_next.tree_id, expected_index, tree_next.data_tree_index
             ));
         }
 
@@ -71,12 +55,12 @@ impl ChainIndex {
             });
         }
 
-        if trees[0].prev_tree_id.is_some() {
+        if trees[0].data_tree_index != 0 {
             return Ok(ChainVerificationResult {
                 valid: false,
                 verified_trees: 0,
                 first_invalid_tree: Some(trees[0].tree_id),
-                error_message: Some("First tree has prev_tree_id (should be NULL)".to_string()),
+                error_message: Some("First tree should have data_tree_index = 0".to_string()),
             });
         }
 
@@ -115,7 +99,7 @@ impl ChainIndex {
     #[allow(dead_code)]
     pub fn verify_chain_up_to(&self, tree_id: i64) -> rusqlite::Result<ChainVerificationResult> {
         let mut stmt = self.conn.prepare(
-            "SELECT tree_id, origin_id, root_hash, tree_size, prev_tree_id, data_tree_index,
+            "SELECT tree_id, origin_id, root_hash, tree_size, data_tree_index,
                     status, bitcoin_txid, archive_location, created_at, closed_at, archived_at
              FROM trees WHERE tree_id <= ?1 ORDER BY tree_id ASC",
         )?;
@@ -132,12 +116,12 @@ impl ChainIndex {
             });
         }
 
-        if trees[0].prev_tree_id.is_some() {
+        if trees[0].data_tree_index != 0 {
             return Ok(ChainVerificationResult {
                 valid: false,
                 verified_trees: 0,
                 first_invalid_tree: Some(trees[0].tree_id),
-                error_message: Some("First tree has prev_tree_id".to_string()),
+                error_message: Some("First tree should have data_tree_index = 0".to_string()),
             });
         }
 

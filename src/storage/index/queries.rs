@@ -128,6 +128,12 @@ impl IndexStore {
                 .execute_batch(super::schema::MIGRATE_V3_TO_V4)?;
         }
 
+        if current < 5 {
+            self.conn
+                .borrow()
+                .execute_batch(super::schema::MIGRATE_V4_TO_V5)?;
+        }
+
         Ok(())
     }
 
