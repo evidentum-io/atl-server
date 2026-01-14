@@ -33,18 +33,20 @@ pub struct ClosedTreeMetadata {
     pub closed_at: i64,
 }
 
-/// Result of rotating a tree (closing old + creating new with genesis)
+/// Result of rotating a tree (closing old + creating new)
 #[derive(Debug, Clone)]
 pub struct TreeRotationResult {
     /// ID of the tree that was closed
     pub closed_tree_id: i64,
     /// ID of the newly created active tree
     pub new_tree_id: i64,
-    /// Leaf index of the genesis leaf
-    pub genesis_leaf_index: u64,
+    /// Position in Super-Tree (data tree index)
+    pub data_tree_index: u64,
+    /// Super-Tree root hash after append
+    pub super_root: [u8; 32],
     /// Metadata for Chain Index
     pub closed_tree_metadata: ClosedTreeMetadata,
-    /// New tree head after genesis insertion
+    /// New tree head after rotation
     pub new_tree_head: crate::traits::TreeHead,
 }
 

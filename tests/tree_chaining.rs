@@ -56,36 +56,24 @@ async fn test_genesis_leaf_in_both_slab_and_sqlite() {
         .await
         .unwrap();
 
-    // Verify genesis leaf index
-    assert_eq!(result.genesis_leaf_index, 10);
-    assert_eq!(result.new_tree_head.tree_size, 11);
+    // Verify data_tree_index (first rotation should be 0)
+    assert_eq!(result.data_tree_index, 0);
+    assert_eq!(result.new_tree_head.tree_size, 10); // NO +1 for genesis!
 
-    // Verify genesis leaf in SQLite
+    // Verify Super-Tree contains the closed tree root
+    let mut super_slabs = engine.super_slabs().write().await;
+    let super_leaf = super_slabs.get_node(0, 0).unwrap().unwrap();
+    assert_eq!(super_leaf, tree_head_before.root_hash);
+
+    // Verify Super-Tree size is 1
     let index = engine.index_store();
     let idx = index.lock().await;
-    let genesis_entry = idx.get_entry_by_index(10).unwrap().unwrap();
-    assert_eq!(genesis_entry.leaf_index, 10);
+    let super_size = idx.get_super_tree_size().unwrap();
+    assert_eq!(super_size, 1);
 
-    // Verify genesis metadata
-    let metadata = genesis_entry.metadata_cleartext.as_ref().unwrap();
-    assert_eq!(metadata["type"], "genesis");
-    assert_eq!(metadata["prev_tree_size"], 10);
-
-    // Verify genesis hash matches expected
-    let expected_genesis_hash = atl_core::compute_genesis_leaf_hash(
-        &tree_head_before.root_hash,
-        tree_head_before.tree_size,
-    );
-    assert_eq!(genesis_entry.payload_hash, expected_genesis_hash);
-
-    // Verify genesis leaf in Slab (via inclusion proof)
-    // If inclusion proof works, the leaf is in the Slab
-    drop(idx);
-    let genesis_uuid = genesis_entry.id;
-    let proof = Storage::get_inclusion_proof(&engine, &genesis_uuid, Some(11)).unwrap();
-    assert_eq!(proof.leaf_index, 10);
-    assert_eq!(proof.tree_size, 11);
-    assert!(!proof.path.is_empty());
+    // Verify Super genesis root is set
+    let super_genesis = idx.get_super_genesis_root().unwrap();
+    assert_eq!(super_genesis, Some(result.super_root));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -119,32 +107,18 @@ async fn test_merkle_tree_integrity_after_rotation() {
             .unwrap();
     }
 
-    // Final tree size: 5 + genesis + 5 + genesis = 12
+    // Final tree size: 5 + 5 = 10 (NO genesis leaves anymore)
     let final_head = engine.tree_head();
-    assert_eq!(final_head.tree_size, 12);
+    assert_eq!(final_head.tree_size, 10);
 
-    // Verify inclusion proofs for all entries
-    for i in 0..12 {
+    // Verify inclusion proofs for all entries (NO genesis entries)
+    for i in 0..10 {
         let entry = ProofProvider::get_entry_by_index(&engine, i).await.unwrap();
-        let proof = Storage::get_inclusion_proof(&engine, &entry.id, Some(12)).unwrap();
+        let proof = Storage::get_inclusion_proof(&engine, &entry.id, Some(10)).unwrap();
         assert_eq!(proof.leaf_index, i);
 
-        // Determine leaf hash based on entry type
-        // Genesis entries store the pre-computed hash directly (payload_hash = metadata_hash = genesis_hash)
-        // Regular entries need compute_leaf_hash(payload, metadata)
-        let is_genesis = entry
-            .metadata_cleartext
-            .as_ref()
-            .and_then(|m| m.get("type"))
-            .and_then(|t| t.as_str())
-            == Some("genesis");
-
-        let leaf_hash = if is_genesis {
-            // Genesis leaf hash is stored directly in payload_hash
-            entry.payload_hash
-        } else {
-            atl_core::compute_leaf_hash(&entry.payload_hash, &entry.metadata_hash)
-        };
+        // All entries are regular entries (no genesis)
+        let leaf_hash = atl_core::compute_leaf_hash(&entry.payload_hash, &entry.metadata_hash);
 
         let atl_proof = atl_core::InclusionProof {
             tree_size: proof.tree_size,
@@ -158,7 +132,7 @@ async fn test_merkle_tree_integrity_after_rotation() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_genesis_leaf_hash_correctness() {
+async fn test_super_tree_stores_data_tree_root() {
     let (engine, _dir) = create_test_engine().await;
     let origin_id = engine.origin_id();
 
@@ -188,30 +162,27 @@ async fn test_genesis_leaf_hash_correctness() {
         .await
         .unwrap();
 
-    // Compute expected genesis hash manually
-    let expected: [u8; 32] = {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update([0x00]); // Leaf prefix
-        hasher.update(b"ATL-CHAIN-v1"); // Domain separator
-        hasher.update(head_before.root_hash);
-        hasher.update(head_before.tree_size.to_le_bytes());
-        hasher.finalize().into()
-    };
+    // Verify Super-Tree contains the closed tree root (NOT genesis leaf hash)
+    let mut super_slabs = engine.super_slabs().write().await;
+    let super_leaf = super_slabs.get_node(0, 0).unwrap().unwrap();
+    assert_eq!(
+        super_leaf, head_before.root_hash,
+        "Super-Tree should store the data tree root directly"
+    );
 
-    // Verify via atl_core
-    let atl_core_hash =
-        atl_core::compute_genesis_leaf_hash(&head_before.root_hash, head_before.tree_size);
-    assert_eq!(atl_core_hash, expected);
+    // Verify data_tree_index is correct
+    assert_eq!(
+        result.data_tree_index, 0,
+        "First rotation should have data_tree_index=0"
+    );
 
-    // Verify stored genesis matches
+    // Verify Super-Tree metadata
     let index = engine.index_store();
     let idx = index.lock().await;
-    let genesis_entry = idx.get_entry_by_index(10).unwrap().unwrap();
-    assert_eq!(genesis_entry.payload_hash, expected);
-
-    // Also verify via result
-    assert_eq!(result.genesis_leaf_index, 10);
+    let super_size = idx.get_super_tree_size().unwrap();
+    assert_eq!(super_size, 1);
+    let super_genesis = idx.get_super_genesis_root().unwrap();
+    assert_eq!(super_genesis, Some(result.super_root));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -269,12 +240,7 @@ async fn test_chain_link_integrity() {
     let tree3 = idx.get_tree(tree_ids[2].0).unwrap().unwrap();
     assert_eq!(tree3.prev_tree_id, Some(tree_ids[1].0));
 
-    // Verify genesis leaves reference correct predecessors
-    // Genesis at index 5 (after tree 1 closed) should reference tree 1
-    let genesis1 = idx.get_entry_by_index(5).unwrap().unwrap();
-    let meta1 = genesis1.metadata_cleartext.as_ref().unwrap();
-    assert_eq!(meta1["prev_tree_id"], tree_ids[0].0);
-    assert_eq!(meta1["prev_tree_size"], 5);
+    // NO genesis leaves anymore - chain tracking moved to Super-Tree
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -303,7 +269,7 @@ async fn test_consistency_proof_across_rotation() {
     let head_at_10 = engine.tree_head();
     let root_at_10 = head_at_10.root_hash;
 
-    // Rotate tree (adds genesis, tree_size = 11)
+    // Rotate tree (NO genesis, tree_size stays 10)
     engine
         .rotate_tree(&origin_id, head_at_10.tree_size, &head_at_10.root_hash)
         .await
@@ -320,13 +286,13 @@ async fn test_consistency_proof_across_rotation() {
         .collect();
     engine.append_batch(more_entries).await.unwrap();
 
-    let head_at_16 = engine.tree_head();
-    assert_eq!(head_at_16.tree_size, 16);
+    let head_at_15 = engine.tree_head();
+    assert_eq!(head_at_15.tree_size, 15); // 10 + 5, NO genesis
 
-    // Get consistency proof from 10 to 16
-    let proof = Storage::get_consistency_proof(&engine, 10, 16).unwrap();
+    // Get consistency proof from 10 to 15
+    let proof = Storage::get_consistency_proof(&engine, 10, 15).unwrap();
     assert_eq!(proof.from_size, 10);
-    assert_eq!(proof.to_size, 16);
+    assert_eq!(proof.to_size, 15);
 
     // Verify proof
     let atl_proof = atl_core::ConsistencyProof {
@@ -335,7 +301,7 @@ async fn test_consistency_proof_across_rotation() {
         path: proof.path,
     };
     let is_valid =
-        atl_core::verify_consistency(&atl_proof, &root_at_10, &head_at_16.root_hash).unwrap();
+        atl_core::verify_consistency(&atl_proof, &root_at_10, &head_at_15.root_hash).unwrap();
     assert!(
         is_valid,
         "Consistency proof should be valid across rotation"
@@ -386,15 +352,18 @@ async fn test_tree_closer_uses_rotate_tree() {
     .await
     .unwrap();
 
-    // Verify genesis leaf exists at index 10
+    // Verify NO genesis leaf at index 10 (genesis removed in SUPER-2)
     let idx = index.lock().await;
-    let genesis = idx.get_entry_by_index(10).unwrap();
+    let maybe_genesis = idx.get_entry_by_index(10).unwrap();
     assert!(
-        genesis.is_some(),
-        "Genesis leaf should exist after tree_closer"
+        maybe_genesis.is_none(),
+        "Genesis leaf should NOT exist after tree_closer (removed in SUPER-2)"
     );
 
-    let genesis = genesis.unwrap();
-    let meta = genesis.metadata_cleartext.as_ref().unwrap();
-    assert_eq!(meta["type"], "genesis");
+    // Verify Super-Tree was updated
+    let super_size = idx.get_super_tree_size().unwrap();
+    assert_eq!(
+        super_size, 1,
+        "Super-Tree should have 1 entry (the closed data tree root)"
+    );
 }

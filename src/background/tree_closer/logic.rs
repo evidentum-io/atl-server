@@ -112,10 +112,11 @@ pub async fn check_and_close_if_needed(
     tracing::info!(
         closed_tree_id = result.closed_tree_id,
         new_tree_id = result.new_tree_id,
-        genesis_leaf_index = result.genesis_leaf_index,
+        data_tree_index = result.data_tree_index,
+        super_root = %hex::encode(result.super_root),
         new_tree_size = result.new_tree_head.tree_size,
         prev_tree_id = ?result.closed_tree_metadata.prev_tree_id,
-        "Tree rotated with genesis leaf in both Slab and SQLite, pending OTS anchoring by ots_job"
+        "Tree rotated with Super-Tree append, pending OTS anchoring by ots_job"
     );
 
     let genesis_leaf_hash = atl_core::compute_genesis_leaf_hash(

@@ -154,17 +154,16 @@ impl StorageEngine {
         &self.super_slabs
     }
 
-    /// Rotate the tree: close active tree and create new one with genesis leaf
+    /// Rotate the tree: close active tree and create new one
     ///
-    /// This is the ONLY correct way to rotate trees. Do NOT call
-    /// `IndexStore::close_tree_and_create_new()` directly - it does not
-    /// insert genesis leaf into Slab.
+    /// This method appends the closed tree root to the Super-Tree and creates
+    /// a new active data tree WITHOUT genesis leaf (Super-Tree replaces genesis).
     ///
     /// # Flow
-    /// 1. Close active tree and create new one (IndexStore)
-    /// 2. Compute genesis leaf hash
-    /// 3. Insert genesis leaf into Slab (Merkle tree)
-    /// 4. Insert genesis metadata into SQLite
+    /// 1. Compute data_tree_index from Super-Tree size
+    /// 2. Append closed tree root to Super-Tree
+    /// 3. Update Super-Tree metadata (size, genesis root on first append)
+    /// 4. Close active tree and create new one (IndexStore)
     /// 5. Update tree_state cache
     ///
     /// # Arguments
@@ -173,7 +172,7 @@ impl StorageEngine {
     /// * `root_hash` - Root hash of the tree being closed
     ///
     /// # Returns
-    /// `TreeRotationResult` with closed tree metadata and new tree head
+    /// `TreeRotationResult` with closed tree metadata, new tree head, and Super-Tree info
     ///
     /// # Errors
     /// Returns `StorageError` if any step fails
@@ -183,7 +182,35 @@ impl StorageEngine {
         end_size: u64,
         root_hash: &[u8; 32],
     ) -> Result<TreeRotationResult, StorageError> {
-        // 1. Close tree and create new one (no genesis insertion yet)
+        // 1. Append closed tree root to Super-Tree FIRST to get data_tree_index
+        let (super_root, data_tree_index) = {
+            let mut super_slabs = self.super_slabs.write().await;
+            let index = self.index.lock().await;
+
+            // Get current Super-Tree size (this becomes data_tree_index)
+            let data_tree_index = index
+                .get_super_tree_size()
+                .map_err(|e| StorageError::Database(e.to_string()))?;
+
+            // Append to Super-Tree
+            let super_root = super_slabs.append_leaves(&[*root_hash])?;
+
+            // Update Super-Tree metadata
+            index
+                .set_super_tree_size(data_tree_index + 1)
+                .map_err(|e| StorageError::Database(e.to_string()))?;
+
+            // Set genesis on first append
+            if data_tree_index == 0 {
+                index
+                    .set_super_genesis_root(&super_root)
+                    .map_err(|e| StorageError::Database(e.to_string()))?;
+            }
+
+            (super_root, data_tree_index)
+        };
+
+        // 2. Close active tree and create new one
         let close_result = {
             let mut index = self.index.lock().await;
             index
@@ -191,70 +218,36 @@ impl StorageEngine {
                 .map_err(|e| StorageError::Database(e.to_string()))?
         };
 
-        // 2. Compute genesis leaf hash
-        let genesis_hash = atl_core::compute_genesis_leaf_hash(root_hash, end_size);
-
-        // 3. Insert genesis leaf into Slab
-        let new_root = {
+        // 3. Update tree_state cache (SIMPLIFIED - no genesis)
+        let new_tree_size = end_size; // NO +1 for genesis!
+        let new_root_hash = if new_tree_size > 0 {
             let mut slabs = self.slabs.write().await;
-            slabs.append_leaves(&[genesis_hash])?
+            slabs.get_root(new_tree_size)?
+        } else {
+            [0u8; 32]
         };
 
-        // 4. Insert genesis metadata into SQLite
-        let genesis_id = Uuid::new_v4();
-        let genesis_leaf_index = end_size;
-        let slab_id = (genesis_leaf_index / u64::from(self.config.slab_capacity)) as u32 + 1;
-        let slab_offset = (genesis_leaf_index % u64::from(self.config.slab_capacity)) * 32;
-
-        let genesis_metadata = serde_json::json!({
-            "type": "genesis",
-            "prev_tree_id": close_result.closed_tree_id,
-            "prev_root_hash": format!("sha256:{}", hex::encode(root_hash)),
-            "prev_tree_size": end_size
-        });
-
-        let batch_insert = BatchInsert {
-            id: genesis_id,
-            leaf_index: genesis_leaf_index,
-            slab_id,
-            slab_offset,
-            payload_hash: genesis_hash,
-            metadata_hash: genesis_hash,
-            metadata_cleartext: Some(genesis_metadata.to_string()),
-            external_id: None,
-        };
-
-        {
-            let mut index = self.index.lock().await;
-            index.insert_batch(&[batch_insert])?;
-            index.set_tree_size(end_size + 1)?;
-            // NOTE: Do NOT call update_first_entry_at_for_active_tree() here!
-            // Genesis leaf should not start the tree lifetime timer.
-            // Only user entries (via append_batch) should trigger first_entry_at.
-        }
-
-        // 5. Update tree_state cache
-        let new_tree_size = end_size + 1;
         {
             let mut state = self
                 .tree_state
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             state.tree_size = new_tree_size;
-            state.root_hash = new_root;
+            state.root_hash = new_root_hash;
         }
 
-        // 6. Return result
+        // 4. Return result (UPDATED - no genesis_leaf_index)
         let new_tree_head = TreeHead {
             tree_size: new_tree_size,
-            root_hash: new_root,
+            root_hash: new_root_hash,
             origin: *origin_id,
         };
 
         Ok(TreeRotationResult {
             closed_tree_id: close_result.closed_tree_id,
             new_tree_id: close_result.new_tree_id,
-            genesis_leaf_index,
+            data_tree_index,
+            super_root,
             closed_tree_metadata: close_result.closed_tree_metadata,
             new_tree_head,
         })
