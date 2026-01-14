@@ -6,7 +6,7 @@
 //! - Storing anchors (store_anchor, store_anchor_returning_id)
 //! - Querying anchors (get_anchors, get_pending_ots_anchors, get_anchors_covering)
 //! - Updating anchors (update_anchor_status, update_anchor_token, update_anchor_metadata)
-//! - Atomic operations (submit_ots_anchor_atomic, confirm_ots_anchor_atomic)
+//! - Atomic operations (confirm_ots_anchor_atomic)
 
 use super::queries::IndexStore;
 use crate::traits::{Anchor, AnchorType};
@@ -22,12 +22,14 @@ pub struct AnchorWithId {
 /// Convert database row to Anchor
 fn row_to_anchor(row: &rusqlite::Row) -> rusqlite::Result<Anchor> {
     let _id: i64 = row.get(0)?;
-    let tree_size: i64 = row.get(1)?;
+    let tree_size: Option<i64> = row.get(1)?;
     let anchor_type: String = row.get(2)?;
-    let anchored_hash: Vec<u8> = row.get(3)?;
-    let timestamp: i64 = row.get(4)?;
-    let token: Vec<u8> = row.get(5)?;
-    let metadata: Option<String> = row.get(6)?;
+    let target: String = row.get(3)?;
+    let anchored_hash: Vec<u8> = row.get(4)?;
+    let super_tree_size: Option<i64> = row.get(5)?;
+    let timestamp: i64 = row.get(6)?;
+    let token: Vec<u8> = row.get(7)?;
+    let metadata: Option<String> = row.get(8)?;
 
     let anchor_type = match anchor_type.as_str() {
         "rfc3161" => AnchorType::Rfc3161,
@@ -37,14 +39,16 @@ fn row_to_anchor(row: &rusqlite::Row) -> rusqlite::Result<Anchor> {
 
     Ok(Anchor {
         anchor_type,
+        target,
         anchored_hash: anchored_hash.try_into().map_err(|_| {
             rusqlite::Error::InvalidColumnType(
-                3,
+                4,
                 "anchored_hash".into(),
                 rusqlite::types::Type::Blob,
             )
         })?,
-        tree_size: tree_size as u64,
+        tree_size: tree_size.map(|s| s as u64).unwrap_or(0),
+        super_tree_size: super_tree_size.map(|s| s as u64),
         timestamp: timestamp as u64,
         token,
         metadata: metadata
@@ -56,13 +60,15 @@ fn row_to_anchor(row: &rusqlite::Row) -> rusqlite::Result<Anchor> {
 /// Convert database row to AnchorWithId
 fn row_to_anchor_with_id(row: &rusqlite::Row) -> rusqlite::Result<AnchorWithId> {
     let id: i64 = row.get(0)?;
-    let tree_size: i64 = row.get(1)?;
+    let tree_size: Option<i64> = row.get(1)?;
     let anchor_type: String = row.get(2)?;
-    let anchored_hash: Vec<u8> = row.get(3)?;
-    let timestamp: i64 = row.get(4)?;
-    let token: Vec<u8> = row.get(5)?;
-    let metadata: Option<String> = row.get(6)?;
-    let _status: String = row.get(7)?;
+    let target: String = row.get(3)?;
+    let anchored_hash: Vec<u8> = row.get(4)?;
+    let super_tree_size: Option<i64> = row.get(5)?;
+    let timestamp: i64 = row.get(6)?;
+    let token: Vec<u8> = row.get(7)?;
+    let metadata: Option<String> = row.get(8)?;
+    let _status: String = row.get(9)?;
 
     let anchor_type = match anchor_type.as_str() {
         "rfc3161" => AnchorType::Rfc3161,
@@ -74,14 +80,16 @@ fn row_to_anchor_with_id(row: &rusqlite::Row) -> rusqlite::Result<AnchorWithId> 
         id,
         anchor: Anchor {
             anchor_type,
+            target,
             anchored_hash: anchored_hash.try_into().map_err(|_| {
                 rusqlite::Error::InvalidColumnType(
-                    3,
+                    4,
                     "anchored_hash".into(),
                     rusqlite::types::Type::Blob,
                 )
             })?,
-            tree_size: tree_size as u64,
+            tree_size: tree_size.map(|s| s as u64).unwrap_or(0),
+            super_tree_size: super_tree_size.map(|s| s as u64),
             timestamp: timestamp as u64,
             token,
             metadata: metadata
@@ -98,12 +106,14 @@ impl IndexStore {
         let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
 
         self.connection().execute(
-            "INSERT INTO anchors (tree_size, anchor_type, anchored_hash, timestamp, token, metadata, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO anchors (tree_size, anchor_type, target, anchored_hash, super_tree_size, timestamp, token, metadata, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
-                tree_size as i64,
+                Some(tree_size as i64),
                 anchor.anchor_type.to_string(),
+                anchor.target,
                 anchor.anchored_hash.as_slice(),
+                anchor.super_tree_size.map(|s| s as i64),
                 anchor.timestamp as i64,
                 anchor.token.as_slice(),
                 serde_json::to_string(&anchor.metadata).ok(),
@@ -124,12 +134,14 @@ impl IndexStore {
         let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
 
         self.connection().execute(
-            "INSERT INTO anchors (tree_size, anchor_type, anchored_hash, timestamp, token, metadata, status, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO anchors (tree_size, anchor_type, target, anchored_hash, super_tree_size, timestamp, token, metadata, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
-                tree_size as i64,
+                Some(tree_size as i64),
                 anchor.anchor_type.to_string(),
+                anchor.target,
                 anchor.anchored_hash.as_slice(),
+                anchor.super_tree_size.map(|s| s as i64),
                 anchor.timestamp as i64,
                 anchor.token.as_slice(),
                 serde_json::to_string(&anchor.metadata).ok(),
@@ -145,7 +157,7 @@ impl IndexStore {
     pub fn get_anchors(&self, tree_size: u64) -> rusqlite::Result<Vec<Anchor>> {
         let conn = self.connection();
         let mut stmt = conn.prepare(
-            "SELECT id, tree_size, anchor_type, anchored_hash, timestamp, token, metadata
+            "SELECT id, tree_size, anchor_type, target, anchored_hash, super_tree_size, timestamp, token, metadata
              FROM anchors WHERE tree_size = ?1",
         )?;
 
@@ -168,7 +180,7 @@ impl IndexStore {
     pub fn get_pending_ots_anchors(&self) -> rusqlite::Result<Vec<AnchorWithId>> {
         let conn = self.connection();
         let mut stmt = conn.prepare(
-            "SELECT id, tree_size, anchor_type, anchored_hash, timestamp, token, metadata, status
+            "SELECT id, tree_size, anchor_type, target, anchored_hash, super_tree_size, timestamp, token, metadata, status
              FROM anchors WHERE anchor_type = 'bitcoin_ots' AND status = 'pending'",
         )?;
 
@@ -222,7 +234,7 @@ impl IndexStore {
     ) -> rusqlite::Result<Vec<Anchor>> {
         let conn = self.connection();
         let mut stmt = conn.prepare(
-            "SELECT a.id, a.tree_size, a.anchor_type, a.anchored_hash, a.timestamp, a.token, a.metadata
+            "SELECT a.id, a.tree_size, a.anchor_type, a.target, a.anchored_hash, a.super_tree_size, a.timestamp, a.token, a.metadata
              FROM anchors a
              INNER JOIN (
                  SELECT anchor_type, MIN(tree_size) as min_tree_size
@@ -243,42 +255,34 @@ impl IndexStore {
         rows.collect::<Result<Vec<_>, _>>()
     }
 
-    /// Create OTS anchor and link to tree atomically
-    pub fn submit_ots_anchor_atomic(
+    /// Create OTS anchor for Super Root (v2.0)
+    ///
+    /// This method creates an OTS anchor that targets the Super Root instead of
+    /// a Data Tree root. Used for batch anchoring multiple trees at once.
+    pub fn submit_super_root_ots_anchor(
         &mut self,
-        tree_id: i64,
         proof: &[u8],
         calendar_url: &str,
-        root_hash: &[u8; 32],
-        tree_size: u64,
+        super_root: &[u8; 32],
+        super_tree_size: u64,
     ) -> rusqlite::Result<i64> {
-        let mut conn = self.connection_mut();
-        let tx = conn.transaction()?;
         let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
 
-        // Insert anchor
-        tx.execute(
-            "INSERT INTO anchors (anchor_type, anchored_hash, tree_size, timestamp, token, metadata, status, created_at)
-             VALUES ('bitcoin_ots', ?1, ?2, ?3, ?4, ?5, 'pending', ?6)",
+        // Insert anchor (v2.0 style - targets super_root)
+        self.connection().execute(
+            "INSERT INTO anchors (anchor_type, target, anchored_hash, tree_size, super_tree_size, timestamp, token, metadata, status, created_at)
+             VALUES ('bitcoin_ots', 'super_root', ?1, NULL, ?2, ?3, ?4, ?5, 'pending', ?6)",
             params![
-                root_hash.as_slice(),
-                tree_size as i64,
+                super_root.as_slice(),
+                super_tree_size as i64,
                 now,
                 proof,
                 serde_json::json!({"calendar_url": calendar_url}).to_string(),
                 now,
             ],
         )?;
-        let anchor_id = tx.last_insert_rowid();
 
-        // Link to tree
-        tx.execute(
-            "UPDATE trees SET bitcoin_anchor_id = ?1 WHERE id = ?2",
-            params![anchor_id, tree_id],
-        )?;
-
-        tx.commit()?;
-        Ok(anchor_id)
+        Ok(self.connection().last_insert_rowid())
     }
 
     /// Confirm OTS anchor and update tree status atomically

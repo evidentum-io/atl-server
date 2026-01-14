@@ -5,8 +5,8 @@
 //! This schema removes `tree_nodes` table (moved to Slab files) and adds
 //! `slab_id`, `slab_offset` columns to entries.
 
-/// Current schema version (v5: add data_tree_index)
-pub const SCHEMA_VERSION: u32 = 5;
+/// Current schema version (v6: add target and super_tree_size to anchors)
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// Schema v3: SQLite as index/metadata store only
 pub const SCHEMA_V3: &str = r#"
@@ -75,9 +75,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_trees_data_tree_index ON trees(data_tree_i
 -- Anchors (TSA, Bitcoin)
 CREATE TABLE IF NOT EXISTS anchors (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tree_size INTEGER NOT NULL,
+    tree_size INTEGER,                -- Data Tree size (nullable for Super Root anchors)
     anchor_type TEXT NOT NULL,        -- 'rfc3161', 'bitcoin_ots'
-    anchored_hash BLOB NOT NULL,      -- 32 bytes
+    target TEXT NOT NULL DEFAULT 'data_tree_root',  -- 'data_tree_root' or 'super_root'
+    anchored_hash BLOB NOT NULL,      -- 32 bytes (target_hash)
+    super_tree_size INTEGER,          -- Super-Tree size (for OTS v2.0)
     timestamp INTEGER NOT NULL,       -- Unix nanos
     token BLOB NOT NULL,              -- Raw anchor data
     metadata TEXT,                    -- JSON
@@ -87,6 +89,7 @@ CREATE TABLE IF NOT EXISTS anchors (
 
 CREATE INDEX IF NOT EXISTS idx_anchors_tree_size ON anchors(tree_size);
 CREATE INDEX IF NOT EXISTS idx_anchors_status ON anchors(status);
+CREATE INDEX IF NOT EXISTS idx_anchors_super_tree_size ON anchors(super_tree_size);
 "#;
 
 /// Migration from v2 to v3: remove tree_nodes, add slab columns
@@ -134,4 +137,27 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_trees_data_tree_index
 -- Update schema version
 INSERT OR REPLACE INTO atl_config (key, value, updated_at)
 VALUES ('schema_version', '5', strftime('%s', 'now') * 1000000000);
+"#;
+
+/// Migration from v5 to v6: add target and super_tree_size to anchors
+pub const MIGRATE_V5_TO_V6: &str = r#"
+-- Add new columns to anchors table
+ALTER TABLE anchors ADD COLUMN target TEXT NOT NULL DEFAULT 'data_tree_root';
+ALTER TABLE anchors ADD COLUMN super_tree_size INTEGER;
+
+-- Populate target for existing anchors
+-- All existing v1.x anchors targeted data_tree_root (both TSA and OTS)
+UPDATE anchors SET target = 'data_tree_root' WHERE anchor_type = 'rfc3161';
+UPDATE anchors SET target = 'data_tree_root' WHERE anchor_type = 'bitcoin_ots';
+
+-- Make tree_size nullable (it will be NULL for new super_root OTS anchors)
+-- Note: SQLite doesn't support DROP COLUMN or ALTER COLUMN NOT NULL,
+-- so we keep tree_size as-is and allow NULL values in application code
+
+-- Create index for super_tree_size
+CREATE INDEX IF NOT EXISTS idx_anchors_super_tree_size ON anchors(super_tree_size);
+
+-- Update schema version
+INSERT OR REPLACE INTO atl_config (key, value, updated_at)
+VALUES ('schema_version', '6', strftime('%s', 'now') * 1000000000);
 "#;

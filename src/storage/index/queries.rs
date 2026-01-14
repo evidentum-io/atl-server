@@ -134,6 +134,12 @@ impl IndexStore {
                 .execute_batch(super::schema::MIGRATE_V4_TO_V5)?;
         }
 
+        if current < 6 {
+            self.conn
+                .borrow()
+                .execute_batch(super::schema::MIGRATE_V5_TO_V6)?;
+        }
+
         Ok(())
     }
 
@@ -282,6 +288,29 @@ impl IndexStore {
         let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
         self.conn.borrow().execute(
             "INSERT OR REPLACE INTO atl_config (key, value, updated_at) VALUES ('super_tree_size', ?1, ?2)",
+            params![size.to_string(), now],
+        )?;
+        Ok(())
+    }
+
+    /// Get last OTS submitted Super-Tree size
+    pub fn get_last_ots_submitted_super_tree_size(&self) -> rusqlite::Result<u64> {
+        match self.conn.borrow().query_row(
+            "SELECT value FROM atl_config WHERE key = 'last_ots_submitted_super_tree_size'",
+            [],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(s) => Ok(s.parse().unwrap_or(0)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Set last OTS submitted Super-Tree size
+    pub fn set_last_ots_submitted_super_tree_size(&self, size: u64) -> rusqlite::Result<()> {
+        let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        self.conn.borrow().execute(
+            "INSERT OR REPLACE INTO atl_config (key, value, updated_at) VALUES ('last_ots_submitted_super_tree_size', ?1, ?2)",
             params![size.to_string(), now],
         )?;
         Ok(())

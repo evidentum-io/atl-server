@@ -17,8 +17,8 @@ use crate::traits::anchor::{Anchor, AnchorType};
 pub fn convert_anchor_to_receipt(anchor: &Anchor) -> ReceiptAnchor {
     match anchor.anchor_type {
         AnchorType::Rfc3161 => ReceiptAnchor::Rfc3161 {
-            target: "data_tree_root".to_string(),
-            target_hash: format!("sha256:{}", hex::encode([0u8; 32])),
+            target: anchor.target.clone(),
+            target_hash: format!("sha256:{}", hex::encode(anchor.anchored_hash)),
             tsa_url: anchor
                 .metadata
                 .get("tsa_url")
@@ -48,8 +48,8 @@ pub fn convert_anchor_to_receipt(anchor: &Anchor) -> ReceiptAnchor {
                 .unwrap_or_default();
 
             ReceiptAnchor::BitcoinOts {
-                target: "super_root".to_string(),
-                target_hash: format!("sha256:{}", hex::encode([0u8; 32])),
+                target: anchor.target.clone(),
+                target_hash: format!("sha256:{}", hex::encode(anchor.anchored_hash)),
                 timestamp: if block_time.is_empty() {
                     format_timestamp_iso8601(anchor.timestamp)
                 } else {
@@ -70,8 +70,8 @@ pub fn convert_anchor_to_receipt(anchor: &Anchor) -> ReceiptAnchor {
         AnchorType::Other => {
             // Other anchors fallback to RFC 3161 format
             ReceiptAnchor::Rfc3161 {
-                target: "data_tree_root".to_string(),
-                target_hash: format!("sha256:{}", hex::encode([0u8; 32])),
+                target: anchor.target.clone(),
+                target_hash: format!("sha256:{}", hex::encode(anchor.anchored_hash)),
                 tsa_url: anchor
                     .metadata
                     .get("tsa_url")
@@ -96,8 +96,10 @@ mod tests {
     fn test_convert_rfc3161_anchor() {
         let anchor = Anchor {
             anchor_type: AnchorType::Rfc3161,
+            target: "data_tree_root".to_string(),
             anchored_hash: [0u8; 32],
             tree_size: 100,
+            super_tree_size: None,
             timestamp: 1_704_067_200_000_000_000, // 2024-01-01
             token: vec![1, 2, 3, 4],
             metadata: serde_json::json!({
@@ -112,8 +114,10 @@ mod tests {
                 tsa_url,
                 timestamp,
                 token_der,
+                target,
                 ..
             } => {
+                assert_eq!(target, "data_tree_root");
                 assert_eq!(tsa_url, "https://freetsa.org/tsr");
                 assert!(timestamp.starts_with("2024-01-01"));
                 assert!(token_der.starts_with("base64:"));
@@ -126,8 +130,10 @@ mod tests {
     fn test_convert_bitcoin_ots_anchor() {
         let anchor = Anchor {
             anchor_type: AnchorType::BitcoinOts,
-            anchored_hash: [0u8; 32],
-            tree_size: 50000,
+            target: "super_root".to_string(),
+            anchored_hash: [1u8; 32],
+            tree_size: 0,
+            super_tree_size: Some(5),
             timestamp: 1_704_067_200_000_000_000,
             token: vec![5, 6, 7, 8],
             metadata: serde_json::json!({
@@ -140,12 +146,14 @@ mod tests {
 
         match receipt_anchor {
             ReceiptAnchor::BitcoinOts {
+                target,
                 timestamp,
                 bitcoin_block_height,
                 bitcoin_block_time,
                 ots_proof,
                 ..
             } => {
+                assert_eq!(target, "super_root");
                 assert_eq!(timestamp, "2024-01-01T12:00:00Z");
                 assert_eq!(bitcoin_block_height, 825000);
                 assert_eq!(bitcoin_block_time, "2024-01-01T12:00:00Z");
@@ -159,8 +167,10 @@ mod tests {
     fn test_convert_bitcoin_ots_anchor_with_unix_timestamp() {
         let anchor = Anchor {
             anchor_type: AnchorType::BitcoinOts,
-            anchored_hash: [0u8; 32],
-            tree_size: 75000,
+            target: "super_root".to_string(),
+            anchored_hash: [2u8; 32],
+            tree_size: 0,
+            super_tree_size: Some(10),
             timestamp: 1_704_067_200_000_000_000,
             token: vec![9, 10, 11, 12],
             metadata: serde_json::json!({
@@ -173,12 +183,14 @@ mod tests {
 
         match receipt_anchor {
             ReceiptAnchor::BitcoinOts {
+                target,
                 timestamp,
                 bitcoin_block_height,
                 bitcoin_block_time,
                 ots_proof,
                 ..
             } => {
+                assert_eq!(target, "super_root");
                 assert_eq!(bitcoin_block_height, 830000);
                 // Check that Unix timestamp was converted to ISO 8601
                 assert!(bitcoin_block_time.starts_with("2024-01-"));
@@ -193,8 +205,10 @@ mod tests {
     fn test_convert_rfc3161_anchor_missing_tsa_url() {
         let anchor = Anchor {
             anchor_type: AnchorType::Rfc3161,
-            anchored_hash: [0u8; 32],
+            target: "data_tree_root".to_string(),
+            anchored_hash: [3u8; 32],
             tree_size: 200,
+            super_tree_size: None,
             timestamp: 1_704_067_200_000_000_000,
             token: vec![13, 14, 15, 16],
             metadata: serde_json::json!({}),

@@ -349,21 +349,6 @@ impl IndexStore {
         Ok(())
     }
 
-    /// Get trees that need OTS submission (pending_bitcoin but no anchor)
-    pub fn get_trees_without_bitcoin_anchor(&self) -> rusqlite::Result<Vec<TreeRecord>> {
-        let conn = self.connection();
-        let mut stmt = conn.prepare(
-            "SELECT id, origin_id, status, start_size, end_size, root_hash, created_at,
-                    first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id, prev_tree_id
-             FROM trees
-             WHERE status = 'pending_bitcoin' AND bitcoin_anchor_id IS NULL
-             ORDER BY closed_at ASC",
-        )?;
-
-        let rows = stmt.query_map([], row_to_tree)?;
-        rows.collect::<Result<Vec<_>, _>>()
-    }
-
     /// Update first_entry_at for active tree (idempotent - only updates if NULL)
     ///
     /// Called on every append_batch, but only affects the first batch in a new tree.

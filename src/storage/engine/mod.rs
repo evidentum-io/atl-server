@@ -511,6 +511,20 @@ impl Storage for StorageEngine {
         })
     }
 
+    fn get_super_root(&self, super_tree_size: u64) -> crate::error::ServerResult<[u8; 32]> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                if super_tree_size == 0 {
+                    return Ok([0u8; 32]);
+                }
+                let mut super_slabs = self.super_slabs.write().await;
+                super_slabs.get_root(super_tree_size).map_err(|e| {
+                    crate::error::ServerError::Storage(crate::error::StorageError::Io(e))
+                })
+            })
+        })
+    }
+
     fn is_initialized(&self) -> bool {
         // Storage is considered initialized if tree_state has been set
         true

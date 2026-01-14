@@ -121,8 +121,10 @@ impl Anchorer for Rfc3161Client {
         Ok(AnchorResult {
             anchor: Anchor {
                 anchor_type: AnchorType::Rfc3161,
+                target: "data_tree_root".to_string(),
                 anchored_hash: request.hash,
                 tree_size: request.tree_size,
+                super_tree_size: None,
                 timestamp: response.timestamp,
                 token: response.token_der,
                 metadata: serde_json::json!({
