@@ -70,6 +70,15 @@ pub struct TreeRecord {
     pub prev_tree_id: Option<i64>,
 }
 
+/// Info about a closed tree for recovery
+#[derive(Debug, Clone)]
+pub struct ClosedTreeInfo {
+    pub id: i64,
+    pub root_hash: [u8; 32],
+    #[allow(dead_code)] // Used for ordering, may be useful for logging
+    pub closed_at: i64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TreeStatus {
     Active,
@@ -334,6 +343,42 @@ impl IndexStore {
                 row_to_tree,
             )
             .optional()
+    }
+
+    /// Get all closed trees ordered by close time
+    ///
+    /// Used by recovery to reconcile Super-Tree.
+    /// Returns trees in the order they were closed (by closed_at ASC).
+    pub fn get_closed_trees_ordered(&self) -> rusqlite::Result<Vec<ClosedTreeInfo>> {
+        let conn = self.connection();
+        let mut stmt = conn.prepare(
+            "SELECT id, root_hash, closed_at
+             FROM trees
+             WHERE status != 'active'
+             ORDER BY closed_at ASC",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let id: i64 = row.get(0)?;
+            let root_hash_vec: Vec<u8> = row.get(1)?;
+            let closed_at: i64 = row.get(2)?;
+
+            let root_hash: [u8; 32] = root_hash_vec.try_into().map_err(|_| {
+                rusqlite::Error::InvalidColumnType(
+                    1,
+                    "root_hash".to_string(),
+                    rusqlite::types::Type::Blob,
+                )
+            })?;
+
+            Ok(ClosedTreeInfo {
+                id,
+                root_hash,
+                closed_at,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>()
     }
 
     /// Update tree first_entry_at (called on first entry append)

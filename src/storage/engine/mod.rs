@@ -92,7 +92,7 @@ impl StorageEngine {
         )?;
 
         // Initialize Super-Tree SlabManager
-        let super_slabs = SlabManager::new(
+        let mut super_slabs = SlabManager::new(
             super_slab_dir,
             SlabConfig {
                 max_leaves: config.slab_capacity,
@@ -108,6 +108,7 @@ impl StorageEngine {
             &mut wal,
             &mut slabs,
             &mut index,
+            &mut super_slabs,
             u64::from(config.slab_capacity),
         )
         .await?;
