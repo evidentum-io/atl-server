@@ -36,6 +36,8 @@ pub struct BatchInsert {
     pub metadata_hash: [u8; 32],
     pub metadata_cleartext: Option<String>,
     pub external_id: Option<String>,
+    /// ID of active tree at insert time (REQUIRED - links entry to tree)
+    pub tree_id: i64,
 }
 
 /// SQLite index operations
@@ -315,8 +317,8 @@ impl IndexStore {
 fn insert_batch_inner(tx: &Transaction, entries: &[BatchInsert]) -> rusqlite::Result<()> {
     let mut stmt = tx.prepare_cached(
         "INSERT INTO entries (id, leaf_index, slab_id, slab_offset, payload_hash, metadata_hash,
-                              metadata_cleartext, external_id, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                              metadata_cleartext, external_id, tree_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
     )?;
 
     let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
@@ -331,6 +333,7 @@ fn insert_batch_inner(tx: &Transaction, entries: &[BatchInsert]) -> rusqlite::Re
             entry.metadata_hash.as_slice(),
             entry.metadata_cleartext.as_ref(),
             entry.external_id.as_ref(),
+            entry.tree_id,
             now,
         ])?;
     }
@@ -434,6 +437,9 @@ mod tests {
         let mut store = IndexStore::open(&path).unwrap();
         store.initialize().unwrap();
 
+        // Create active tree first
+        let tree_id = store.create_active_tree(&[0u8; 32], 0).unwrap();
+
         let entries: Vec<BatchInsert> = (0..100)
             .map(|i| BatchInsert {
                 id: uuid::Uuid::new_v4(),
@@ -444,6 +450,7 @@ mod tests {
                 metadata_hash: [0u8; 32],
                 metadata_cleartext: None,
                 external_id: None,
+                tree_id,
             })
             .collect();
 
@@ -467,6 +474,9 @@ mod tests {
         let mut store = IndexStore::open(&path).unwrap();
         store.initialize().unwrap();
 
+        // Create active tree first
+        let tree_id = store.create_active_tree(&[0u8; 32], 0).unwrap();
+
         let id = uuid::Uuid::new_v4();
         let entry = BatchInsert {
             id,
@@ -477,6 +487,7 @@ mod tests {
             metadata_hash: [0u8; 32],
             metadata_cleartext: Some(r#"{"test": true}"#.to_string()),
             external_id: Some("ext-123".to_string()),
+            tree_id,
         };
 
         store.insert_batch(&[entry]).unwrap();
@@ -504,6 +515,9 @@ mod tests {
         let mut store = IndexStore::open(&path).unwrap();
         store.initialize().unwrap();
 
+        // Create active tree first
+        let tree_id = store.create_active_tree(&[0u8; 32], 0).unwrap();
+
         let entries: Vec<BatchInsert> = (0..10_000)
             .map(|i| BatchInsert {
                 id: uuid::Uuid::new_v4(),
@@ -514,6 +528,7 @@ mod tests {
                 metadata_hash: [0u8; 32],
                 metadata_cleartext: None,
                 external_id: None,
+                tree_id,
             })
             .collect();
 

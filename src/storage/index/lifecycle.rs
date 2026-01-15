@@ -418,7 +418,7 @@ impl IndexStore {
 
     /// Get data_tree_index for a tree (used by RECEIPT-1)
     ///
-    /// Returns None if tree is still active or not found.
+    /// Returns None if tree is still active, not found, or has invalid (negative) value.
     #[allow(dead_code)]
     pub fn get_tree_data_tree_index(&self, tree_id: i64) -> rusqlite::Result<Option<u64>> {
         self.connection()
@@ -427,7 +427,21 @@ impl IndexStore {
                 params![tree_id],
                 |row| row.get::<_, Option<i64>>(0),
             )
-            .map(|opt| opt.map(|v| v as u64))
+            .map(|opt| {
+                opt.and_then(|v| {
+                    if v >= 0 {
+                        Some(v as u64)
+                    } else {
+                        // Defensive: negative values indicate data corruption
+                        tracing::error!(
+                            tree_id = tree_id,
+                            value = v,
+                            "Negative data_tree_index in database - possible data corruption"
+                        );
+                        None
+                    }
+                })
+            })
     }
 }
 

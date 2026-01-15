@@ -4,11 +4,13 @@ use base64::Engine;
 use chrono::{DateTime, Utc};
 
 /// Format hash as "sha256:hex"
+#[allow(dead_code)]
 pub fn format_hash(hash: &[u8; 32]) -> String {
     format!("sha256:{}", hex::encode(hash))
 }
 
 /// Format Ed25519 signature as "base64:..."
+#[allow(dead_code)]
 pub fn format_signature(sig: &[u8; 64]) -> String {
     format!(
         "base64:{}",

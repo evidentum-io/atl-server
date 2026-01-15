@@ -55,6 +55,14 @@ pub async fn recover(
         }
         tracing::debug!("replaying batch {}", batch.batch_id);
 
+        // Get active tree ID for recovery entries
+        let active_tree_id = index
+            .get_active_tree()?
+            .ok_or_else(|| {
+                crate::error::StorageError::QueryFailed("No active tree during recovery".into())
+            })?
+            .id;
+
         // Convert WAL entries to BatchInsert format
         let batch_inserts: Vec<BatchInsert> = batch
             .entries
@@ -87,6 +95,7 @@ pub async fn recover(
                     metadata_hash: entry.metadata_hash,
                     metadata_cleartext,
                     external_id,
+                    tree_id: active_tree_id,
                 }
             })
             .collect();

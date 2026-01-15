@@ -12,6 +12,14 @@ async fn create_test_engine(origin: [u8; 32]) -> (StorageEngine, TempDir) {
     };
 
     let engine = StorageEngine::new(config, origin).await.unwrap();
+
+    // Create initial active tree (normally done by tree_closer)
+    {
+        let index = engine.index_store();
+        let index_lock = index.lock().await;
+        index_lock.create_active_tree(&origin, 0).unwrap();
+    }
+
     (engine, dir)
 }
 
@@ -54,6 +62,13 @@ async fn test_crash_recovery() {
             ..Default::default()
         };
         let engine = StorageEngine::new(config, origin).await.unwrap();
+
+        // Create initial active tree (normally done by tree_closer)
+        {
+            let index = engine.index_store();
+            let index_lock = index.lock().await;
+            index_lock.create_active_tree(&origin, 0).unwrap();
+        }
 
         let params = vec![AppendParams {
             payload_hash: [42u8; 32],
@@ -134,8 +149,7 @@ async fn test_rotate_tree_inserts_genesis_into_slab() {
     // Create initial active tree (normally done by tree_closer)
     let origin_id = engine.origin_id();
     {
-        let index = engine.index.lock().await;
-        index.create_active_tree(&origin_id, 0).unwrap();
+        let _index = engine.index.lock().await;
     }
 
     // Append some entries first
@@ -187,8 +201,7 @@ async fn test_rotate_tree_does_not_insert_genesis() {
     // Create initial active tree (normally done by tree_closer)
     let origin_id = engine.origin_id();
     {
-        let index = engine.index.lock().await;
-        index.create_active_tree(&origin_id, 0).unwrap();
+        let _index = engine.index.lock().await;
     }
 
     // Append some entries first
@@ -235,8 +248,7 @@ async fn test_rotate_tree_updates_cache() {
     // Create initial active tree (normally done by tree_closer)
     let origin_id = engine.origin_id();
     {
-        let index = engine.index.lock().await;
-        index.create_active_tree(&origin_id, 0).unwrap();
+        let _index = engine.index.lock().await;
     }
 
     // Append some entries first
@@ -277,8 +289,7 @@ async fn test_rotate_tree_returns_correct_metadata() {
     // Create initial active tree (normally done by tree_closer)
     let origin_id = engine.origin_id();
     {
-        let index = engine.index.lock().await;
-        index.create_active_tree(&origin_id, 0).unwrap();
+        let _index = engine.index.lock().await;
     }
 
     // Append some entries first
@@ -327,8 +338,7 @@ async fn test_rotate_tree_appends_to_super_tree() {
     // Create initial active tree (normally done by tree_closer)
     let origin_id = engine.origin_id();
     {
-        let index = engine.index.lock().await;
-        index.create_active_tree(&origin_id, 0).unwrap();
+        let _index = engine.index.lock().await;
     }
 
     // Append some entries first

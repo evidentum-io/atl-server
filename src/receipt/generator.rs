@@ -222,7 +222,7 @@ pub async fn generate_receipt(
         key_id: format_hash(&checkpoint.key_id),
     };
 
-    // 7. Generate super_proof (NEW for v2.0)
+    // 7. Generate super_proof (may be None for active tree entries)
     let super_proof = generate_super_proof(entry_id, storage).await?;
 
     // 8. Get all anchors
@@ -232,16 +232,34 @@ pub async fn generate_receipt(
         Vec::new()
     };
 
-    // 9. Filter anchors based on super_tree coverage (NEW for v2.0)
-    let data_tree_index = super_proof.data_tree_index;
-    let filtered_anchors = select_anchors_for_receipt(&all_anchors, data_tree_index);
+    // 9. Filter anchors based on super_tree coverage (only if super_proof available)
+    let filtered_anchors = if let Some(ref proof) = super_proof {
+        select_anchors_for_receipt(&all_anchors, proof.data_tree_index)
+    } else {
+        // No super_proof yet, include TSA anchors only
+        all_anchors
+            .iter()
+            .filter(|a| matches!(a.anchor_type, crate::traits::anchor::AnchorType::Rfc3161))
+            .cloned()
+            .collect()
+    };
 
-    // 10. Generate upgrade_url if template configured and no confirmed OTS (NEW for v2.0)
+    // 10. Generate upgrade_url logic
+    let has_super_proof = super_proof.is_some();
     let has_confirmed_ots = filtered_anchors.iter().any(|a| {
         matches!(a.anchor_type, crate::traits::anchor::AnchorType::BitcoinOts)
             && a.metadata.get("status").and_then(|v| v.as_str()) == Some("confirmed")
     });
-    let upgrade_url = generate_upgrade_url(&options, entry_id, has_confirmed_ots);
+
+    // upgrade_url: show when no super_proof OR no confirmed OTS
+    let upgrade_url = if !has_super_proof || !has_confirmed_ots {
+        options
+            .upgrade_url_template
+            .as_ref()
+            .map(|template| template.replace("{entry_id}", &entry_id.to_string()))
+    } else {
+        None
+    };
 
     // 11. Generate consistency proof (Split-View protection)
     let consistency_proof = determine_consistency_proof(storage, tree_size, &options)?;
@@ -299,31 +317,6 @@ fn create_signed_checkpoint(
     checkpoint
 }
 
-/// Generate upgrade URL from template
-///
-/// Returns None if:
-/// - No template configured
-/// - Receipt already has confirmed OTS
-///
-/// # Arguments
-/// * `options` - Receipt generation options containing template
-/// * `entry_id` - Entry UUID to substitute in template
-/// * `has_confirmed_ots` - Whether receipt already has confirmed OTS anchor
-fn generate_upgrade_url(
-    options: &ReceiptOptions,
-    entry_id: &Uuid,
-    has_confirmed_ots: bool,
-) -> Option<String> {
-    if has_confirmed_ots {
-        return None; // Receipt-Full, no upgrade needed
-    }
-
-    options
-        .upgrade_url_template
-        .as_ref()
-        .map(|template| template.replace("{entry_id}", &entry_id.to_string()))
-}
-
 /// Select anchors that are valid for v2.0 receipt with super_proof
 ///
 /// - TSA anchors: include if target matches entry's tree root
@@ -367,17 +360,18 @@ fn select_anchors_for_receipt(
 /// * `storage` - StorageEngine with access to super_slabs and index_store
 ///
 /// # Returns
-/// * `atl_core::SuperProof` ready for inclusion in receipt
+/// * `Ok(Some(proof))` - Entry's tree is closed and in Super-Tree
+/// * `Ok(None)` - Entry's tree is active (not yet in Super-Tree)
+/// * `Err(...)` - Only for real errors (DB failure, entry not found, etc.)
 ///
 /// # Errors
-/// * `ServerError::EntryNotInTree` if entry not in tree
-/// * `ServerError::TreeNotClosed` if entry's tree not yet in Super-Tree
-/// * `ServerError::SuperTreeNotInitialized` if no trees closed yet
+/// * `ServerError::EntryNotFound` if entry doesn't exist
+/// * `ServerError::Storage` for storage errors
 #[allow(dead_code)]
 async fn generate_super_proof(
     entry_id: &Uuid,
     storage: &StorageEngine,
-) -> ServerResult<atl_core::SuperProof> {
+) -> ServerResult<Option<atl_core::SuperProof>> {
     // 1. Get entry's tree info
     let entry = {
         let index_store = storage.index_store();
@@ -387,31 +381,61 @@ async fn generate_super_proof(
             .ok_or_else(|| ServerError::EntryNotFound(entry_id.to_string()))?
     };
 
-    let tree_id = entry
-        .tree_id
-        .ok_or_else(|| ServerError::EntryNotInTree(entry_id.to_string()))?;
+    // 2. Check if entry has tree_id
+    let tree_id = match entry.tree_id {
+        Some(id) => id,
+        None => {
+            // Entry in active tree - no super_proof available
+            tracing::debug!(
+                entry_id = %entry_id,
+                "Entry in active tree, super_proof not available"
+            );
+            return Ok(None);
+        }
+    };
 
-    // 2. Get data_tree_index from trees table (CHAIN-1 added this column)
+    // 3. Check if tree has data_tree_index (is in Super-Tree)
     let data_tree_index = {
         let index_store = storage.index_store();
         let index = index_store.lock().await;
-        index
-            .get_tree_data_tree_index(tree_id)?
-            .ok_or(ServerError::TreeNotClosed)?
+        match index.get_tree_data_tree_index(tree_id)? {
+            Some(idx) => idx,
+            None => {
+                // Tree exists but not yet in Super-Tree (unusual but possible)
+                tracing::warn!(tree_id = tree_id, "Tree exists but data_tree_index is NULL");
+                return Ok(None);
+            }
+        }
     };
 
-    // 3. Get Super-Tree state
+    // 4. Get Super-Tree state
     let (genesis_super_root, super_tree_size) = {
         let index_store = storage.index_store();
         let index = index_store.lock().await;
-        let genesis = index
-            .get_super_genesis_root()?
-            .ok_or(ServerError::SuperTreeNotInitialized)?;
+        let genesis = match index.get_super_genesis_root()? {
+            Some(g) => g,
+            None => {
+                // Super-Tree not initialized (should not happen after first tree close)
+                tracing::warn!("Super-Tree genesis root not found");
+                return Ok(None);
+            }
+        };
         let size = index.get_super_tree_size()?;
         (genesis, size)
     };
 
-    // 4. Get inclusion proof (direct SlabManager call)
+    // 5. Validate data_tree_index is within bounds
+    if data_tree_index >= super_tree_size {
+        // Data corruption or race condition
+        tracing::error!(
+            data_tree_index = data_tree_index,
+            super_tree_size = super_tree_size,
+            "data_tree_index out of bounds"
+        );
+        return Ok(None);
+    }
+
+    // 6. Get inclusion proof (direct SlabManager call)
     let inclusion_path = {
         let mut super_slabs = storage.super_slabs().write().await;
         super_slabs
@@ -442,13 +466,98 @@ async fn generate_super_proof(
     };
 
     // 7. Assemble atl_core::SuperProof (uses existing type)
-    Ok(atl_core::SuperProof {
+    Ok(Some(atl_core::SuperProof {
         genesis_super_root: format_hash(&genesis_super_root),
         data_tree_index,
         super_tree_size,
         super_root: format_hash(&super_root),
         inclusion: inclusion_path.iter().map(format_hash).collect(),
         consistency_to_origin: consistency_path.iter().map(format_hash).collect(),
+    }))
+}
+
+/// Build an immediate receipt from dispatch result
+///
+/// Used for POST `/v1/anchor` responses where entry is just appended
+/// and not yet fully indexed. Does NOT query storage for entry data.
+///
+/// # Arguments
+/// * `dispatch_result` - Result from sequencer dispatch
+/// * `payload_hash` - Original payload hash from request
+/// * `metadata` - Original metadata from request
+/// * `storage` - Storage engine for tree head and origin
+/// * `signer` - Checkpoint signer
+/// * `base_url` - Server base URL for `upgrade_url`
+///
+/// # Returns
+/// * `Receipt` with:
+///   - `spec_version` = "2.0.0"
+///   - `super_proof` = None (tree not closed, use upgrade_url to get full proof)
+///   - `anchors` = [] (no anchors yet)
+///   - `upgrade_url` = `Some(...)` (REQUIRED for immediate receipts)
+///
+/// # Notes
+/// * Returns `super_proof = None` (entry in active tree)
+/// * Clients MUST use `upgrade_url` to get full receipt with valid `super_proof`
+/// * Does NOT include anchors (none exist yet)
+/// * Does NOT query storage for entry (uses `dispatch_result`)
+///
+/// # Errors
+/// * `ServerError::Storage` if inclusion proof generation fails
+pub fn build_immediate_receipt(
+    dispatch_result: &crate::traits::dispatcher::DispatchResult,
+    payload_hash: [u8; 32],
+    metadata: Option<serde_json::Value>,
+    storage: &StorageEngine,
+    signer: &CheckpointSigner,
+    base_url: &str,
+) -> ServerResult<Receipt> {
+    let entry_id = dispatch_result.result.id;
+    let leaf_index = dispatch_result.result.leaf_index;
+    let tree_size = dispatch_result.result.tree_head.tree_size;
+    let root_hash = dispatch_result.result.tree_head.root_hash;
+
+    // Get origin from storage (static, always available)
+    let origin = storage.origin_id();
+
+    // Create and sign checkpoint
+    let timestamp = current_timestamp_nanos();
+    let checkpoint = create_signed_checkpoint(origin, tree_size, root_hash, timestamp, signer);
+
+    let checkpoint_json = CheckpointJson {
+        origin: format_hash(&checkpoint.origin),
+        tree_size: checkpoint.tree_size,
+        root_hash: format_hash(&checkpoint.root_hash),
+        timestamp: checkpoint.timestamp,
+        signature: format_signature(&checkpoint.signature),
+        key_id: format_hash(&checkpoint.key_id),
+    };
+
+    // Generate inclusion proof from dispatch result
+    // The sequencer already indexed the entry synchronously
+    let inclusion_proof = storage.get_inclusion_proof(&entry_id, Some(tree_size))?;
+
+    // Generate upgrade URL (REQUIRED for immediate receipts)
+    let upgrade_url = Some(format!("{}/v1/anchor/{}", base_url, entry_id));
+
+    Ok(Receipt {
+        spec_version: "2.0.0".to_string(),
+        upgrade_url,
+        entry: ReceiptEntry {
+            id: entry_id,
+            payload_hash: format_hash(&payload_hash),
+            metadata: metadata.unwrap_or(serde_json::Value::Null),
+        },
+        proof: ReceiptProof {
+            tree_size,
+            root_hash: format_hash(&root_hash),
+            inclusion_path: inclusion_proof.path.iter().map(format_hash).collect(),
+            leaf_index,
+            checkpoint: checkpoint_json,
+            consistency_proof: None, // Not needed for immediate receipt
+        },
+        super_proof: None, // Entry in active tree, not yet in Super-Tree
+        anchors: vec![],   // No anchors yet
     })
 }
 

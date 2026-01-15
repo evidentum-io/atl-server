@@ -196,6 +196,7 @@ pub struct LocalDispatcher {
     /// Checkpoint signer for Ed25519 signatures
     signer: crate::receipt::CheckpointSigner,
     /// Storage backend for read operations
+    #[allow(dead_code)]
     storage: Arc<dyn crate::traits::Storage>,
 }
 

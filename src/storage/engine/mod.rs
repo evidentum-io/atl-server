@@ -325,6 +325,17 @@ impl Storage for StorageEngine {
         };
 
         // 4. Update SQLite
+        // Get active tree ID first (required for tree_id field)
+        let active_tree_id = {
+            let index = self.index.lock().await;
+            index
+                .get_active_tree()?
+                .ok_or_else(|| {
+                    crate::error::StorageError::QueryFailed("No active tree found".into())
+                })?
+                .id
+        };
+
         let batch_inserts: Vec<BatchInsert> = entries
             .iter()
             .map(|(id, leaf_index, _, p)| {
@@ -340,6 +351,7 @@ impl Storage for StorageEngine {
                     metadata_hash: p.metadata_hash,
                     metadata_cleartext: p.metadata_cleartext.as_ref().map(|v| v.to_string()),
                     external_id: p.external_id.clone(),
+                    tree_id: active_tree_id,
                 }
             })
             .collect();
