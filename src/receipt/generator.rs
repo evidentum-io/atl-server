@@ -253,10 +253,12 @@ pub async fn generate_receipt(
 
     // upgrade_url: show when no super_proof OR no confirmed OTS
     let upgrade_url = if !has_super_proof || !has_confirmed_ots {
-        options
-            .upgrade_url_template
-            .as_ref()
-            .map(|template| template.replace("{entry_id}", &entry_id.to_string()))
+        options.upgrade_url_template.as_ref().map(|template| {
+            // Support both {entry_id} and {} placeholders via sequential replace
+            template
+                .replace("{entry_id}", &entry_id.to_string())
+                .replace("{}", &entry_id.to_string())
+        })
     } else {
         None
     };

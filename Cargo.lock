@@ -129,7 +129,7 @@ dependencies = [
 
 [[package]]
 name = "atl-core"
-version = "0.22.0"
+version = "0.22.1"
 dependencies = [
  "base64",
  "bitcoin_hashes",
@@ -145,7 +145,7 @@ dependencies = [
 
 [[package]]
 name = "atl-server"
-version = "0.20.1"
+version = "0.20.2"
 dependencies = [
  "anyhow",
  "async-trait",
