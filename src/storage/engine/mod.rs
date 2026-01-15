@@ -442,9 +442,9 @@ impl Storage for StorageEngine {
     ) -> crate::error::ServerResult<InclusionProof> {
         // First get the entry to find its leaf_index
         let entry = Storage::get_entry(self, entry_id)?;
-        let leaf_index = entry.leaf_index.ok_or_else(|| {
-            crate::error::ServerError::Storage(StorageError::NotFound("entry not found".into()))
-        })?;
+        let leaf_index = entry
+            .leaf_index
+            .ok_or_else(|| crate::error::ServerError::EntryNotInTree(entry_id.to_string()))?;
 
         // Delegate to ProofProvider async method via blocking
         tokio::task::block_in_place(|| {

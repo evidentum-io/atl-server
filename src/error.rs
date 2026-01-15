@@ -68,9 +68,9 @@ pub enum ServerError {
     AuthInvalid,
 
     // ========== Storage Errors ==========
-    /// Storage operation failed
+    /// Storage operation failed (NOT NotFound - that becomes EntryNotFound)
     #[error("storage error: {0}")]
-    Storage(#[from] StorageError),
+    Storage(StorageError),
 
     // ========== Anchoring Errors ==========
     /// Anchoring operation failed
@@ -287,6 +287,15 @@ impl From<rusqlite::Error> for ServerError {
     }
 }
 
+impl From<StorageError> for ServerError {
+    fn from(e: StorageError) -> Self {
+        match e {
+            StorageError::NotFound(msg) => ServerError::EntryNotFound(msg),
+            other => ServerError::Storage(other),
+        }
+    }
+}
+
 // HTTP client errors (for anchoring)
 #[cfg(feature = "rfc3161")]
 impl From<reqwest::Error> for AnchorError {
@@ -361,5 +370,38 @@ mod tests {
     fn test_error_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<ServerError>();
+    }
+
+    #[test]
+    fn test_storage_error_not_found_converts_to_entry_not_found() {
+        let storage_err = StorageError::NotFound("test entry".into());
+        let server_err: ServerError = storage_err.into();
+
+        assert!(matches!(server_err, ServerError::EntryNotFound(_)));
+        assert_eq!(server_err.status_code(), StatusCode::NOT_FOUND);
+        assert_eq!(server_err.error_code(), "ENTRY_NOT_FOUND");
+    }
+
+    #[test]
+    fn test_storage_error_database_converts_to_storage() {
+        let storage_err = StorageError::Database("connection lost".into());
+        let server_err: ServerError = storage_err.into();
+
+        assert!(matches!(server_err, ServerError::Storage(_)));
+        assert_eq!(server_err.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(server_err.error_code(), "STORAGE_ERROR");
+    }
+
+    #[test]
+    fn test_storage_error_io_converts_to_storage() {
+        let io_err = std::io::Error::other("disk full");
+        let storage_err = StorageError::Io(io_err);
+        let server_err: ServerError = storage_err.into();
+
+        assert!(matches!(
+            server_err,
+            ServerError::Storage(StorageError::Io(_))
+        ));
+        assert_eq!(server_err.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }
