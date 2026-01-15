@@ -48,6 +48,7 @@ pub fn proto_checkpoint_to_core(cp: proto::Checkpoint) -> ServerResult<atl_core:
 }
 
 /// Convert proto ReceiptResponse to trait ReceiptResponse
+#[allow(dead_code)]
 pub fn proto_receipt_to_trait(response: proto::ReceiptResponse) -> ServerResult<ReceiptResponse> {
     let entry = response
         .entry
@@ -109,6 +110,7 @@ pub fn proto_receipt_to_trait(response: proto::ReceiptResponse) -> ServerResult<
 }
 
 /// Convert proto ExternalAnchor to trait Anchor
+#[allow(dead_code)]
 fn proto_external_anchor_to_trait(a: proto::ExternalAnchor) -> Anchor {
     let metadata: serde_json::Value = serde_json::from_str(&a.metadata_json).unwrap_or_default();
 

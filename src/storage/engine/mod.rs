@@ -321,7 +321,12 @@ impl Storage for StorageEngine {
         let leaf_hashes: Vec<[u8; 32]> = entries.iter().map(|(_, _, h, _)| *h).collect();
         let new_root = {
             let mut slabs = self.slabs.write().await;
-            slabs.append_leaves(&leaf_hashes)?
+            let root = slabs.append_leaves(&leaf_hashes)?;
+            // CRITICAL: Flush to disk before updating tree_state.
+            // Without this, proof generation may fail with "missing node" error
+            // if client requests proof immediately after append returns.
+            slabs.flush()?;
+            root
         };
 
         // 4. Update SQLite
