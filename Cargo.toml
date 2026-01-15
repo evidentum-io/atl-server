@@ -1,10 +1,10 @@
 [package]
 name = "atl-server"
-version = "0.20.4"
+version = "0.20.5"
 edition = "2021"
 rust-version = "1.92.0"
 authors = ["Dmitrii Zatona <dmitrii@zatona.dev>"]
-description = "Autonomous notarization primitive - HTTP server for ATL Protocol v1"
+description = "Autonomous notarization primitive - HTTP server for ATL Protocol v2"
 license = "Apache-2.0"
 repository = "https://github.com/evidentum-io/atl-server"
 keywords = ["transparency-log", "merkle-tree", "timestamping", "notarization"]

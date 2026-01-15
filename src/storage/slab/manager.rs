@@ -215,6 +215,17 @@ impl SlabManager {
         self.tree_size
     }
 
+    /// Set tree size from external source
+    ///
+    /// Used to restore Super-Tree state from SQLite on startup.
+    /// Data-Tree uses WAL replay instead.
+    ///
+    /// # Arguments
+    /// * `size` - Known tree size from persistent storage
+    pub fn set_tree_size(&mut self, size: u64) {
+        self.tree_size = size;
+    }
+
     /// Update tree after appending a leaf
     ///
     /// Recomputes all affected parent nodes bottom-up.

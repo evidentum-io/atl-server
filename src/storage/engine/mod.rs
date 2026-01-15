@@ -103,6 +103,19 @@ impl StorageEngine {
         let mut index = IndexStore::open(&config.db_path())?;
         index.initialize()?;
 
+        // Initialize Super-Tree size from SQLite BEFORE recovery
+        // This ensures reconciliation sees the correct Super-Tree size.
+        // Must happen BEFORE recovery::recover() is called.
+        let super_tree_size = index
+            .get_super_tree_size()
+            .map_err(|e| StorageError::Database(e.to_string()))?;
+        super_slabs.set_tree_size(super_tree_size);
+
+        tracing::debug!(
+            "init: Super-Tree size restored from SQLite: {}",
+            super_tree_size
+        );
+
         // Run crash recovery
         recovery::recover(
             &mut wal,
