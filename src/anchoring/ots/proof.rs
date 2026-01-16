@@ -1,49 +1,42 @@
 //! OTS proof status detection and verification
 
 use crate::anchoring::error::AnchorError;
+use crate::anchoring::ots::bitcoin;
 use crate::anchoring::ots::types::OtsStatus;
 use atl_core::ots::{Attestation, DetachedTimestampFile, Timestamp};
+use std::time::Duration;
 
 /// Detect proof status from timestamp attestations
-pub fn detect_status(timestamp: &Timestamp) -> OtsStatus {
+pub async fn detect_status(
+    timestamp: &Timestamp,
+    timeout: Duration,
+) -> Result<OtsStatus, AnchorError> {
     // Walk the timestamp tree to find attestations
     let attestations = collect_attestations(&timestamp.first_step);
 
     for attestation in attestations {
         match attestation {
             Attestation::Bitcoin { height } => {
-                // For Bitcoin attestations, we don't have the exact timestamp
-                // We approximate it using block time (~10 minutes per block)
-                let approx_time = estimate_block_time(*height);
-                return OtsStatus::Confirmed {
+                // Fetch real timestamp from Bitcoin blockchain APIs
+                let block_time = bitcoin::get_block_timestamp(*height, timeout).await?;
+                return Ok(OtsStatus::Confirmed {
                     block_height: *height,
-                    block_time: approx_time,
-                };
+                    block_time,
+                });
             }
             Attestation::Pending { uri } => {
-                return OtsStatus::Pending {
+                return Ok(OtsStatus::Pending {
                     calendar_url: uri.clone(),
-                };
+                });
             }
             _ => continue,
         }
     }
 
     // Default to pending if no recognized attestations
-    OtsStatus::Pending {
+    Ok(OtsStatus::Pending {
         calendar_url: String::new(),
-    }
-}
-
-/// Estimate Unix timestamp (seconds) from Bitcoin block height
-///
-/// Very rough approximation: block 0 was at 2009-01-03 18:15:05 UTC (1231006505)
-/// Average block time is ~600 seconds (10 minutes)
-fn estimate_block_time(height: u64) -> u64 {
-    const GENESIS_TIME: u64 = 1_231_006_505; // Block 0 timestamp
-    const AVG_BLOCK_TIME: u64 = 600; // 10 minutes in seconds
-
-    GENESIS_TIME + (height * AVG_BLOCK_TIME)
+    })
 }
 
 /// Collect all attestations from a timestamp tree
@@ -137,8 +130,8 @@ mod tests {
     use super::*;
     use atl_core::ots::{Step, StepData};
 
-    #[test]
-    fn test_detect_pending_status() {
+    #[tokio::test]
+    async fn test_detect_pending_status() {
         let hash = vec![1u8; 32];
         let pending_att = Attestation::Pending {
             uri: "https://test.calendar".to_string(),
@@ -155,12 +148,14 @@ mod tests {
             first_step: step,
         };
 
-        let status = detect_status(&timestamp);
+        let timeout = Duration::from_secs(30);
+        let status = detect_status(&timestamp, timeout).await.unwrap();
         assert!(matches!(status, OtsStatus::Pending { .. }));
     }
 
-    #[test]
-    fn test_detect_confirmed_status() {
+    #[tokio::test]
+    #[ignore] // Requires network access - will be covered in BBT-3 with pre-populated cache
+    async fn test_detect_confirmed_status() {
         let hash = vec![2u8; 32];
         let bitcoin_att = Attestation::Bitcoin { height: 700000 };
 
@@ -175,7 +170,8 @@ mod tests {
             first_step: step,
         };
 
-        let status = detect_status(&timestamp);
+        let timeout = Duration::from_secs(10);
+        let status = detect_status(&timestamp, timeout).await.unwrap();
         assert!(matches!(status, OtsStatus::Confirmed { .. }));
     }
 
