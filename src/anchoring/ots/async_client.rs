@@ -5,6 +5,7 @@ use crate::anchoring::ots::client::OpenTimestampsClient;
 use crate::anchoring::ots::proof::{detect_status, parse_proof};
 use crate::anchoring::ots::types::{OtsConfig, OtsStatus};
 use async_trait::async_trait;
+use std::time::Duration;
 
 /// Result of a successful OTS upgrade
 #[derive(Debug, Clone)]
@@ -31,19 +32,25 @@ pub trait OtsClient: Send + Sync {
 /// Async wrapper around OpenTimestampsClient
 pub struct AsyncOtsClient {
     client: OpenTimestampsClient,
+    timeout: Duration,
 }
 
 impl AsyncOtsClient {
     /// Create a new async OTS client with default configuration
     pub fn new() -> Result<Self, AnchorError> {
+        let config = OtsConfig::default();
         let client = OpenTimestampsClient::new()?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            timeout: Duration::from_secs(config.timeout_secs),
+        })
     }
 
     /// Create a new async OTS client with custom configuration
     pub fn with_config(config: OtsConfig) -> Result<Self, AnchorError> {
+        let timeout = Duration::from_secs(config.timeout_secs);
         let client = OpenTimestampsClient::with_config(config)?;
-        Ok(Self { client })
+        Ok(Self { client, timeout })
     }
 }
 
@@ -69,7 +76,7 @@ impl OtsClient for AsyncOtsClient {
         let file = parse_proof(proof)?;
 
         if let Some(upgraded_file) = self.client.upgrade_proof(&file).await? {
-            let status = detect_status(&upgraded_file.timestamp);
+            let status = detect_status(&upgraded_file.timestamp, self.timeout).await?;
 
             let proof_bytes = upgraded_file.to_bytes().map_err(|e| {
                 AnchorError::InvalidResponse(format!("failed to serialize upgraded proof: {}", e))
