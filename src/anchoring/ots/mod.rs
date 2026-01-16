@@ -7,12 +7,15 @@
 #![allow(dead_code)]
 
 mod async_client;
+mod bitcoin;
 mod calendar;
 mod client;
 mod proof;
 mod types;
 
 pub use async_client::{AsyncOtsClient, OtsClient};
+#[allow(unused_imports)] // Used by future tasks
+pub use bitcoin::get_block_timestamp;
 pub use types::{OtsConfig, OtsStatus};
 
 // Re-exported for integration tests in tests/ (not used in src/)

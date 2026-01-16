@@ -45,6 +45,10 @@ pub enum AnchorError {
     /// ASN.1 encoding/decoding error
     #[error("ASN.1 error: {0}")]
     Asn1Error(String),
+
+    /// Failed to fetch block timestamp from all Bitcoin API providers
+    #[error("Failed to fetch block timestamp for height {height}: {details}")]
+    BlockTimeFetchFailed { height: u64, details: String },
 }
 
 // Conversion from ASN.1 errors

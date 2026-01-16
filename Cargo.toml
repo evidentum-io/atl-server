@@ -1,6 +1,6 @@
 [package]
 name = "atl-server"
-version = "0.21.2"
+version = "0.22.0"
 edition = "2021"
 rust-version = "1.92.0"
 authors = ["Dmitrii Zatona <dmitrii@zatona.dev>"]
@@ -80,7 +80,7 @@ bytes = "1"
 [features]
 default = ["rfc3161", "ots"]
 rfc3161 = ["rasn", "rasn-cms", "reqwest"]
-ots = []  # Uses atl_core::ots (no external deps needed)
+ots = ["reqwest"]  # Needs reqwest for blockchain API lookups
 monitoring = ["betteruptime-heartbeat"]  # Optional Better Uptime heartbeats
 grpc = ["tonic", "prost", "tonic-build"]  # gRPC Node-Sequencer architecture
 full = ["rfc3161", "ots", "monitoring", "grpc"]
