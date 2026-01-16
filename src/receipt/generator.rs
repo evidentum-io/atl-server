@@ -1,6 +1,8 @@
 //! Receipt generation implementation
 
-use atl_core::{Checkpoint, CheckpointJson, Receipt, ReceiptEntry, ReceiptProof};
+use atl_core::{
+    canonicalize_and_hash, Checkpoint, CheckpointJson, Receipt, ReceiptEntry, ReceiptProof,
+};
 use ed25519_dalek::{Signer, SigningKey};
 use uuid::Uuid;
 
@@ -273,6 +275,12 @@ pub async fn generate_receipt(
         entry: ReceiptEntry {
             id: entry.id,
             payload_hash: format_hash(&entry.payload_hash),
+            metadata_hash: format_hash(&canonicalize_and_hash(
+                &entry
+                    .metadata_cleartext
+                    .clone()
+                    .unwrap_or(serde_json::json!({})),
+            )),
             metadata: entry.metadata_cleartext.unwrap_or(serde_json::Value::Null),
         },
         proof: ReceiptProof {
@@ -543,6 +551,9 @@ pub fn build_immediate_receipt(
         entry: ReceiptEntry {
             id: entry_id,
             payload_hash: format_hash(&payload_hash),
+            metadata_hash: format_hash(&canonicalize_and_hash(
+                &metadata.clone().unwrap_or(serde_json::json!({})),
+            )),
             metadata: metadata.unwrap_or(serde_json::Value::Null),
         },
         proof: ReceiptProof {
