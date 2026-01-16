@@ -53,17 +53,18 @@ impl TreeRotator for MockTreeRotator {
         Ok(TreeRotationResult {
             closed_tree_id: 1,
             new_tree_id: 2,
-            genesis_leaf_index: end_size,
+            data_tree_index: 0,
+            super_root: [42u8; 32],
             closed_tree_metadata: ClosedTreeMetadata {
                 tree_id: 1,
                 origin_id: [0u8; 32],
                 root_hash: *root_hash,
                 tree_size: end_size,
-                prev_tree_id: None,
                 closed_at: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+                data_tree_index: 0,
             },
             new_tree_head: TreeHead {
-                tree_size: end_size + 1,
+                tree_size: end_size,
                 root_hash: [1u8; 32],
                 origin: [0u8; 32],
             },
@@ -88,8 +89,9 @@ async fn test_tree_rotator_trait_successful_rotation() {
     let result = result.unwrap();
     assert_eq!(result.closed_tree_id, 1);
     assert_eq!(result.new_tree_id, 2);
-    assert_eq!(result.genesis_leaf_index, end_size);
-    assert_eq!(result.new_tree_head.tree_size, end_size + 1);
+    assert_eq!(result.data_tree_index, 0);
+    assert_eq!(result.super_root, [42u8; 32]);
+    assert_eq!(result.new_tree_head.tree_size, end_size);
 }
 
 #[tokio::test]

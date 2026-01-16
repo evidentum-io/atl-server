@@ -3,6 +3,8 @@
 use std::sync::Arc;
 
 use crate::config::ServerMode;
+use crate::receipt::CheckpointSigner;
+use crate::storage::engine::StorageEngine;
 use crate::traits::{SequencerClient, Storage};
 
 /// Application state shared across handlers
@@ -19,6 +21,14 @@ pub struct AppState {
     /// Direct storage access (None in NODE mode)
     #[allow(dead_code)]
     pub storage: Option<Arc<dyn Storage>>,
+
+    /// StorageEngine for receipt generation (None in NODE mode)
+    #[allow(dead_code)]
+    pub storage_engine: Option<Arc<StorageEngine>>,
+
+    /// Checkpoint signer for receipt generation (None in NODE mode)
+    #[allow(dead_code)]
+    pub signer: Option<Arc<CheckpointSigner>>,
 
     /// Bearer tokens for authentication (None = open mode)
     /// Source: ATL_ACCESS_TOKENS env var (comma-separated)

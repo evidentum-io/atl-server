@@ -29,22 +29,25 @@ pub struct ClosedTreeMetadata {
     pub origin_id: [u8; 32],
     pub root_hash: [u8; 32],
     pub tree_size: u64,
-    pub prev_tree_id: Option<i64>,
     pub closed_at: i64,
+    /// Position in Super-Tree (data tree index)
+    pub data_tree_index: u64,
 }
 
-/// Result of rotating a tree (closing old + creating new with genesis)
+/// Result of rotating a tree (closing old + creating new)
 #[derive(Debug, Clone)]
 pub struct TreeRotationResult {
     /// ID of the tree that was closed
     pub closed_tree_id: i64,
     /// ID of the newly created active tree
     pub new_tree_id: i64,
-    /// Leaf index of the genesis leaf
-    pub genesis_leaf_index: u64,
+    /// Position in Super-Tree (data tree index)
+    pub data_tree_index: u64,
+    /// Super-Tree root hash after append
+    pub super_root: [u8; 32],
     /// Metadata for Chain Index
     pub closed_tree_metadata: ClosedTreeMetadata,
-    /// New tree head after genesis insertion
+    /// New tree head after rotation
     pub new_tree_head: crate::traits::TreeHead,
 }
 
@@ -63,7 +66,15 @@ pub struct TreeRecord {
     pub closed_at: Option<i64>,
     pub tsa_anchor_id: Option<i64>,
     pub bitcoin_anchor_id: Option<i64>,
-    pub prev_tree_id: Option<i64>,
+}
+
+/// Info about a closed tree for recovery
+#[derive(Debug, Clone)]
+pub struct ClosedTreeInfo {
+    pub id: i64,
+    pub root_hash: [u8; 32],
+    #[allow(dead_code)] // Used for ordering, may be useful for logging
+    pub closed_at: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,7 +117,6 @@ fn row_to_tree(row: &rusqlite::Row) -> rusqlite::Result<TreeRecord> {
     let closed_at: Option<i64> = row.get(8)?;
     let tsa_anchor_id: Option<i64> = row.get(9)?;
     let bitcoin_anchor_id: Option<i64> = row.get(10)?;
-    let prev_tree_id: Option<i64> = row.get(11)?;
 
     Ok(TreeRecord {
         id,
@@ -122,7 +132,6 @@ fn row_to_tree(row: &rusqlite::Row) -> rusqlite::Result<TreeRecord> {
         closed_at,
         tsa_anchor_id,
         bitcoin_anchor_id,
-        prev_tree_id,
     })
 }
 
@@ -132,7 +141,7 @@ impl IndexStore {
         self.connection()
             .query_row(
                 "SELECT id, origin_id, status, start_size, end_size, root_hash, created_at,
-                        first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id, prev_tree_id
+                        first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id
                  FROM trees WHERE status = 'active' LIMIT 1",
                 [],
                 row_to_tree,
@@ -159,7 +168,7 @@ impl IndexStore {
         Ok(self.connection().last_insert_rowid())
     }
 
-    /// Close the active tree and create a new one atomically with chain link
+    /// Close the active tree and create a new one atomically
     ///
     /// **IMPORTANT:** This method does NOT insert genesis leaf.
     /// The caller must use `StorageEngine::rotate_tree()` which coordinates
@@ -174,31 +183,31 @@ impl IndexStore {
         origin_id: &[u8; 32],
         end_size: u64,
         root_hash: &[u8; 32],
+        data_tree_index: u64,
     ) -> rusqlite::Result<TreeCloseResult> {
         let mut conn = self.connection_mut();
         let tx = conn.transaction()?;
         let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
 
-        // Get current active tree (with prev_tree_id for chain continuity)
-        let (active_tree_id, prev_tree_id_of_active): (i64, Option<i64>) = tx.query_row(
-            "SELECT id, prev_tree_id FROM trees WHERE status = 'active'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
+        // Get current active tree
+        let active_tree_id: i64 =
+            tx.query_row("SELECT id FROM trees WHERE status = 'active'", [], |row| {
+                row.get(0)
+            })?;
 
-        // Update active tree to pending_bitcoin
+        // Update active tree to pending_bitcoin with data_tree_index
         tx.execute(
-            "UPDATE trees SET status = 'pending_bitcoin', end_size = ?1, root_hash = ?2, closed_at = ?3
-             WHERE id = ?4",
-            params![end_size as i64, root_hash.as_slice(), now, active_tree_id],
+            "UPDATE trees SET status = 'pending_bitcoin', end_size = ?1, root_hash = ?2, closed_at = ?3, data_tree_index = ?4
+             WHERE id = ?5",
+            params![end_size as i64, root_hash.as_slice(), now, data_tree_index as i64, active_tree_id],
         )?;
 
-        // Create new active tree WITH chain link
+        // Create new active tree
         // NOTE: start_size = end_size (genesis will be inserted by caller via rotate_tree)
         tx.execute(
-            "INSERT INTO trees (origin_id, status, start_size, created_at, prev_tree_id)
-             VALUES (?1, 'active', ?2, ?3, ?4)",
-            params![origin_id.as_slice(), end_size as i64, now, active_tree_id],
+            "INSERT INTO trees (origin_id, status, start_size, created_at)
+             VALUES (?1, 'active', ?2, ?3)",
+            params![origin_id.as_slice(), end_size as i64, now],
         )?;
 
         let new_tree_id = tx.last_insert_rowid();
@@ -214,8 +223,8 @@ impl IndexStore {
             origin_id: *origin_id,
             root_hash: *root_hash,
             tree_size: end_size,
-            prev_tree_id: prev_tree_id_of_active,
             closed_at: now,
+            data_tree_index,
         };
 
         Ok(TreeCloseResult {
@@ -240,7 +249,7 @@ impl IndexStore {
         let conn = self.connection();
         let mut stmt = conn.prepare(
             "SELECT id, origin_id, status, start_size, end_size, root_hash, created_at,
-                    first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id, prev_tree_id
+                    first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id
              FROM trees
              WHERE status IN ('pending_bitcoin', 'closed') AND tsa_anchor_id IS NULL
              ORDER BY created_at ASC",
@@ -256,7 +265,7 @@ impl IndexStore {
         let conn = self.connection();
         let mut stmt = conn.prepare(
             "SELECT id, origin_id, status, start_size, end_size, root_hash, created_at,
-                    first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id, prev_tree_id
+                    first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id
              FROM trees WHERE status = 'pending_bitcoin' ORDER BY created_at ASC",
         )?;
 
@@ -289,7 +298,7 @@ impl IndexStore {
         self.connection()
             .query_row(
                 "SELECT id, origin_id, status, start_size, end_size, root_hash, created_at,
-                        first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id, prev_tree_id
+                        first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id
                  FROM trees WHERE id = ?1",
                 params![tree_id],
                 row_to_tree,
@@ -303,7 +312,7 @@ impl IndexStore {
         self.connection()
             .query_row(
                 "SELECT id, origin_id, status, start_size, end_size, root_hash, created_at,
-                        first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id, prev_tree_id
+                        first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id
                  FROM trees
                  WHERE start_size <= ?1 AND end_size > ?1 AND status IN ('pending_bitcoin', 'closed')
                  LIMIT 1",
@@ -322,12 +331,48 @@ impl IndexStore {
         self.connection()
             .query_row(
                 "SELECT id, origin_id, status, start_size, end_size, root_hash, created_at,
-                        first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id, prev_tree_id
+                        first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id
                  FROM trees WHERE bitcoin_anchor_id = ?1 LIMIT 1",
                 params![anchor_id],
                 row_to_tree,
             )
             .optional()
+    }
+
+    /// Get all closed trees ordered by close time
+    ///
+    /// Used by recovery to reconcile Super-Tree.
+    /// Returns trees in the order they were closed (by closed_at ASC).
+    pub fn get_closed_trees_ordered(&self) -> rusqlite::Result<Vec<ClosedTreeInfo>> {
+        let conn = self.connection();
+        let mut stmt = conn.prepare(
+            "SELECT id, root_hash, closed_at
+             FROM trees
+             WHERE status != 'active'
+             ORDER BY closed_at ASC",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let id: i64 = row.get(0)?;
+            let root_hash_vec: Vec<u8> = row.get(1)?;
+            let closed_at: i64 = row.get(2)?;
+
+            let root_hash: [u8; 32] = root_hash_vec.try_into().map_err(|_| {
+                rusqlite::Error::InvalidColumnType(
+                    1,
+                    "root_hash".to_string(),
+                    rusqlite::types::Type::Blob,
+                )
+            })?;
+
+            Ok(ClosedTreeInfo {
+                id,
+                root_hash,
+                closed_at,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>()
     }
 
     /// Update tree first_entry_at (called on first entry append)
@@ -341,21 +386,6 @@ impl IndexStore {
         )?;
 
         Ok(())
-    }
-
-    /// Get trees that need OTS submission (pending_bitcoin but no anchor)
-    pub fn get_trees_without_bitcoin_anchor(&self) -> rusqlite::Result<Vec<TreeRecord>> {
-        let conn = self.connection();
-        let mut stmt = conn.prepare(
-            "SELECT id, origin_id, status, start_size, end_size, root_hash, created_at,
-                    first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id, prev_tree_id
-             FROM trees
-             WHERE status = 'pending_bitcoin' AND bitcoin_anchor_id IS NULL
-             ORDER BY closed_at ASC",
-        )?;
-
-        let rows = stmt.query_map([], row_to_tree)?;
-        rows.collect::<Result<Vec<_>, _>>()
     }
 
     /// Update first_entry_at for active tree (idempotent - only updates if NULL)
@@ -376,7 +406,7 @@ impl IndexStore {
         let conn = self.connection();
         let mut stmt = conn.prepare(
             "SELECT id, origin_id, status, start_size, end_size, root_hash, created_at,
-                    first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id, prev_tree_id
+                    first_entry_at, closed_at, tsa_anchor_id, bitcoin_anchor_id
              FROM trees
              WHERE status IN ('pending_bitcoin', 'closed')
              ORDER BY id ASC",
@@ -384,6 +414,34 @@ impl IndexStore {
 
         let rows = stmt.query_map([], row_to_tree)?;
         rows.collect::<Result<Vec<_>, _>>()
+    }
+
+    /// Get data_tree_index for a tree (used by RECEIPT-1)
+    ///
+    /// Returns None if tree is still active, not found, or has invalid (negative) value.
+    #[allow(dead_code)]
+    pub fn get_tree_data_tree_index(&self, tree_id: i64) -> rusqlite::Result<Option<u64>> {
+        self.connection()
+            .query_row(
+                "SELECT data_tree_index FROM trees WHERE id = ?1",
+                params![tree_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .map(|opt| {
+                opt.and_then(|v| {
+                    if v >= 0 {
+                        Some(v as u64)
+                    } else {
+                        // Defensive: negative values indicate data corruption
+                        tracing::error!(
+                            tree_id = tree_id,
+                            value = v,
+                            "Negative data_tree_index in database - possible data corruption"
+                        );
+                        None
+                    }
+                })
+            })
     }
 }
 
@@ -404,12 +462,12 @@ mod tests {
                 start_size INTEGER NOT NULL,
                 end_size INTEGER,
                 root_hash BLOB,
+                data_tree_index INTEGER,
                 created_at INTEGER NOT NULL,
                 first_entry_at INTEGER,
                 closed_at INTEGER,
                 tsa_anchor_id INTEGER,
-                bitcoin_anchor_id INTEGER,
-                prev_tree_id INTEGER
+                bitcoin_anchor_id INTEGER
             )",
             [],
         )
@@ -460,7 +518,7 @@ mod tests {
 
         // Close tree and create new one
         let result = store
-            .close_tree_and_create_new(&origin_id, end_size, &root_hash)
+            .close_tree_and_create_new(&origin_id, end_size, &root_hash, 0)
             .unwrap();
 
         // Get entry count after close
@@ -502,7 +560,7 @@ mod tests {
 
         // Close tree
         let result = store
-            .close_tree_and_create_new(&origin_id, end_size, &root_hash)
+            .close_tree_and_create_new(&origin_id, end_size, &root_hash, 0)
             .unwrap();
 
         // Assert: metadata contains correct values
@@ -510,8 +568,8 @@ mod tests {
         assert_eq!(result.closed_tree_metadata.origin_id, origin_id);
         assert_eq!(result.closed_tree_metadata.root_hash, root_hash);
         assert_eq!(result.closed_tree_metadata.tree_size, end_size);
-        assert_eq!(result.closed_tree_metadata.prev_tree_id, None); // First tree has no prev
         assert!(result.closed_tree_metadata.closed_at > 0);
+        assert_eq!(result.closed_tree_metadata.data_tree_index, 0);
     }
 
     #[test]
@@ -527,7 +585,7 @@ mod tests {
 
         // Close tree
         let result = store
-            .close_tree_and_create_new(&origin_id, end_size, &root_hash)
+            .close_tree_and_create_new(&origin_id, end_size, &root_hash, 0)
             .unwrap();
 
         // Query new tree
@@ -557,7 +615,7 @@ mod tests {
 
         // Close tree
         let result = store
-            .close_tree_and_create_new(&origin_id, end_size, &root_hash)
+            .close_tree_and_create_new(&origin_id, end_size, &root_hash, 0)
             .unwrap();
 
         // Query closed tree status
@@ -574,37 +632,6 @@ mod tests {
     }
 
     #[test]
-    fn test_new_tree_has_prev_tree_id_chain_link() {
-        let mut store = create_test_index_store();
-        let origin_id = [1u8; 32];
-
-        // Create first tree
-        let first_tree_id = store.create_active_tree(&origin_id, 0).unwrap();
-
-        let end_size = 50u64;
-        let root_hash = [6u8; 32];
-
-        // Close first tree
-        let result = store
-            .close_tree_and_create_new(&origin_id, end_size, &root_hash)
-            .unwrap();
-
-        // Query new tree's prev_tree_id
-        let prev_tree_id: Option<i64> = store
-            .connection()
-            .query_row(
-                "SELECT prev_tree_id FROM trees WHERE id = ?1",
-                [result.new_tree_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-
-        // Assert: new tree has chain link to closed tree
-        assert_eq!(prev_tree_id, Some(first_tree_id));
-        assert_eq!(prev_tree_id, Some(result.closed_tree_id));
-    }
-
-    #[test]
     fn test_new_tree_start_size_equals_closed_tree_end_size() {
         let mut store = create_test_index_store();
         let origin_id = [1u8; 32];
@@ -617,7 +644,7 @@ mod tests {
 
         // Close tree
         let result = store
-            .close_tree_and_create_new(&origin_id, end_size, &root_hash)
+            .close_tree_and_create_new(&origin_id, end_size, &root_hash, 0)
             .unwrap();
 
         // Query new tree's start_size
@@ -632,5 +659,76 @@ mod tests {
 
         // Assert: new tree starts where old tree ended
         assert_eq!(start_size as u64, end_size);
+    }
+
+    #[test]
+    fn test_close_tree_stores_data_tree_index() {
+        let mut store = create_test_index_store();
+        let origin_id = [1u8; 32];
+        store.create_active_tree(&origin_id, 0).unwrap();
+
+        let end_size = 100u64;
+        let root_hash = [8u8; 32];
+        let data_tree_index = 0u64;
+
+        let result = store
+            .close_tree_and_create_new(&origin_id, end_size, &root_hash, data_tree_index)
+            .unwrap();
+
+        // Query closed tree's data_tree_index
+        let stored_index: Option<i64> = store
+            .connection()
+            .query_row(
+                "SELECT data_tree_index FROM trees WHERE id = ?1",
+                [result.closed_tree_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(stored_index, Some(data_tree_index as i64));
+    }
+
+    #[test]
+    fn test_get_tree_data_tree_index_returns_correct_value() {
+        let mut store = create_test_index_store();
+        let origin_id = [1u8; 32];
+        store.create_active_tree(&origin_id, 0).unwrap();
+
+        let result = store
+            .close_tree_and_create_new(&origin_id, 100, &[9u8; 32], 0)
+            .unwrap();
+
+        let index = store
+            .get_tree_data_tree_index(result.closed_tree_id)
+            .unwrap();
+        assert_eq!(index, Some(0));
+    }
+
+    #[test]
+    fn test_get_tree_data_tree_index_returns_none_for_active() {
+        let store = create_test_index_store();
+        let origin_id = [1u8; 32];
+        let tree_id = store.create_active_tree(&origin_id, 0).unwrap();
+
+        let index = store.get_tree_data_tree_index(tree_id).unwrap();
+        assert_eq!(index, None, "Active tree should not have data_tree_index");
+    }
+
+    #[test]
+    fn test_data_tree_index_increments_for_multiple_closes() {
+        let mut store = create_test_index_store();
+        let origin_id = [0u8; 32];
+        store.create_active_tree(&origin_id, 0).unwrap();
+
+        for i in 0..3 {
+            let result = store
+                .close_tree_and_create_new(&origin_id, (i + 1) * 100, &[i as u8; 32], i)
+                .unwrap();
+
+            let stored = store
+                .get_tree_data_tree_index(result.closed_tree_id)
+                .unwrap();
+            assert_eq!(stored, Some(i));
+        }
     }
 }

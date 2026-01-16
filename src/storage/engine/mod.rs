@@ -17,7 +17,7 @@ use crate::storage::config::StorageConfig;
 use crate::storage::index::lifecycle::TreeRotationResult;
 use crate::storage::index::{BatchInsert, IndexStore};
 use crate::storage::recovery;
-use crate::storage::slab::{SlabConfig, SlabManager};
+use crate::storage::slab::{PinnedSuperTreeSlab, SlabConfig, SlabManager};
 use crate::storage::wal::{WalEntry, WalWriter};
 use crate::traits::{
     AppendParams, BatchResult, ConsistencyProof, Entry, EntryResult, InclusionProof, ProofProvider,
@@ -46,8 +46,11 @@ pub struct StorageEngine {
     /// WAL writer
     wal: Arc<RwLock<WalWriter>>,
 
-    /// Slab manager
+    /// Slab manager (Data Tree slabs)
     slabs: Arc<RwLock<SlabManager>>,
+
+    /// Super-Tree pinned slab
+    super_slab: Arc<RwLock<PinnedSuperTreeSlab>>,
 
     /// SQLite index (Mutex because Connection is not Sync)
     index: Arc<Mutex<IndexStore>>,
@@ -74,6 +77,10 @@ impl StorageEngine {
         std::fs::create_dir_all(config.slab_dir())?;
         std::fs::create_dir_all(&config.data_dir)?;
 
+        // Create Super-Tree slab directory
+        let super_slab_dir = config.data_dir.join("super_tree");
+        std::fs::create_dir_all(&super_slab_dir)?;
+
         // Initialize components
         let mut wal = WalWriter::new(config.wal_dir())?;
         let mut slabs = SlabManager::new(
@@ -84,6 +91,16 @@ impl StorageEngine {
             },
         )?;
 
+        // Initialize Super-Tree PinnedSuperTreeSlab
+        let super_slab_path = super_slab_dir.join("super_tree.slab");
+        let mut super_slab =
+            PinnedSuperTreeSlab::open_or_create(&super_slab_path, config.slab_capacity)?;
+
+        tracing::debug!(
+            "init: Super-Tree size from slab file: {}",
+            super_slab.leaf_count()
+        );
+
         let mut index = IndexStore::open(&config.db_path())?;
         index.initialize()?;
 
@@ -92,6 +109,7 @@ impl StorageEngine {
             &mut wal,
             &mut slabs,
             &mut index,
+            &mut super_slab,
             u64::from(config.slab_capacity),
         )
         .await?;
@@ -116,6 +134,7 @@ impl StorageEngine {
             config,
             wal: Arc::new(RwLock::new(wal)),
             slabs: Arc::new(RwLock::new(slabs)),
+            super_slab: Arc::new(RwLock::new(super_slab)),
             index: Arc::new(Mutex::new(index)),
             tree_state: StdRwLock::new(tree_state),
             healthy: AtomicBool::new(true),
@@ -132,17 +151,21 @@ impl StorageEngine {
         Arc::clone(&self.index)
     }
 
-    /// Rotate the tree: close active tree and create new one with genesis leaf
+    /// Get reference to Super-Tree PinnedSuperTreeSlab for proofs
+    pub fn super_slab(&self) -> &Arc<RwLock<PinnedSuperTreeSlab>> {
+        &self.super_slab
+    }
+
+    /// Rotate the tree: close active tree and create new one
     ///
-    /// This is the ONLY correct way to rotate trees. Do NOT call
-    /// `IndexStore::close_tree_and_create_new()` directly - it does not
-    /// insert genesis leaf into Slab.
+    /// This method appends the closed tree root to the Super-Tree and creates
+    /// a new active data tree WITHOUT genesis leaf (Super-Tree replaces genesis).
     ///
     /// # Flow
-    /// 1. Close active tree and create new one (IndexStore)
-    /// 2. Compute genesis leaf hash
-    /// 3. Insert genesis leaf into Slab (Merkle tree)
-    /// 4. Insert genesis metadata into SQLite
+    /// 1. Compute data_tree_index from Super-Tree size
+    /// 2. Append closed tree root to Super-Tree
+    /// 3. Update Super-Tree metadata (size, genesis root on first append)
+    /// 4. Close active tree and create new one (IndexStore)
     /// 5. Update tree_state cache
     ///
     /// # Arguments
@@ -151,7 +174,7 @@ impl StorageEngine {
     /// * `root_hash` - Root hash of the tree being closed
     ///
     /// # Returns
-    /// `TreeRotationResult` with closed tree metadata and new tree head
+    /// `TreeRotationResult` with closed tree metadata, new tree head, and Super-Tree info
     ///
     /// # Errors
     /// Returns `StorageError` if any step fails
@@ -161,78 +184,75 @@ impl StorageEngine {
         end_size: u64,
         root_hash: &[u8; 32],
     ) -> Result<TreeRotationResult, StorageError> {
-        // 1. Close tree and create new one (no genesis insertion yet)
+        // 1. Append closed tree root to Super-Tree FIRST to get data_tree_index
+        let (super_root, data_tree_index) = {
+            let mut super_slab = self.super_slab.write().await;
+
+            // Get current Super-Tree size (this becomes data_tree_index)
+            // SOURCE OF TRUTH: SlabFile header, not SQLite
+            let data_tree_index = super_slab.leaf_count();
+
+            // Append to Super-Tree (atomic: write + flush)
+            let super_root = super_slab.append_leaf(root_hash)?;
+
+            (super_root, data_tree_index)
+        };
+
+        // Update SQLite for audit (after successful append)
+        {
+            let index = self.index.lock().await;
+
+            // Best-effort audit write - failure doesn't break consistency
+            if let Err(e) = index.set_super_tree_size(data_tree_index + 1) {
+                tracing::warn!("Failed to update SQLite super_tree_size (audit): {}", e);
+            }
+
+            // Set genesis on first append
+            if data_tree_index == 0 {
+                if let Err(e) = index.set_super_genesis_root(&super_root) {
+                    tracing::warn!("Failed to update SQLite super_genesis_root (audit): {}", e);
+                }
+            }
+        };
+
+        // 2. Close active tree and create new one
         let close_result = {
             let mut index = self.index.lock().await;
             index
-                .close_tree_and_create_new(origin_id, end_size, root_hash)
+                .close_tree_and_create_new(origin_id, end_size, root_hash, data_tree_index)
                 .map_err(|e| StorageError::Database(e.to_string()))?
         };
 
-        // 2. Compute genesis leaf hash
-        let genesis_hash = atl_core::compute_genesis_leaf_hash(root_hash, end_size);
-
-        // 3. Insert genesis leaf into Slab
-        let new_root = {
+        // 3. Update tree_state cache (SIMPLIFIED - no genesis)
+        let new_tree_size = end_size; // NO +1 for genesis!
+        let new_root_hash = if new_tree_size > 0 {
             let mut slabs = self.slabs.write().await;
-            slabs.append_leaves(&[genesis_hash])?
+            slabs.get_root(new_tree_size)?
+        } else {
+            [0u8; 32]
         };
 
-        // 4. Insert genesis metadata into SQLite
-        let genesis_id = Uuid::new_v4();
-        let genesis_leaf_index = end_size;
-        let slab_id = (genesis_leaf_index / u64::from(self.config.slab_capacity)) as u32 + 1;
-        let slab_offset = (genesis_leaf_index % u64::from(self.config.slab_capacity)) * 32;
-
-        let genesis_metadata = serde_json::json!({
-            "type": "genesis",
-            "prev_tree_id": close_result.closed_tree_id,
-            "prev_root_hash": format!("sha256:{}", hex::encode(root_hash)),
-            "prev_tree_size": end_size
-        });
-
-        let batch_insert = BatchInsert {
-            id: genesis_id,
-            leaf_index: genesis_leaf_index,
-            slab_id,
-            slab_offset,
-            payload_hash: genesis_hash,
-            metadata_hash: genesis_hash,
-            metadata_cleartext: Some(genesis_metadata.to_string()),
-            external_id: None,
-        };
-
-        {
-            let mut index = self.index.lock().await;
-            index.insert_batch(&[batch_insert])?;
-            index.set_tree_size(end_size + 1)?;
-            // NOTE: Do NOT call update_first_entry_at_for_active_tree() here!
-            // Genesis leaf should not start the tree lifetime timer.
-            // Only user entries (via append_batch) should trigger first_entry_at.
-        }
-
-        // 5. Update tree_state cache
-        let new_tree_size = end_size + 1;
         {
             let mut state = self
                 .tree_state
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             state.tree_size = new_tree_size;
-            state.root_hash = new_root;
+            state.root_hash = new_root_hash;
         }
 
-        // 6. Return result
+        // 4. Return result
         let new_tree_head = TreeHead {
             tree_size: new_tree_size,
-            root_hash: new_root,
+            root_hash: new_root_hash,
             origin: *origin_id,
         };
 
         Ok(TreeRotationResult {
             closed_tree_id: close_result.closed_tree_id,
             new_tree_id: close_result.new_tree_id,
-            genesis_leaf_index,
+            data_tree_index,
+            super_root,
             closed_tree_metadata: close_result.closed_tree_metadata,
             new_tree_head,
         })
@@ -305,10 +325,26 @@ impl Storage for StorageEngine {
         let leaf_hashes: Vec<[u8; 32]> = entries.iter().map(|(_, _, h, _)| *h).collect();
         let new_root = {
             let mut slabs = self.slabs.write().await;
-            slabs.append_leaves(&leaf_hashes)?
+            let root = slabs.append_leaves(&leaf_hashes)?;
+            // CRITICAL: Flush to disk before updating tree_state.
+            // Without this, proof generation may fail with "missing node" error
+            // if client requests proof immediately after append returns.
+            slabs.flush()?;
+            root
         };
 
         // 4. Update SQLite
+        // Get active tree ID first (required for tree_id field)
+        let active_tree_id = {
+            let index = self.index.lock().await;
+            index
+                .get_active_tree()?
+                .ok_or_else(|| {
+                    crate::error::StorageError::QueryFailed("No active tree found".into())
+                })?
+                .id
+        };
+
         let batch_inserts: Vec<BatchInsert> = entries
             .iter()
             .map(|(id, leaf_index, _, p)| {
@@ -324,6 +360,7 @@ impl Storage for StorageEngine {
                     metadata_hash: p.metadata_hash,
                     metadata_cleartext: p.metadata_cleartext.as_ref().map(|v| v.to_string()),
                     external_id: p.external_id.clone(),
+                    tree_id: active_tree_id,
                 }
             })
             .collect();
@@ -414,9 +451,9 @@ impl Storage for StorageEngine {
     ) -> crate::error::ServerResult<InclusionProof> {
         // First get the entry to find its leaf_index
         let entry = Storage::get_entry(self, entry_id)?;
-        let leaf_index = entry.leaf_index.ok_or_else(|| {
-            crate::error::ServerError::Storage(StorageError::NotFound("entry not found".into()))
-        })?;
+        let leaf_index = entry
+            .leaf_index
+            .ok_or_else(|| crate::error::ServerError::EntryNotInTree(entry_id.to_string()))?;
 
         // Delegate to ProofProvider async method via blocking
         tokio::task::block_in_place(|| {
@@ -490,6 +527,20 @@ impl Storage for StorageEngine {
             tokio::runtime::Handle::current().block_on(async {
                 let mut slabs = self.slabs.write().await;
                 slabs.get_root(tree_size).map_err(|e| {
+                    crate::error::ServerError::Storage(crate::error::StorageError::Io(e))
+                })
+            })
+        })
+    }
+
+    fn get_super_root(&self, super_tree_size: u64) -> crate::error::ServerResult<[u8; 32]> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                if super_tree_size == 0 {
+                    return Ok([0u8; 32]);
+                }
+                let super_slab = self.super_slab.read().await;
+                super_slab.get_root(super_tree_size).map_err(|e| {
                     crate::error::ServerError::Storage(crate::error::StorageError::Io(e))
                 })
             })

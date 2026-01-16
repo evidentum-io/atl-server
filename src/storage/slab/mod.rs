@@ -6,8 +6,10 @@
 pub mod format;
 pub mod manager;
 pub mod mmap;
+pub mod pinned;
 
 // Re-export main types
 pub use format::{SlabHeader, DEFAULT_SLAB_CAPACITY, NODE_SIZE, SLAB_MAGIC, SLAB_VERSION};
 pub use manager::{SlabConfig, SlabManager};
 pub use mmap::SlabFile;
+pub use pinned::PinnedSuperTreeSlab;

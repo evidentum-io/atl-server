@@ -215,6 +215,7 @@ pub trait Storage: Send + Sync + 'static {
     fn get_latest_anchored_size(&self) -> crate::error::ServerResult<Option<u64>>;
 
     /// Get anchors covering a target tree size
+    #[allow(dead_code)]
     fn get_anchors_covering(
         &self,
         target_tree_size: u64,
@@ -222,7 +223,23 @@ pub trait Storage: Send + Sync + 'static {
     ) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>>;
 
     /// Get root hash at specific tree size
+    #[allow(dead_code)]
     fn get_root_at_size(&self, tree_size: u64) -> crate::error::ServerResult<[u8; 32]>;
+
+    /// Get Super-Tree root hash at specific size
+    ///
+    /// Computes the Merkle root of the Super-Tree at the given size.
+    /// The Super-Tree contains roots of closed Data Trees.
+    ///
+    /// # Arguments
+    /// * `super_tree_size` - Number of closed Data Trees in Super-Tree
+    ///
+    /// # Returns
+    /// * `[u8; 32]` - Super-Tree root hash, or empty hash if size is 0
+    ///
+    /// # Errors
+    /// * `StorageError` if slab read fails
+    fn get_super_root(&self, super_tree_size: u64) -> crate::error::ServerResult<[u8; 32]>;
 
     /// Check if storage is initialized
     fn is_initialized(&self) -> bool;

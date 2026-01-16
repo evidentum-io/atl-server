@@ -13,3 +13,4 @@ signing.key
 *.db-shm
 /.env.example
 /scripts
+/debug-server.md

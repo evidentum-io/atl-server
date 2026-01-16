@@ -36,6 +36,8 @@ pub struct BatchInsert {
     pub metadata_hash: [u8; 32],
     pub metadata_cleartext: Option<String>,
     pub external_id: Option<String>,
+    /// ID of active tree at insert time (REQUIRED - links entry to tree)
+    pub tree_id: i64,
 }
 
 /// SQLite index operations
@@ -122,10 +124,16 @@ impl IndexStore {
                 .execute_batch(super::schema::MIGRATE_V2_TO_V3)?;
         }
 
-        if current < 4 {
+        if current < 5 {
             self.conn
                 .borrow()
-                .execute_batch(super::schema::MIGRATE_V3_TO_V4)?;
+                .execute_batch(super::schema::MIGRATE_V4_TO_V5)?;
+        }
+
+        if current < 6 {
+            self.conn
+                .borrow()
+                .execute_batch(super::schema::MIGRATE_V5_TO_V6)?;
         }
 
         Ok(())
@@ -216,14 +224,101 @@ impl IndexStore {
     pub fn connection_mut(&self) -> std::cell::RefMut<'_, rusqlite::Connection> {
         self.conn.borrow_mut()
     }
+
+    /// Get Super-Tree genesis root (None if no trees closed yet)
+    #[allow(dead_code)]
+    pub fn get_super_genesis_root(&self) -> rusqlite::Result<Option<[u8; 32]>> {
+        match self.conn.borrow().query_row(
+            "SELECT value FROM atl_config WHERE key = 'super_genesis_root'",
+            [],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(hex) => {
+                let bytes = hex::decode(&hex).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+                if bytes.len() != 32 {
+                    return Ok(None);
+                }
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                Ok(Some(arr))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Set Super-Tree genesis root (once only)
+    #[allow(dead_code)]
+    pub fn set_super_genesis_root(&self, root: &[u8; 32]) -> rusqlite::Result<()> {
+        let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        self.conn.borrow().execute(
+            "INSERT OR IGNORE INTO atl_config (key, value, updated_at) VALUES ('super_genesis_root', ?1, ?2)",
+            params![hex::encode(root), now],
+        )?;
+        Ok(())
+    }
+
+    /// Get Super-Tree size
+    #[allow(dead_code)]
+    pub fn get_super_tree_size(&self) -> rusqlite::Result<u64> {
+        match self.conn.borrow().query_row(
+            "SELECT value FROM atl_config WHERE key = 'super_tree_size'",
+            [],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(s) => Ok(s.parse().unwrap_or(0)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Set Super-Tree size
+    #[allow(dead_code)]
+    pub fn set_super_tree_size(&self, size: u64) -> rusqlite::Result<()> {
+        let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        self.conn.borrow().execute(
+            "INSERT OR REPLACE INTO atl_config (key, value, updated_at) VALUES ('super_tree_size', ?1, ?2)",
+            params![size.to_string(), now],
+        )?;
+        Ok(())
+    }
+
+    /// Get last OTS submitted Super-Tree size
+    pub fn get_last_ots_submitted_super_tree_size(&self) -> rusqlite::Result<u64> {
+        match self.conn.borrow().query_row(
+            "SELECT value FROM atl_config WHERE key = 'last_ots_submitted_super_tree_size'",
+            [],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(s) => Ok(s.parse().unwrap_or(0)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Set last OTS submitted Super-Tree size
+    pub fn set_last_ots_submitted_super_tree_size(&self, size: u64) -> rusqlite::Result<()> {
+        let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        self.conn.borrow().execute(
+            "INSERT OR REPLACE INTO atl_config (key, value, updated_at) VALUES ('last_ots_submitted_super_tree_size', ?1, ?2)",
+            params![size.to_string(), now],
+        )?;
+        Ok(())
+    }
 }
 
 /// Insert batch using prepared statement
 fn insert_batch_inner(tx: &Transaction, entries: &[BatchInsert]) -> rusqlite::Result<()> {
     let mut stmt = tx.prepare_cached(
         "INSERT INTO entries (id, leaf_index, slab_id, slab_offset, payload_hash, metadata_hash,
-                              metadata_cleartext, external_id, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                              metadata_cleartext, external_id, tree_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
     )?;
 
     let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
@@ -238,6 +333,7 @@ fn insert_batch_inner(tx: &Transaction, entries: &[BatchInsert]) -> rusqlite::Re
             entry.metadata_hash.as_slice(),
             entry.metadata_cleartext.as_ref(),
             entry.external_id.as_ref(),
+            entry.tree_id,
             now,
         ])?;
     }
@@ -341,6 +437,9 @@ mod tests {
         let mut store = IndexStore::open(&path).unwrap();
         store.initialize().unwrap();
 
+        // Create active tree first
+        let tree_id = store.create_active_tree(&[0u8; 32], 0).unwrap();
+
         let entries: Vec<BatchInsert> = (0..100)
             .map(|i| BatchInsert {
                 id: uuid::Uuid::new_v4(),
@@ -351,6 +450,7 @@ mod tests {
                 metadata_hash: [0u8; 32],
                 metadata_cleartext: None,
                 external_id: None,
+                tree_id,
             })
             .collect();
 
@@ -374,6 +474,9 @@ mod tests {
         let mut store = IndexStore::open(&path).unwrap();
         store.initialize().unwrap();
 
+        // Create active tree first
+        let tree_id = store.create_active_tree(&[0u8; 32], 0).unwrap();
+
         let id = uuid::Uuid::new_v4();
         let entry = BatchInsert {
             id,
@@ -384,6 +487,7 @@ mod tests {
             metadata_hash: [0u8; 32],
             metadata_cleartext: Some(r#"{"test": true}"#.to_string()),
             external_id: Some("ext-123".to_string()),
+            tree_id,
         };
 
         store.insert_batch(&[entry]).unwrap();
@@ -411,6 +515,9 @@ mod tests {
         let mut store = IndexStore::open(&path).unwrap();
         store.initialize().unwrap();
 
+        // Create active tree first
+        let tree_id = store.create_active_tree(&[0u8; 32], 0).unwrap();
+
         let entries: Vec<BatchInsert> = (0..10_000)
             .map(|i| BatchInsert {
                 id: uuid::Uuid::new_v4(),
@@ -421,6 +528,7 @@ mod tests {
                 metadata_hash: [0u8; 32],
                 metadata_cleartext: None,
                 external_id: None,
+                tree_id,
             })
             .collect();
 

@@ -22,8 +22,8 @@
 //!
 //! let chain_index = ChainIndex::open(Path::new("data/chain_index.db"))?;
 //!
-//! // Record a closed tree
-//! chain_index.record_closed_tree(&metadata, genesis_leaf_hash)?;
+//! // Record a closed tree (metadata includes data_tree_index from Super-Tree)
+//! chain_index.record_closed_tree(&metadata)?;
 //!
 //! // Verify the full chain
 //! let result = chain_index.verify_full_chain()?;

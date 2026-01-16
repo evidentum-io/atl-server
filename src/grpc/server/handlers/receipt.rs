@@ -9,6 +9,7 @@ use tonic::{Request, Response, Status};
 use crate::error::ServerError;
 use crate::grpc::proto::*;
 use crate::grpc::server::service::SequencerGrpcServer;
+use crate::traits::Storage;
 
 /// Handle GetReceipt request
 ///
@@ -153,10 +154,11 @@ pub async fn handle_upgrade_receipt(
 
             let mut receipt = crate::receipt::generate_receipt(
                 &entry_id,
-                &**server.storage(),
+                server.storage(),
                 server.signer(),
                 options,
             )
+            .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
             receipt

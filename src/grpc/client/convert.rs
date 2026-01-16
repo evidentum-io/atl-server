@@ -48,6 +48,7 @@ pub fn proto_checkpoint_to_core(cp: proto::Checkpoint) -> ServerResult<atl_core:
 }
 
 /// Convert proto ReceiptResponse to trait ReceiptResponse
+#[allow(dead_code)]
 pub fn proto_receipt_to_trait(response: proto::ReceiptResponse) -> ServerResult<ReceiptResponse> {
     let entry = response
         .entry
@@ -109,6 +110,7 @@ pub fn proto_receipt_to_trait(response: proto::ReceiptResponse) -> ServerResult<
 }
 
 /// Convert proto ExternalAnchor to trait Anchor
+#[allow(dead_code)]
 fn proto_external_anchor_to_trait(a: proto::ExternalAnchor) -> Anchor {
     let metadata: serde_json::Value = serde_json::from_str(&a.metadata_json).unwrap_or_default();
 
@@ -123,8 +125,14 @@ fn proto_external_anchor_to_trait(a: proto::ExternalAnchor) -> Anchor {
             "ots" | "bitcoin_ots" => AnchorType::BitcoinOts,
             _ => AnchorType::Other,
         },
+        target: metadata
+            .get("target")
+            .and_then(|v| v.as_str())
+            .unwrap_or("data_tree_root")
+            .to_string(),
         anchored_hash: a.anchored_hash.try_into().unwrap_or([0u8; 32]),
         tree_size,
+        super_tree_size: metadata.get("super_tree_size").and_then(|v| v.as_u64()),
         timestamp: a.timestamp,
         token: a.token,
         metadata,

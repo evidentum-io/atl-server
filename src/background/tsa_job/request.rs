@@ -62,8 +62,10 @@ pub async fn try_tsa_timestamp(
 
     let anchor = Anchor {
         anchor_type: AnchorType::Rfc3161,
+        target: "data_tree_root".to_string(),
         anchored_hash: root_hash,
         tree_size: tree.end_size.unwrap_or(tree.start_size),
+        super_tree_size: None,
         timestamp: response.timestamp,
         token: response.token_der,
         metadata: serde_json::json!({
@@ -155,8 +157,10 @@ pub async fn create_tsa_anchor_for_tree_head(
 
     let anchor = Anchor {
         anchor_type: AnchorType::Rfc3161,
+        target: "data_tree_root".to_string(),
         anchored_hash: root_hash,
         tree_size,
+        super_tree_size: None,
         timestamp: response.timestamp,
         token: response.token_der,
         metadata: serde_json::json!({

@@ -44,11 +44,17 @@ pub struct Anchor {
     /// Type of anchor
     pub anchor_type: AnchorType,
 
-    /// Hash that was anchored (tree root)
+    /// Target of the anchor: "data_tree_root" or "super_root"
+    pub target: String,
+
+    /// Hash that was anchored (target_hash)
     pub anchored_hash: [u8; 32],
 
-    /// Tree size at the time of anchoring
+    /// Tree size at the time of anchoring (for TSA anchors)
     pub tree_size: u64,
+
+    /// Super-Tree size at the time of anchoring (for OTS v2.0 anchors)
+    pub super_tree_size: Option<u64>,
 
     /// Timestamp (nanoseconds since Unix epoch)
     pub timestamp: u64,

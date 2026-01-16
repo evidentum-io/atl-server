@@ -15,7 +15,7 @@ use crate::api::state::AppState;
 use crate::api::streaming::{hash_json_payload, hash_metadata};
 use crate::config::ServerMode;
 use crate::error::ServerError;
-use crate::traits::{AppendParams, GetReceiptRequest};
+use crate::traits::AppendParams;
 
 /// Placeholder receipt type (will be implemented by RECEIPT-GEN-1)
 ///
@@ -109,19 +109,28 @@ async fn generate_and_return_receipt(
     // Dispatch to Sequencer (either local or gRPC)
     let dispatch_result = state.dispatcher.dispatch(params).await?;
 
-    // Generate upgrade URL
-    let entry_id = dispatch_result.result.id;
-    let upgrade_url = format!("{}/v1/anchor/{}", state.base_url, entry_id);
+    // Get storage engine and signer
+    let storage_engine = state.storage_engine.as_ref().ok_or_else(|| {
+        ServerError::NotSupported("Receipt generation requires storage engine".into())
+    })?;
+    let signer = state
+        .signer
+        .as_ref()
+        .ok_or_else(|| ServerError::NotSupported("Receipt generation requires signer".into()))?;
 
-    // Build receipt (STUB - will be replaced by RECEIPT-GEN-1)
-    let receipt = build_receipt_stub(
+    // Build immediate receipt (does NOT query storage for entry)
+    let receipt_v2 = crate::receipt::build_immediate_receipt(
         &dispatch_result,
-        &upgrade_url,
-        &payload_hash,
-        &metadata_hash,
+        payload_hash,
         metadata,
-        external_id,
-    );
+        storage_engine,
+        signer,
+        &state.base_url,
+    )?;
+
+    // Convert to JSON for API response
+    let receipt = serde_json::to_value(&receipt_v2)
+        .map_err(|e| ServerError::InvalidArgument(format!("Failed to serialize receipt: {}", e)))?;
 
     Ok((StatusCode::CREATED, Json(receipt)))
 }
@@ -132,128 +141,34 @@ pub async fn get_anchor(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Receipt>, ServerError> {
-    // Request receipt from dispatcher
-    let request = GetReceiptRequest {
-        entry_id: id,
-        include_anchors: true,
-    };
+    // Get storage engine and signer
+    let storage_engine = state.storage_engine.as_ref().ok_or_else(|| {
+        ServerError::NotSupported("Receipt generation requires storage engine".into())
+    })?;
+    let signer = state
+        .signer
+        .as_ref()
+        .ok_or_else(|| ServerError::NotSupported("Receipt generation requires signer".into()))?;
 
-    let response = state.dispatcher.get_receipt(request).await?;
+    // Generate upgrade URL template
+    let upgrade_url_template = Some(format!("{}/v1/anchor/{{}}", state.base_url));
 
-    // Generate upgrade URL
-    let upgrade_url = format!("{}/v1/anchor/{}", state.base_url, id);
+    // Generate receipt v2.0 with anchors
+    let receipt_v2 = crate::receipt::generate_receipt(
+        &id,
+        storage_engine,
+        signer,
+        crate::receipt::ReceiptOptions {
+            upgrade_url_template,
+            include_anchors: true,
+            ..Default::default()
+        },
+    )
+    .await?;
 
-    // Build receipt with anchors (STUB - will be replaced by RECEIPT-GEN-1)
-    let receipt = build_receipt_with_anchors_stub(&response, &upgrade_url);
+    // Convert to JSON for API response
+    let receipt = serde_json::to_value(&receipt_v2)
+        .map_err(|e| ServerError::InvalidArgument(format!("Failed to serialize receipt: {}", e)))?;
 
     Ok(Json(receipt))
-}
-
-// ========== STUBS (to be replaced by RECEIPT-GEN-1) ==========
-
-/// Build receipt stub for POST response
-///
-/// This is a placeholder. RECEIPT-GEN-1 will implement proper receipt generation.
-fn build_receipt_stub(
-    dispatch_result: &crate::traits::DispatchResult,
-    upgrade_url: &str,
-    payload_hash: &[u8; 32],
-    metadata_hash: &[u8; 32],
-    metadata: Option<serde_json::Value>,
-    external_id: Option<String>,
-) -> Receipt {
-    use crate::api::handlers::helpers::{format_hash, format_signature};
-
-    let result = &dispatch_result.result;
-    let checkpoint = &dispatch_result.checkpoint;
-
-    let mut entry_json = serde_json::json!({
-        "id": result.id.to_string(),
-        "payload_hash": format_hash(payload_hash),
-        "metadata_hash": format_hash(metadata_hash),
-        "metadata": metadata.unwrap_or_else(|| serde_json::json!({}))
-    });
-
-    // Add external_id if present
-    if let Some(ext_id) = external_id {
-        entry_json["external_id"] = serde_json::json!(ext_id);
-    }
-
-    serde_json::json!({
-        "spec_version": "1.0.0",
-        "upgrade_url": upgrade_url,
-        "entry": entry_json,
-        "proof": {
-            "tree_size": checkpoint.tree_size,
-            "root_hash": format_hash(&checkpoint.root_hash),
-            "path": result.inclusion_proof.iter().map(format_hash).collect::<Vec<_>>(),
-            "leaf_index": result.leaf_index,
-            "checkpoint": {
-                "origin": format_hash(&checkpoint.origin),
-                "tree_size": checkpoint.tree_size,
-                "root_hash": format_hash(&checkpoint.root_hash),
-                "timestamp": checkpoint.timestamp,
-                "signature": format_signature(&checkpoint.signature),
-                "key_id": format_hash(&checkpoint.key_id),
-            }
-        },
-        "anchors": []
-    })
-}
-
-/// Build receipt stub for GET response with anchors
-///
-/// This is a placeholder. RECEIPT-GEN-1 will implement proper receipt generation.
-#[allow(dead_code)]
-fn build_receipt_with_anchors_stub(
-    response: &crate::traits::ReceiptResponse,
-    upgrade_url: &str,
-) -> Receipt {
-    use crate::api::handlers::helpers::{format_hash, format_signature};
-
-    let entry = &response.entry;
-    let checkpoint = &response.checkpoint;
-
-    let mut entry_json = serde_json::json!({
-        "id": entry.id.to_string(),
-        "payload_hash": format_hash(&entry.payload_hash),
-        "metadata_hash": format_hash(&entry.metadata_hash),
-        "metadata": entry.metadata_cleartext.as_ref().unwrap_or(&serde_json::json!({}))
-    });
-
-    // Add external_id if present
-    if let Some(ref ext_id) = entry.external_id {
-        entry_json["external_id"] = serde_json::json!(ext_id);
-    }
-
-    // Convert anchors to receipt format
-    let anchors: Vec<serde_json::Value> = response
-        .anchors
-        .iter()
-        .map(|anchor| {
-            let receipt_anchor = crate::receipt::convert_anchor_to_receipt(anchor);
-            serde_json::to_value(receipt_anchor).unwrap_or_else(|_| serde_json::json!({}))
-        })
-        .collect();
-
-    serde_json::json!({
-        "spec_version": "1.0.0",
-        "upgrade_url": upgrade_url,
-        "entry": entry_json,
-        "proof": {
-            "tree_size": checkpoint.tree_size,
-            "root_hash": format_hash(&checkpoint.root_hash),
-            "path": response.inclusion_proof.iter().map(format_hash).collect::<Vec<_>>(),
-            "leaf_index": entry.leaf_index.unwrap_or(0),
-            "checkpoint": {
-                "origin": format_hash(&checkpoint.origin),
-                "tree_size": checkpoint.tree_size,
-                "root_hash": format_hash(&checkpoint.root_hash),
-                "timestamp": checkpoint.timestamp,
-                "signature": format_signature(&checkpoint.signature),
-                "key_id": format_hash(&checkpoint.key_id),
-            }
-        },
-        "anchors": anchors
-    })
 }

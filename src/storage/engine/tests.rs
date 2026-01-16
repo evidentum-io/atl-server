@@ -12,6 +12,14 @@ async fn create_test_engine(origin: [u8; 32]) -> (StorageEngine, TempDir) {
     };
 
     let engine = StorageEngine::new(config, origin).await.unwrap();
+
+    // Create initial active tree (normally done by tree_closer)
+    {
+        let index = engine.index_store();
+        let index_lock = index.lock().await;
+        index_lock.create_active_tree(&origin, 0).unwrap();
+    }
+
     (engine, dir)
 }
 
@@ -54,6 +62,13 @@ async fn test_crash_recovery() {
             ..Default::default()
         };
         let engine = StorageEngine::new(config, origin).await.unwrap();
+
+        // Create initial active tree (normally done by tree_closer)
+        {
+            let index = engine.index_store();
+            let index_lock = index.lock().await;
+            index_lock.create_active_tree(&origin, 0).unwrap();
+        }
 
         let params = vec![AppendParams {
             payload_hash: [42u8; 32],
@@ -134,8 +149,7 @@ async fn test_rotate_tree_inserts_genesis_into_slab() {
     // Create initial active tree (normally done by tree_closer)
     let origin_id = engine.origin_id();
     {
-        let index = engine.index.lock().await;
-        index.create_active_tree(&origin_id, 0).unwrap();
+        let _index = engine.index.lock().await;
     }
 
     // Append some entries first
@@ -153,7 +167,7 @@ async fn test_rotate_tree_inserts_genesis_into_slab() {
     let end_size = head_before.tree_size;
     let root_hash = head_before.root_hash;
 
-    // Get slab tree size before rotation
+    // Get data tree size before rotation
     let tree_size_before = {
         let slabs = engine.slabs.read().await;
         slabs.tree_size()
@@ -165,26 +179,29 @@ async fn test_rotate_tree_inserts_genesis_into_slab() {
         .await
         .unwrap();
 
-    // Get slab tree size after rotation
+    // Get data tree size after rotation
     let tree_size_after = {
         let slabs = engine.slabs.read().await;
         slabs.tree_size()
     };
 
-    // Assert: slab tree_size increased by 1 (genesis leaf inserted)
-    assert_eq!(tree_size_after, tree_size_before + 1);
-    assert_eq!(result.new_tree_head.tree_size, end_size + 1);
+    // Assert: data tree size unchanged (NO genesis leaf anymore)
+    assert_eq!(tree_size_after, tree_size_before);
+    assert_eq!(result.new_tree_head.tree_size, end_size); // NO +1!
+
+    // Assert: Super-Tree has grown by 1
+    let super_size = engine.index.lock().await.get_super_tree_size().unwrap();
+    assert_eq!(super_size, 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_rotate_tree_inserts_genesis_into_sqlite() {
+async fn test_rotate_tree_does_not_insert_genesis() {
     let (engine, _dir) = create_test_engine([1u8; 32]).await;
 
     // Create initial active tree (normally done by tree_closer)
     let origin_id = engine.origin_id();
     {
-        let index = engine.index.lock().await;
-        index.create_active_tree(&origin_id, 0).unwrap();
+        let _index = engine.index.lock().await;
     }
 
     // Append some entries first
@@ -203,26 +220,25 @@ async fn test_rotate_tree_inserts_genesis_into_sqlite() {
     let root_hash = head_before.root_hash;
 
     // Rotate tree
-    engine
+    let result = engine
         .rotate_tree(&origin_id, end_size, &root_hash)
         .await
         .unwrap();
 
-    // Query genesis entry from SQLite
-    let genesis_entry = engine.get_entry_by_index(end_size).await.unwrap();
+    // Assert: NO entry exists at leaf_index = end_size (no genesis)
+    let entry_result = engine.get_entry_by_index(end_size).await;
+    assert!(
+        entry_result.is_err(),
+        "No genesis entry should exist at end_size"
+    );
 
-    // Assert: entry exists at leaf_index = end_size
-    assert_eq!(genesis_entry.leaf_index, Some(end_size));
+    // Assert: Super-Tree contains the data tree root
+    let super_slab = engine.super_slab.read().await;
+    let super_leaf = super_slab.get_node(0, 0).unwrap();
+    assert_eq!(super_leaf, root_hash);
 
-    // Assert: entry has type="genesis" metadata
-    let metadata = genesis_entry.metadata_cleartext.unwrap();
-    let meta_type = metadata.get("type").unwrap().as_str().unwrap();
-    assert_eq!(meta_type, "genesis");
-
-    // Assert: metadata contains prev_tree info
-    assert!(metadata.get("prev_tree_id").is_some());
-    assert!(metadata.get("prev_root_hash").is_some());
-    assert!(metadata.get("prev_tree_size").is_some());
+    // Assert: data_tree_index is correct
+    assert_eq!(result.data_tree_index, 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -232,8 +248,7 @@ async fn test_rotate_tree_updates_cache() {
     // Create initial active tree (normally done by tree_closer)
     let origin_id = engine.origin_id();
     {
-        let index = engine.index.lock().await;
-        index.create_active_tree(&origin_id, 0).unwrap();
+        let _index = engine.index.lock().await;
     }
 
     // Append some entries first
@@ -260,11 +275,11 @@ async fn test_rotate_tree_updates_cache() {
 
     let head_after = engine.tree_head();
 
-    // Assert: tree_size increased by 1
-    assert_eq!(head_after.tree_size, end_size + 1);
+    // Assert: tree_size stays the same (NO genesis leaf)
+    assert_eq!(head_after.tree_size, end_size);
 
-    // Assert: root_hash changed (genesis leaf changes the tree structure)
-    assert_ne!(head_after.root_hash, old_root);
+    // Assert: root_hash stays the same (no genesis, new tree starts empty)
+    assert_eq!(head_after.root_hash, old_root);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -274,8 +289,7 @@ async fn test_rotate_tree_returns_correct_metadata() {
     // Create initial active tree (normally done by tree_closer)
     let origin_id = engine.origin_id();
     {
-        let index = engine.index.lock().await;
-        index.create_active_tree(&origin_id, 0).unwrap();
+        let _index = engine.index.lock().await;
     }
 
     // Append some entries first
@@ -299,8 +313,11 @@ async fn test_rotate_tree_returns_correct_metadata() {
         .await
         .unwrap();
 
-    // Assert: genesis_leaf_index == end_size
-    assert_eq!(result.genesis_leaf_index, end_size);
+    // Assert: data_tree_index is set (first rotation should be 0)
+    assert_eq!(result.data_tree_index, 0);
+
+    // Assert: super_root is computed
+    assert_ne!(result.super_root, [0u8; 32]);
 
     // Assert: closed_tree_metadata has correct values
     assert_eq!(result.closed_tree_metadata.tree_size, end_size);
@@ -315,14 +332,13 @@ async fn test_rotate_tree_returns_correct_metadata() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_genesis_hash_matches_atl_core() {
+async fn test_rotate_tree_appends_to_super_tree() {
     let (engine, _dir) = create_test_engine([1u8; 32]).await;
 
     // Create initial active tree (normally done by tree_closer)
     let origin_id = engine.origin_id();
     {
-        let index = engine.index.lock().await;
-        index.create_active_tree(&origin_id, 0).unwrap();
+        let _index = engine.index.lock().await;
     }
 
     // Append some entries first
@@ -340,19 +356,132 @@ async fn test_genesis_hash_matches_atl_core() {
     let end_size = head_before.tree_size;
     let root_hash = head_before.root_hash;
 
-    // Compute expected genesis hash using atl-core
-    let expected_genesis_hash = atl_core::compute_genesis_leaf_hash(&root_hash, end_size);
-
     // Rotate tree
-    engine
+    let result = engine
         .rotate_tree(&origin_id, end_size, &root_hash)
         .await
         .unwrap();
 
-    // Get genesis entry from SQLite
-    let genesis_entry = engine.get_entry_by_index(end_size).await.unwrap();
+    // Assert: Super-Tree contains the closed tree root
+    let super_slab = engine.super_slab.read().await;
+    let super_leaf = super_slab.get_node(0, 0).unwrap();
+    assert_eq!(super_leaf, root_hash);
 
-    // Assert: entry.payload_hash matches computed genesis hash
-    assert_eq!(genesis_entry.payload_hash, expected_genesis_hash);
-    assert_eq!(genesis_entry.metadata_hash, expected_genesis_hash);
+    // Assert: Super-Tree size is 1
+    let super_size = engine.index.lock().await.get_super_tree_size().unwrap();
+    assert_eq!(super_size, 1);
+
+    // Assert: Super genesis root is set
+    let super_genesis = engine.index.lock().await.get_super_genesis_root().unwrap();
+    assert_eq!(super_genesis, Some(result.super_root));
+}
+
+// Tests for SUPER-1: Super-Tree Storage Integration
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_super_slabs_directory_created_on_startup() {
+    let dir = tempdir().unwrap();
+    let config = StorageConfig {
+        data_dir: dir.path().to_path_buf(),
+        ..Default::default()
+    };
+    let expected_dir = dir.path().join("super_tree");
+    let expected_file = expected_dir.join("super_tree.slab");
+
+    let _storage = StorageEngine::new(config, [0u8; 32]).await.unwrap();
+
+    assert!(expected_dir.exists(), "Super-Tree directory should exist");
+    assert!(expected_dir.is_dir(), "Should be a directory");
+    assert!(expected_file.exists(), "Super-Tree slab file should exist");
+    assert!(expected_file.is_file(), "Should be a file");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_super_genesis_root_initially_none() {
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+
+    let result = engine
+        .index_store()
+        .lock()
+        .await
+        .get_super_genesis_root()
+        .unwrap();
+
+    assert!(
+        result.is_none(),
+        "Genesis root should be None before first rotation"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_set_super_genesis_root_once_only() {
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+    let first_root = [1u8; 32];
+    let second_root = [2u8; 32];
+
+    {
+        let index_store = engine.index_store();
+        let index = index_store.lock().await;
+        index.set_super_genesis_root(&first_root).unwrap();
+        index.set_super_genesis_root(&second_root).unwrap();
+    }
+    let result = engine
+        .index_store()
+        .lock()
+        .await
+        .get_super_genesis_root()
+        .unwrap();
+
+    assert_eq!(
+        result,
+        Some(first_root),
+        "Genesis should be first value, not overwritten"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_super_tree_size_initially_zero() {
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+
+    let size = engine
+        .index_store()
+        .lock()
+        .await
+        .get_super_tree_size()
+        .unwrap();
+
+    assert_eq!(size, 0, "Size should be 0 before any rotations");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_set_super_tree_size_increments_correctly() {
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+
+    {
+        let index_store = engine.index_store();
+        let index = index_store.lock().await;
+        index.set_super_tree_size(1).unwrap();
+        index.set_super_tree_size(2).unwrap();
+        index.set_super_tree_size(3).unwrap();
+    }
+    let result = engine
+        .index_store()
+        .lock()
+        .await
+        .get_super_tree_size()
+        .unwrap();
+
+    assert_eq!(result, 3, "Size should be last set value");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_storage_engine_has_super_slab_accessor() {
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+
+    let super_slab = engine.super_slab();
+
+    assert!(
+        Arc::strong_count(super_slab) >= 1,
+        "super_slab should be accessible"
+    );
 }

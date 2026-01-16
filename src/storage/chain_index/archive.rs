@@ -175,7 +175,7 @@ impl ChainIndex {
     #[allow(dead_code)]
     pub fn get_trees_ready_for_archival(&self) -> rusqlite::Result<Vec<ChainTreeRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT tree_id, origin_id, root_hash, tree_size, prev_tree_id, genesis_leaf_hash,
+            "SELECT tree_id, origin_id, root_hash, tree_size, data_tree_index,
                     status, bitcoin_txid, archive_location, created_at, closed_at, archived_at
              FROM trees WHERE status = 'closed' AND bitcoin_txid IS NOT NULL ORDER BY tree_id ASC",
         )?;

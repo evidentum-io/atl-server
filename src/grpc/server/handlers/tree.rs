@@ -8,6 +8,7 @@ use tonic::{Request, Response, Status};
 
 use crate::grpc::proto::*;
 use crate::grpc::server::service::SequencerGrpcServer;
+use crate::traits::Storage;
 
 /// Handle GetTreeHead request
 ///

@@ -16,6 +16,6 @@ pub mod queries;
 pub mod schema;
 
 pub use anchors::AnchorWithId;
-pub use lifecycle::{TreeRecord, TreeStatus};
+pub use lifecycle::{ClosedTreeInfo, TreeRecord, TreeStatus};
 pub use queries::{BatchInsert, IndexEntry, IndexStore};
 pub use schema::{MIGRATE_V2_TO_V3, SCHEMA_V3, SCHEMA_VERSION};

@@ -110,7 +110,7 @@ impl SlabManager {
             let slab = self.slabs.get_mut(&slab_id).expect("active slab missing");
 
             let local_index = slab.leaf_count() as u64;
-            slab.set_node(0, local_index, leaf_hash);
+            slab.set_node(0, local_index, leaf_hash)?;
 
             // Update parents bottom-up
             self.update_tree_after_append(slab_id, local_index)?;
@@ -233,7 +233,7 @@ impl SlabManager {
                 .unwrap_or(left_child); // RFC 6962: duplicate if odd
 
             let parent_hash = Self::hash_internal_node(&left_child, &right_child);
-            slab.set_node(level + 1, parent_index, &parent_hash);
+            slab.set_node(level + 1, parent_index, &parent_hash)?;
 
             current_index = parent_index;
         }

@@ -10,6 +10,7 @@ use crate::error::ServerError;
 use crate::grpc::proto::*;
 use crate::grpc::server::service::SequencerGrpcServer;
 use crate::traits::AppendParams;
+use crate::traits::Storage;
 
 /// Handle AnchorEntry request
 ///

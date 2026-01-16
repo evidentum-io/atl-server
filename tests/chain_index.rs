@@ -54,13 +54,8 @@ async fn test_chain_index_lifecycle() {
         .await
         .unwrap();
 
-    let genesis_leaf_hash = atl_core::compute_genesis_leaf_hash(
-        &result.closed_tree_metadata.root_hash,
-        result.closed_tree_metadata.tree_size,
-    );
-
     chain_index
-        .record_closed_tree(&result.closed_tree_metadata, genesis_leaf_hash)
+        .record_closed_tree(&result.closed_tree_metadata)
         .unwrap();
 
     let tree = chain_index.get_tree(result.closed_tree_id).unwrap();
@@ -69,7 +64,7 @@ async fn test_chain_index_lifecycle() {
     let tree = tree.unwrap();
     assert_eq!(tree.tree_id, result.closed_tree_id);
     assert_eq!(tree.tree_size, 10);
-    assert_eq!(tree.genesis_leaf_hash, Some(genesis_leaf_hash));
+    assert_eq!(tree.data_tree_index, result.data_tree_index);
 
     let result = chain_index.verify_full_chain().unwrap();
     assert!(result.valid);
@@ -134,7 +129,7 @@ async fn test_chain_index_sync() {
 }
 
 #[tokio::test]
-#[ignore = "Genesis hash verification across multiple rotations needs review"]
+#[ignore = "Test needs update after removing genesis_leaf_hash in SUPER-2"]
 async fn test_multiple_tree_rotations() {
     let dir = tempdir().unwrap();
     let data_dir = dir.path().to_path_buf();
@@ -183,13 +178,8 @@ async fn test_multiple_tree_rotations() {
             .await
             .unwrap();
 
-        let genesis_leaf_hash = atl_core::compute_genesis_leaf_hash(
-            &result.closed_tree_metadata.root_hash,
-            result.closed_tree_metadata.tree_size,
-        );
-
         chain_index
-            .record_closed_tree(&result.closed_tree_metadata, genesis_leaf_hash)
+            .record_closed_tree(&result.closed_tree_metadata)
             .unwrap();
     }
 

@@ -170,8 +170,7 @@ async fn run_standalone(args: Args) -> anyhow::Result<()> {
     let engine = crate::storage::StorageEngine::new(storage_config, origin_id)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize storage engine: {}", e))?;
-    let storage_engine = Arc::new(engine);
-    let storage: Arc<dyn traits::Storage> = storage_engine.clone();
+    let storage = Arc::new(engine);
 
     // Initialize Chain Index
     let chain_index_path = PathBuf::from(&args.database).join("chain_index.db");
@@ -181,7 +180,7 @@ async fn run_standalone(args: Args) -> anyhow::Result<()> {
 
     // Sync Chain Index with main DB
     {
-        let index = storage_engine.index_store();
+        let index = storage.index_store();
         let idx = index.lock().await;
         let ci = chain_index.lock().await;
         let synced = ci
@@ -203,16 +202,17 @@ async fn run_standalone(args: Args) -> anyhow::Result<()> {
 
     let background_config = background::BackgroundConfig::from_env();
     let background_runner = background::BackgroundJobRunner::new(
-        storage_engine.clone(),
+        storage.clone(),
         chain_index.clone(),
         background_config,
     );
     let background_handles = background_runner.start().await?;
 
     // Create dispatcher
+    let signer_arc = Arc::new(signer);
     let dispatcher = Arc::new(traits::LocalDispatcher::new(
         sequencer_handle,
-        signer,
+        (*signer_arc).clone(),
         storage.clone(),
     )) as Arc<dyn traits::SequencerClient>;
 
@@ -221,7 +221,9 @@ async fn run_standalone(args: Args) -> anyhow::Result<()> {
         args,
         config::ServerMode::Standalone,
         dispatcher,
+        Some(storage.clone() as Arc<dyn traits::Storage>),
         Some(storage),
+        Some(signer_arc),
     )
     .await?;
 
@@ -253,8 +255,8 @@ async fn run_node(args: Args) -> anyhow::Result<()> {
     let dispatcher =
         Arc::new(grpc::GrpcDispatcher::new(grpc_config).await?) as Arc<dyn traits::SequencerClient>;
 
-    // Start HTTP server (no storage)
-    start_http_server(args, config::ServerMode::Node, dispatcher, None).await?;
+    // Start HTTP server (no storage, no signer)
+    start_http_server(args, config::ServerMode::Node, dispatcher, None, None, None).await?;
 
     Ok(())
 }
@@ -293,8 +295,7 @@ async fn run_sequencer(args: Args) -> anyhow::Result<()> {
     let engine = crate::storage::StorageEngine::new(storage_config, origin_id)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize storage engine: {}", e))?;
-    let storage_engine = Arc::new(engine);
-    let storage: Arc<dyn traits::Storage> = storage_engine.clone();
+    let storage = Arc::new(engine);
 
     // Initialize Chain Index
     let chain_index_path = PathBuf::from(&args.database).join("chain_index.db");
@@ -304,7 +305,7 @@ async fn run_sequencer(args: Args) -> anyhow::Result<()> {
 
     // Sync Chain Index with main DB
     {
-        let index = storage_engine.index_store();
+        let index = storage.index_store();
         let idx = index.lock().await;
         let ci = chain_index.lock().await;
         let synced = ci
@@ -326,7 +327,7 @@ async fn run_sequencer(args: Args) -> anyhow::Result<()> {
 
     let background_config = background::BackgroundConfig::from_env();
     let background_runner = background::BackgroundJobRunner::new(
-        storage_engine.clone(),
+        storage.clone(),
         chain_index.clone(),
         background_config,
     );
@@ -361,13 +362,19 @@ async fn run_sequencer(args: Args) -> anyhow::Result<()> {
         storage.clone(),
     )) as Arc<dyn traits::SequencerClient>;
 
+    // Clone for HTTP server
+    let storage_for_http = storage.clone();
+    let signer_for_http = signer.clone();
+
     // Start HTTP admin server
     let http_handle = tokio::spawn(async move {
         start_http_server(
             args,
             config::ServerMode::Sequencer,
             dispatcher,
-            Some(storage),
+            Some(storage_for_http.clone() as Arc<dyn traits::Storage>),
+            Some(storage_for_http),
+            Some(signer_for_http),
         )
         .await
     });
@@ -398,6 +405,8 @@ async fn start_http_server(
     mode: config::ServerMode,
     dispatcher: std::sync::Arc<dyn traits::SequencerClient>,
     storage: Option<std::sync::Arc<dyn traits::Storage>>,
+    storage_engine: Option<std::sync::Arc<storage::engine::StorageEngine>>,
+    signer: Option<std::sync::Arc<receipt::CheckpointSigner>>,
 ) -> anyhow::Result<()> {
     use std::sync::Arc;
 
@@ -418,6 +427,8 @@ async fn start_http_server(
         mode,
         dispatcher,
         storage,
+        storage_engine,
+        signer,
         access_tokens,
         base_url,
     });

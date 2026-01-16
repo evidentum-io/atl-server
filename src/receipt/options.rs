@@ -26,6 +26,12 @@ pub struct ReceiptOptions {
     /// This is the default behavior for Split-View protection.
     /// Only set to false for special cases (e.g., testing).
     pub auto_consistency_from_anchor: bool,
+
+    /// Template for upgrade URL generation
+    /// Placeholder {entry_id} will be replaced with actual entry UUID
+    /// Example: "https://api.example.com/v1/receipts/{entry_id}/upgrade"
+    #[allow(dead_code)]
+    pub upgrade_url_template: Option<String>,
 }
 
 impl Default for ReceiptOptions {
@@ -36,6 +42,7 @@ impl Default for ReceiptOptions {
             timestamp: None,
             at_tree_size: None,
             auto_consistency_from_anchor: true, // Split-View protection by default
+            upgrade_url_template: None,
         }
     }
 }
@@ -51,6 +58,7 @@ impl ReceiptOptions {
             timestamp: None,
             at_tree_size: None,
             auto_consistency_from_anchor: true,
+            upgrade_url_template: None,
         }
     }
 
@@ -65,6 +73,7 @@ impl ReceiptOptions {
             timestamp: None,
             at_tree_size: None,
             auto_consistency_from_anchor: false,
+            upgrade_url_template: None,
         }
     }
 
@@ -78,6 +87,7 @@ impl ReceiptOptions {
             timestamp: None,
             at_tree_size: None,
             auto_consistency_from_anchor: false,
+            upgrade_url_template: None,
         }
     }
 }
