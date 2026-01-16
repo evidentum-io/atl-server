@@ -128,7 +128,10 @@ pub fn parse_proof(proof_bytes: &[u8]) -> Result<DetachedTimestampFile, AnchorEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::anchoring::ots::bitcoin::BLOCK_TIME_CACHE;
     use atl_core::ots::{Step, StepData};
+
+    const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
     #[tokio::test]
     async fn test_detect_pending_status() {
@@ -148,16 +151,25 @@ mod tests {
             first_step: step,
         };
 
-        let timeout = Duration::from_secs(30);
-        let status = detect_status(&timestamp, timeout).await.unwrap();
+        let status = detect_status(&timestamp, TEST_TIMEOUT).await.unwrap();
         assert!(matches!(status, OtsStatus::Pending { .. }));
     }
 
     #[tokio::test]
-    #[ignore] // Requires network access - will be covered in BBT-3 with pre-populated cache
     async fn test_detect_confirmed_status() {
         let hash = vec![2u8; 32];
-        let bitcoin_att = Attestation::Bitcoin { height: 700000 };
+        let test_height = 700_000u64;
+        let test_block_time = 1_631_318_400u64; // Real timestamp for block 700000
+
+        // Pre-populate cache to avoid API call in test
+        {
+            let mut cache = BLOCK_TIME_CACHE.write().unwrap();
+            cache.insert(test_height, test_block_time);
+        }
+
+        let bitcoin_att = Attestation::Bitcoin {
+            height: test_height,
+        };
 
         let step = Step {
             data: StepData::Attestation(bitcoin_att),
@@ -170,9 +182,50 @@ mod tests {
             first_step: step,
         };
 
-        let timeout = Duration::from_secs(10);
-        let status = detect_status(&timestamp, timeout).await.unwrap();
-        assert!(matches!(status, OtsStatus::Confirmed { .. }));
+        let status = detect_status(&timestamp, TEST_TIMEOUT).await.unwrap();
+        match status {
+            OtsStatus::Confirmed {
+                block_height,
+                block_time,
+            } => {
+                assert_eq!(block_height, test_height);
+                assert_eq!(block_time, test_block_time);
+            }
+            _ => panic!("Expected Confirmed status"),
+        }
+
+        // Cleanup
+        BLOCK_TIME_CACHE.write().unwrap().remove(&test_height);
+    }
+
+    #[tokio::test]
+    async fn test_detect_status_propagates_error() {
+        let hash = vec![3u8; 32];
+        // Use a height that doesn't exist - should cause error (no fallback!)
+        let impossible_height = 999_999_999u64;
+
+        let bitcoin_att = Attestation::Bitcoin {
+            height: impossible_height,
+        };
+
+        let step = Step {
+            data: StepData::Attestation(bitcoin_att),
+            output: hash.clone(),
+            next: vec![],
+        };
+
+        let timestamp = Timestamp {
+            start_digest: hash,
+            first_step: step,
+        };
+
+        // Should return error, NOT a fallback estimate!
+        let result = detect_status(&timestamp, Duration::from_secs(5)).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(AnchorError::BlockTimeFetchFailed { .. })
+        ));
     }
 
     #[test]

@@ -45,7 +45,7 @@ const PROVIDERS: &[ApiProvider] = &[
 ];
 
 /// Global cache for block timestamps (block_height -> unix_timestamp)
-static BLOCK_TIME_CACHE: LazyLock<RwLock<HashMap<u64, u64>>> =
+pub(crate) static BLOCK_TIME_CACHE: LazyLock<RwLock<HashMap<u64, u64>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
 /// Get Bitcoin block timestamp from blockchain APIs (round-robin)
@@ -226,5 +226,55 @@ mod tests {
         // Real timestamp should be around 1631318400 (2021-09-11)
         assert!(ts > 1_631_000_000);
         assert!(ts < 1_632_000_000);
+    }
+
+    #[tokio::test]
+    async fn test_returns_error_when_all_apis_fail() {
+        // Use a height that doesn't exist (far future)
+        // All 3 APIs should return 404 and we should get an error
+        let result = get_block_timestamp(999_999_999, Duration::from_secs(5)).await;
+
+        assert!(result.is_err());
+        match result {
+            Err(AnchorError::BlockTimeFetchFailed { height, details }) => {
+                assert_eq!(height, 999_999_999);
+                assert!(details.contains("blockstream.info"));
+                assert!(details.contains("mempool.space"));
+                assert!(details.contains("blockchain.info"));
+            }
+            _ => panic!("Expected BlockTimeFetchFailed error"),
+        }
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires network
+    async fn test_all_three_providers_return_same_value() {
+        // Test that all providers return the same timestamp for genesis block
+        // This verifies our provider implementations are correct
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap();
+
+        // Test blockstream.info
+        let ts1 = fetch_from_provider(&client, &PROVIDERS[0], 0)
+            .await
+            .unwrap();
+
+        // Test mempool.space
+        let ts2 = fetch_from_provider(&client, &PROVIDERS[1], 0)
+            .await
+            .unwrap();
+
+        // Test blockchain.info
+        let ts3 = fetch_from_provider(&client, &PROVIDERS[2], 0)
+            .await
+            .unwrap();
+
+        // All should return genesis block timestamp
+        assert_eq!(ts1, 1_231_006_505);
+        assert_eq!(ts2, 1_231_006_505);
+        assert_eq!(ts3, 1_231_006_505);
     }
 }
