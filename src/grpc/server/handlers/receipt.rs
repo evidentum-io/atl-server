@@ -218,7 +218,8 @@ fn find_bitcoin_anchor_covering(
         let anchors = storage.get_anchors(size)?;
         for anchor in anchors {
             if anchor.anchor_type == crate::traits::anchor::AnchorType::BitcoinOts
-                && anchor.tree_size >= target_tree_size
+                && (anchor.tree_size >= target_tree_size
+                    || (anchor.target == "super_root" && anchor.super_tree_size.unwrap_or(0) > 0))
             {
                 return Ok(Some(anchor));
             }

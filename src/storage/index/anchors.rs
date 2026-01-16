@@ -158,7 +158,7 @@ impl IndexStore {
         let conn = self.connection();
         let mut stmt = conn.prepare(
             "SELECT id, tree_size, anchor_type, target, anchored_hash, super_tree_size, timestamp, token, metadata
-             FROM anchors WHERE tree_size = ?1",
+             FROM anchors WHERE tree_size = ?1 OR (target = 'super_root' AND status = 'confirmed')",
         )?;
 
         let rows = stmt.query_map(params![tree_size as i64], row_to_anchor)?;
