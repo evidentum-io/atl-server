@@ -437,32 +437,27 @@ async fn generate_super_proof(
         return Ok(None);
     }
 
-    // 6. Get inclusion proof (direct SlabManager call)
+    // 6. Get inclusion proof (direct PinnedSuperTreeSlab call)
     let inclusion_path = {
-        let mut super_slabs = storage.super_slabs().write().await;
-        super_slabs
+        let super_slab = storage.super_slab().read().await;
+        super_slab
             .get_inclusion_path(data_tree_index, super_tree_size)
             .map_err(|e| ServerError::Storage(crate::error::StorageError::Io(e)))?
     };
 
     // 5. Get super_root
     let super_root = {
-        let mut super_slabs = storage.super_slabs().write().await;
-        super_slabs
+        let super_slab = storage.super_slab().read().await;
+        super_slab
             .get_root(super_tree_size)
             .map_err(|e| ServerError::Storage(crate::error::StorageError::Io(e)))?
     };
 
     // 6. Get consistency proof to origin (from size 1 to current)
     let consistency_path = {
-        let mut super_slabs = storage.super_slabs().write().await;
-        let slabs_cell = std::cell::RefCell::new(&mut *super_slabs);
+        let super_slab = storage.super_slab().read().await;
         atl_core::generate_consistency_proof(1, super_tree_size, |level, index| {
-            slabs_cell
-                .borrow_mut()
-                .get_node(level, index)
-                .ok()
-                .flatten()
+            super_slab.get_node(level, index)
         })?
         .path
     };

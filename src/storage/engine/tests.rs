@@ -233,8 +233,8 @@ async fn test_rotate_tree_does_not_insert_genesis() {
     );
 
     // Assert: Super-Tree contains the data tree root
-    let mut super_slabs = engine.super_slabs.write().await;
-    let super_leaf = super_slabs.get_node(0, 0).unwrap().unwrap();
+    let super_slab = engine.super_slab.read().await;
+    let super_leaf = super_slab.get_node(0, 0).unwrap();
     assert_eq!(super_leaf, root_hash);
 
     // Assert: data_tree_index is correct
@@ -363,8 +363,8 @@ async fn test_rotate_tree_appends_to_super_tree() {
         .unwrap();
 
     // Assert: Super-Tree contains the closed tree root
-    let mut super_slabs = engine.super_slabs.write().await;
-    let super_leaf = super_slabs.get_node(0, 0).unwrap().unwrap();
+    let super_slab = engine.super_slab.read().await;
+    let super_leaf = super_slab.get_node(0, 0).unwrap();
     assert_eq!(super_leaf, root_hash);
 
     // Assert: Super-Tree size is 1
@@ -385,15 +385,15 @@ async fn test_super_slabs_directory_created_on_startup() {
         data_dir: dir.path().to_path_buf(),
         ..Default::default()
     };
-    let expected_path = dir.path().join("super_tree").join("slabs");
+    let expected_dir = dir.path().join("super_tree");
+    let expected_file = expected_dir.join("super_tree.slab");
 
     let _storage = StorageEngine::new(config, [0u8; 32]).await.unwrap();
 
-    assert!(
-        expected_path.exists(),
-        "Super-Tree slab directory should exist"
-    );
-    assert!(expected_path.is_dir(), "Should be a directory");
+    assert!(expected_dir.exists(), "Super-Tree directory should exist");
+    assert!(expected_dir.is_dir(), "Should be a directory");
+    assert!(expected_file.exists(), "Super-Tree slab file should exist");
+    assert!(expected_file.is_file(), "Should be a file");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -475,13 +475,13 @@ async fn test_set_super_tree_size_increments_correctly() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_storage_engine_has_super_slabs_accessor() {
+async fn test_storage_engine_has_super_slab_accessor() {
     let (engine, _dir) = create_test_engine([1u8; 32]).await;
 
-    let super_slabs = engine.super_slabs();
+    let super_slab = engine.super_slab();
 
     assert!(
-        Arc::strong_count(super_slabs) >= 1,
-        "super_slabs should be accessible"
+        Arc::strong_count(super_slab) >= 1,
+        "super_slab should be accessible"
     );
 }

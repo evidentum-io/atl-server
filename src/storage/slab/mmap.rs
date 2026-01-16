@@ -159,14 +159,21 @@ impl SlabFile {
     /// * `index` - Node index within that level
     /// * `hash` - 32-byte hash to write
     ///
-    /// # Panics
-    /// Panics if index is out of bounds
-    pub fn set_node(&mut self, level: u32, index: u64, hash: &[u8; 32]) {
+    /// # Errors
+    /// Returns IO error if index is out of bounds or flush fails
+    pub fn set_node(&mut self, level: u32, index: u64, hash: &[u8; 32]) -> io::Result<()> {
         let offset = self.node_offset(level, index);
-        assert!(
-            offset + NODE_SIZE <= self.mmap.len(),
-            "node offset out of bounds"
-        );
+        if offset + NODE_SIZE > self.mmap.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "node offset {} + {} exceeds mmap length {}",
+                    offset,
+                    NODE_SIZE,
+                    self.mmap.len()
+                ),
+            ));
+        }
 
         self.mmap[offset..offset + NODE_SIZE].copy_from_slice(hash);
 
@@ -176,8 +183,10 @@ impl SlabFile {
             self.update_header();
             // CRITICAL: Sync header to disk immediately to prevent stale reads on reopen
             // This ensures any concurrent/subsequent opens see the updated leaf_count
-            let _ = self.mmap.flush_range(0, SlabHeader::SIZE);
+            self.mmap.flush_range(0, SlabHeader::SIZE)?;
         }
+
+        Ok(())
     }
 
     /// Get current leaf count
@@ -322,7 +331,7 @@ mod tests {
 
         // Write a leaf
         let hash = [42u8; 32];
-        slab.set_node(0, 0, &hash);
+        slab.set_node(0, 0, &hash).unwrap();
 
         // Read it back
         assert_eq!(slab.get_node(0, 0), Some(hash));
@@ -342,14 +351,14 @@ mod tests {
         for i in 0..8 {
             let mut hash = [0u8; 32];
             hash[0] = i + 1; // +1 to avoid all-zero hash for i=0
-            slab.set_node(0, i as u64, &hash);
+            slab.set_node(0, i as u64, &hash).unwrap();
         }
 
         // Write internal nodes (level 1)
         for i in 0..4 {
             let mut hash = [0u8; 32];
             hash[0] = 100 + i as u8;
-            slab.set_node(1, i as u64, &hash);
+            slab.set_node(1, i as u64, &hash).unwrap();
         }
 
         // Verify
@@ -370,7 +379,7 @@ mod tests {
         // Fill up
         for i in 0..10 {
             let hash = [i as u8; 32];
-            slab.set_node(0, i as u64, &hash);
+            slab.set_node(0, i as u64, &hash).unwrap();
         }
 
         assert!(slab.is_full());
@@ -385,7 +394,7 @@ mod tests {
         {
             let mut slab = SlabFile::create(&path, 1, 0, 100).unwrap();
             let hash = [123u8; 32];
-            slab.set_node(0, 42, &hash);
+            slab.set_node(0, 42, &hash).unwrap();
             slab.flush().unwrap();
         }
 
@@ -419,7 +428,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "node offset out of bounds")]
     fn test_slab_out_of_bounds_write() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("slab_0001.dat");
@@ -428,6 +436,12 @@ mod tests {
         let hash = [0u8; 32];
 
         // Try to write beyond capacity
-        slab.set_node(0, 1000, &hash);
+        let result = slab.set_node(0, 1000, &hash);
+        assert!(result.is_err());
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("exceeds mmap length"));
     }
 }

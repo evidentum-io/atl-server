@@ -17,7 +17,7 @@ use crate::storage::config::StorageConfig;
 use crate::storage::index::lifecycle::TreeRotationResult;
 use crate::storage::index::{BatchInsert, IndexStore};
 use crate::storage::recovery;
-use crate::storage::slab::{SlabConfig, SlabManager};
+use crate::storage::slab::{PinnedSuperTreeSlab, SlabConfig, SlabManager};
 use crate::storage::wal::{WalEntry, WalWriter};
 use crate::traits::{
     AppendParams, BatchResult, ConsistencyProof, Entry, EntryResult, InclusionProof, ProofProvider,
@@ -49,8 +49,8 @@ pub struct StorageEngine {
     /// Slab manager (Data Tree slabs)
     slabs: Arc<RwLock<SlabManager>>,
 
-    /// Super-Tree slab manager
-    super_slabs: Arc<RwLock<SlabManager>>,
+    /// Super-Tree pinned slab
+    super_slab: Arc<RwLock<PinnedSuperTreeSlab>>,
 
     /// SQLite index (Mutex because Connection is not Sync)
     index: Arc<Mutex<IndexStore>>,
@@ -78,7 +78,7 @@ impl StorageEngine {
         std::fs::create_dir_all(&config.data_dir)?;
 
         // Create Super-Tree slab directory
-        let super_slab_dir = config.data_dir.join("super_tree").join("slabs");
+        let super_slab_dir = config.data_dir.join("super_tree");
         std::fs::create_dir_all(&super_slab_dir)?;
 
         // Initialize components
@@ -91,37 +91,25 @@ impl StorageEngine {
             },
         )?;
 
-        // Initialize Super-Tree SlabManager
-        let mut super_slabs = SlabManager::new(
-            super_slab_dir,
-            SlabConfig {
-                max_leaves: config.slab_capacity,
-                max_open_slabs: config.max_open_slabs,
-            },
-        )?;
+        // Initialize Super-Tree PinnedSuperTreeSlab
+        let super_slab_path = super_slab_dir.join("super_tree.slab");
+        let mut super_slab =
+            PinnedSuperTreeSlab::open_or_create(&super_slab_path, config.slab_capacity)?;
+
+        tracing::debug!(
+            "init: Super-Tree size from slab file: {}",
+            super_slab.leaf_count()
+        );
 
         let mut index = IndexStore::open(&config.db_path())?;
         index.initialize()?;
-
-        // Initialize Super-Tree size from SQLite BEFORE recovery
-        // This ensures reconciliation sees the correct Super-Tree size.
-        // Must happen BEFORE recovery::recover() is called.
-        let super_tree_size = index
-            .get_super_tree_size()
-            .map_err(|e| StorageError::Database(e.to_string()))?;
-        super_slabs.set_tree_size(super_tree_size);
-
-        tracing::debug!(
-            "init: Super-Tree size restored from SQLite: {}",
-            super_tree_size
-        );
 
         // Run crash recovery
         recovery::recover(
             &mut wal,
             &mut slabs,
             &mut index,
-            &mut super_slabs,
+            &mut super_slab,
             u64::from(config.slab_capacity),
         )
         .await?;
@@ -146,7 +134,7 @@ impl StorageEngine {
             config,
             wal: Arc::new(RwLock::new(wal)),
             slabs: Arc::new(RwLock::new(slabs)),
-            super_slabs: Arc::new(RwLock::new(super_slabs)),
+            super_slab: Arc::new(RwLock::new(super_slab)),
             index: Arc::new(Mutex::new(index)),
             tree_state: StdRwLock::new(tree_state),
             healthy: AtomicBool::new(true),
@@ -163,9 +151,9 @@ impl StorageEngine {
         Arc::clone(&self.index)
     }
 
-    /// Get reference to Super-Tree SlabManager for proofs
-    pub fn super_slabs(&self) -> &Arc<RwLock<SlabManager>> {
-        &self.super_slabs
+    /// Get reference to Super-Tree PinnedSuperTreeSlab for proofs
+    pub fn super_slab(&self) -> &Arc<RwLock<PinnedSuperTreeSlab>> {
+        &self.super_slab
     }
 
     /// Rotate the tree: close active tree and create new one
@@ -198,30 +186,33 @@ impl StorageEngine {
     ) -> Result<TreeRotationResult, StorageError> {
         // 1. Append closed tree root to Super-Tree FIRST to get data_tree_index
         let (super_root, data_tree_index) = {
-            let mut super_slabs = self.super_slabs.write().await;
-            let index = self.index.lock().await;
+            let mut super_slab = self.super_slab.write().await;
 
             // Get current Super-Tree size (this becomes data_tree_index)
-            let data_tree_index = index
-                .get_super_tree_size()
-                .map_err(|e| StorageError::Database(e.to_string()))?;
+            // SOURCE OF TRUTH: SlabFile header, not SQLite
+            let data_tree_index = super_slab.leaf_count();
 
-            // Append to Super-Tree
-            let super_root = super_slabs.append_leaves(&[*root_hash])?;
+            // Append to Super-Tree (atomic: write + flush)
+            let super_root = super_slab.append_leaf(root_hash)?;
 
-            // Update Super-Tree metadata
-            index
-                .set_super_tree_size(data_tree_index + 1)
-                .map_err(|e| StorageError::Database(e.to_string()))?;
+            (super_root, data_tree_index)
+        };
+
+        // Update SQLite for audit (after successful append)
+        {
+            let index = self.index.lock().await;
+
+            // Best-effort audit write - failure doesn't break consistency
+            if let Err(e) = index.set_super_tree_size(data_tree_index + 1) {
+                tracing::warn!("Failed to update SQLite super_tree_size (audit): {}", e);
+            }
 
             // Set genesis on first append
             if data_tree_index == 0 {
-                index
-                    .set_super_genesis_root(&super_root)
-                    .map_err(|e| StorageError::Database(e.to_string()))?;
+                if let Err(e) = index.set_super_genesis_root(&super_root) {
+                    tracing::warn!("Failed to update SQLite super_genesis_root (audit): {}", e);
+                }
             }
-
-            (super_root, data_tree_index)
         };
 
         // 2. Close active tree and create new one
@@ -548,8 +539,8 @@ impl Storage for StorageEngine {
                 if super_tree_size == 0 {
                     return Ok([0u8; 32]);
                 }
-                let mut super_slabs = self.super_slabs.write().await;
-                super_slabs.get_root(super_tree_size).map_err(|e| {
+                let super_slab = self.super_slab.read().await;
+                super_slab.get_root(super_tree_size).map_err(|e| {
                     crate::error::ServerError::Storage(crate::error::StorageError::Io(e))
                 })
             })

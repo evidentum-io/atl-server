@@ -61,8 +61,8 @@ async fn test_genesis_leaf_in_both_slab_and_sqlite() {
     assert_eq!(result.new_tree_head.tree_size, 10); // NO +1 for genesis!
 
     // Verify Super-Tree contains the closed tree root
-    let mut super_slabs = engine.super_slabs().write().await;
-    let super_leaf = super_slabs.get_node(0, 0).unwrap().unwrap();
+    let super_slab = engine.super_slab().read().await;
+    let super_leaf = super_slab.get_node(0, 0).unwrap();
     assert_eq!(super_leaf, tree_head_before.root_hash);
 
     // Verify Super-Tree size is 1
@@ -163,8 +163,8 @@ async fn test_super_tree_stores_data_tree_root() {
         .unwrap();
 
     // Verify Super-Tree contains the closed tree root (NOT genesis leaf hash)
-    let mut super_slabs = engine.super_slabs().write().await;
-    let super_leaf = super_slabs.get_node(0, 0).unwrap().unwrap();
+    let super_slab = engine.super_slab().read().await;
+    let super_leaf = super_slab.get_node(0, 0).unwrap();
     assert_eq!(
         super_leaf, head_before.root_hash,
         "Super-Tree should store the data tree root directly"
@@ -244,9 +244,9 @@ async fn test_chain_link_integrity() {
     assert_eq!(index3, 2);
 
     // Verify Super-Tree contains all three tree roots in order
-    let mut super_slabs = engine.super_slabs().write().await;
+    let super_slab = engine.super_slab().read().await;
     for (i, root_hash) in root_hashes.iter().enumerate() {
-        let super_leaf = super_slabs.get_node(0, i as u64).unwrap().unwrap();
+        let super_leaf = super_slab.get_node(0, i as u64).unwrap();
         assert_eq!(super_leaf, *root_hash, "Super-Tree leaf {} mismatch", i);
     }
 

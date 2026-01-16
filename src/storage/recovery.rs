@@ -4,7 +4,7 @@
 
 use crate::error::StorageError;
 use crate::storage::index::{BatchInsert, IndexStore};
-use crate::storage::slab::SlabManager;
+use crate::storage::slab::{PinnedSuperTreeSlab, SlabManager};
 use crate::storage::wal::{WalRecovery, WalWriter};
 use uuid::Uuid;
 
@@ -24,7 +24,7 @@ pub async fn recover(
     wal: &mut WalWriter,
     slabs: &mut SlabManager,
     index: &mut IndexStore,
-    super_slabs: &mut SlabManager,
+    super_slab: &mut PinnedSuperTreeSlab,
     slab_capacity: u64,
 ) -> Result<(), StorageError> {
     // Scan WAL directory for pending/committed batches
@@ -119,7 +119,7 @@ pub async fn recover(
     wal.set_next_batch_id(result.next_batch_id);
 
     // Reconcile Super-Tree with closed trees
-    reconcile_super_tree(index, super_slabs).await?;
+    reconcile_super_tree(index, super_slab).await?;
 
     Ok(())
 }
@@ -135,7 +135,7 @@ pub async fn recover(
 /// Returns `StorageError::Corruption` if Super-Tree has more leaves than closed trees
 async fn reconcile_super_tree(
     index: &mut IndexStore,
-    super_slabs: &mut SlabManager,
+    super_slab: &mut PinnedSuperTreeSlab,
 ) -> Result<(), StorageError> {
     // 1. Get closed trees from SQLite (ordered by close time)
     let closed_trees = index
@@ -143,8 +143,8 @@ async fn reconcile_super_tree(
         .map_err(|e| StorageError::Database(e.to_string()))?;
     let closed_count = closed_trees.len() as u64;
 
-    // 2. Get Super-Tree size
-    let super_size = super_slabs.tree_size();
+    // 2. Get Super-Tree size from PinnedSuperTreeSlab (SOURCE OF TRUTH)
+    let super_size = super_slab.leaf_count();
 
     tracing::info!(
         "recovery: Super-Tree reconciliation - {} closed trees, {} in Super-Tree",
@@ -154,7 +154,6 @@ async fn reconcile_super_tree(
 
     // 3. Check consistency
     if closed_count < super_size {
-        // Data corruption - Super-Tree has more leaves than closed trees
         return Err(StorageError::Corruption(format!(
             "Super-Tree has {} leaves but only {} closed trees in SQLite",
             super_size, closed_count
@@ -162,7 +161,6 @@ async fn reconcile_super_tree(
     }
 
     if closed_count == super_size {
-        // Consistent - nothing to do
         tracing::info!("recovery: Super-Tree is consistent");
         return Ok(());
     }
@@ -177,8 +175,8 @@ async fn reconcile_super_tree(
     for (i, tree) in closed_trees.iter().enumerate().skip(super_size as usize) {
         let expected_index = i as u64;
 
-        // Append root to Super-Tree
-        super_slabs.append_leaves(&[tree.root_hash])?;
+        // Append root to Super-Tree (atomic operation)
+        super_slab.append_leaf(&tree.root_hash)?;
 
         tracing::info!(
             "recovery: Reconciled tree {} (root_hash={}) into Super-Tree at index {}",
@@ -189,7 +187,7 @@ async fn reconcile_super_tree(
     }
 
     // 5. Verify final state
-    let final_size = super_slabs.tree_size();
+    let final_size = super_slab.leaf_count();
     if final_size != closed_count {
         return Err(StorageError::Corruption(format!(
             "Super-Tree reconciliation failed: expected size {}, got {}",
@@ -209,7 +207,6 @@ async fn reconcile_super_tree(
 mod tests {
     use super::*;
     use crate::storage::index::IndexStore;
-    use crate::storage::slab::{SlabConfig, SlabManager};
     use rusqlite::Connection;
     use tempfile::TempDir;
 
@@ -221,17 +218,11 @@ mod tests {
         (index, dir)
     }
 
-    fn create_test_super_slabs() -> (SlabManager, TempDir) {
+    fn create_test_super_slab() -> (PinnedSuperTreeSlab, TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let slabs = SlabManager::new(
-            dir.path().to_path_buf(),
-            SlabConfig {
-                max_leaves: 1024,
-                max_open_slabs: 2,
-            },
-        )
-        .unwrap();
-        (slabs, dir)
+        let slab_path = dir.path().join("super_tree.slab");
+        let slab = PinnedSuperTreeSlab::open_or_create(&slab_path, 1024).unwrap();
+        (slab, dir)
     }
 
     fn create_active_tree(index: &IndexStore) -> i64 {
@@ -256,59 +247,65 @@ mod tests {
     async fn test_reconcile_when_consistent() {
         // Arrange: 3 closed trees, Super-Tree size = 3
         let (mut index, _index_dir) = create_test_index();
-        let (mut super_slabs, _slabs_dir) = create_test_super_slabs();
+        let (mut super_slab, _slabs_dir) = create_test_super_slab();
 
         create_active_tree(&index);
         for i in 0..3 {
-            close_tree(&mut index, (i + 1) * 100, [i as u8; 32], i);
-            super_slabs.append_leaves(&[[i as u8; 32]]).unwrap();
+            let mut hash = [0u8; 32];
+            hash[0] = i as u8 + 1; // Use non-zero hashes
+            close_tree(&mut index, (i + 1) * 100, hash, i);
+            super_slab.append_leaf(&hash).unwrap();
         }
 
         // Act
-        let result = reconcile_super_tree(&mut index, &mut super_slabs).await;
+        let result = reconcile_super_tree(&mut index, &mut super_slab).await;
 
         // Assert
         assert!(result.is_ok());
-        assert_eq!(super_slabs.tree_size(), 3);
+        assert_eq!(super_slab.leaf_count(), 3);
     }
 
     #[tokio::test]
     async fn test_reconcile_appends_missing_trees() {
         // Arrange: 3 closed trees, Super-Tree size = 1
         let (mut index, _index_dir) = create_test_index();
-        let (mut super_slabs, _slabs_dir) = create_test_super_slabs();
+        let (mut super_slab, _slabs_dir) = create_test_super_slab();
 
         create_active_tree(&index);
         for i in 0..3 {
-            close_tree(&mut index, (i + 1) * 100, [i as u8; 32], i);
+            let mut hash = [0u8; 32];
+            hash[0] = i as u8 + 1; // Use non-zero hashes
+            close_tree(&mut index, (i + 1) * 100, hash, i);
         }
         // Only append first tree to Super-Tree
-        super_slabs.append_leaves(&[[0u8; 32]]).unwrap();
+        let mut first_hash = [0u8; 32];
+        first_hash[0] = 1;
+        super_slab.append_leaf(&first_hash).unwrap();
 
         // Act
-        let result = reconcile_super_tree(&mut index, &mut super_slabs).await;
+        let result = reconcile_super_tree(&mut index, &mut super_slab).await;
 
         // Assert
         assert!(result.is_ok());
-        assert_eq!(super_slabs.tree_size(), 3);
+        assert_eq!(super_slab.leaf_count(), 3);
     }
 
     #[tokio::test]
     async fn test_reconcile_fails_on_corruption() {
         // Arrange: 1 closed tree, Super-Tree size = 3 (impossible state)
         let (mut index, _index_dir) = create_test_index();
-        let (mut super_slabs, _slabs_dir) = create_test_super_slabs();
+        let (mut super_slab, _slabs_dir) = create_test_super_slab();
 
         create_active_tree(&index);
         close_tree(&mut index, 100, [1u8; 32], 0);
 
         // Create Super-Tree with 3 leaves (more than closed trees)
-        super_slabs.append_leaves(&[[0u8; 32]]).unwrap();
-        super_slabs.append_leaves(&[[1u8; 32]]).unwrap();
-        super_slabs.append_leaves(&[[2u8; 32]]).unwrap();
+        super_slab.append_leaf(&[1u8; 32]).unwrap();
+        super_slab.append_leaf(&[2u8; 32]).unwrap();
+        super_slab.append_leaf(&[3u8; 32]).unwrap();
 
         // Act
-        let result = reconcile_super_tree(&mut index, &mut super_slabs).await;
+        let result = reconcile_super_tree(&mut index, &mut super_slab).await;
 
         // Assert
         assert!(result.is_err());
@@ -319,7 +316,7 @@ mod tests {
     async fn test_reconcile_preserves_order() {
         // Arrange: 3 closed trees with specific roots, Super-Tree empty
         let (mut index, _index_dir) = create_test_index();
-        let (mut super_slabs, _slabs_dir) = create_test_super_slabs();
+        let (mut super_slab, _slabs_dir) = create_test_super_slab();
 
         create_active_tree(&index);
         let roots = [[1u8; 32], [2u8; 32], [3u8; 32]];
@@ -328,15 +325,15 @@ mod tests {
         }
 
         // Act
-        let result = reconcile_super_tree(&mut index, &mut super_slabs).await;
+        let result = reconcile_super_tree(&mut index, &mut super_slab).await;
 
         // Assert
         assert!(result.is_ok());
-        assert_eq!(super_slabs.tree_size(), 3);
+        assert_eq!(super_slab.leaf_count(), 3);
 
         // Verify roots were added in correct order
         for (i, expected_root) in roots.iter().enumerate() {
-            let actual_root = super_slabs.get_node(0, i as u64).unwrap().unwrap();
+            let actual_root = super_slab.get_node(0, i as u64).unwrap();
             assert_eq!(&actual_root, expected_root);
         }
     }
@@ -386,15 +383,15 @@ mod tests {
     async fn test_reconcile_with_no_closed_trees() {
         // Arrange: Active tree only, no closed trees
         let (mut index, _index_dir) = create_test_index();
-        let (mut super_slabs, _slabs_dir) = create_test_super_slabs();
+        let (mut super_slab, _slabs_dir) = create_test_super_slab();
 
         create_active_tree(&index);
 
         // Act
-        let result = reconcile_super_tree(&mut index, &mut super_slabs).await;
+        let result = reconcile_super_tree(&mut index, &mut super_slab).await;
 
         // Assert
         assert!(result.is_ok());
-        assert_eq!(super_slabs.tree_size(), 0);
+        assert_eq!(super_slab.leaf_count(), 0);
     }
 }
