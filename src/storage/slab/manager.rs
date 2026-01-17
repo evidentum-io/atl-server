@@ -630,4 +630,470 @@ mod tests {
         // Root should equal the single leaf
         assert_eq!(root, leaves[0]);
     }
+
+    #[test]
+    fn test_get_root_zero_size() {
+        let dir = tempdir().unwrap();
+        let mut manager = SlabManager::new(dir.path().to_path_buf(), SlabConfig::default()).unwrap();
+
+        let root = manager.get_root(0).unwrap();
+        assert_eq!(root, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_get_node_basic() {
+        let dir = tempdir().unwrap();
+        let mut manager = SlabManager::new(
+            dir.path().to_path_buf(),
+            SlabConfig {
+                max_leaves: 100,
+                max_open_slabs: 2,
+            },
+        )
+        .unwrap();
+
+        let leaves: Vec<[u8; 32]> = vec![[1u8; 32], [2u8; 32], [3u8; 32]];
+        manager.append_leaves(&leaves).unwrap();
+
+        let node = manager.get_node(0, 0).unwrap();
+        assert_eq!(node, Some([1u8; 32]));
+
+        let node = manager.get_node(0, 1).unwrap();
+        assert_eq!(node, Some([2u8; 32]));
+    }
+
+    #[test]
+    fn test_flush_operation() {
+        let dir = tempdir().unwrap();
+        let mut manager = SlabManager::new(dir.path().to_path_buf(), SlabConfig::default()).unwrap();
+
+        let leaves: Vec<[u8; 32]> = vec![[1u8; 32], [2u8; 32]];
+        manager.append_leaves(&leaves).unwrap();
+
+        let result = manager.flush();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_tree_size_getter() {
+        let dir = tempdir().unwrap();
+        let mut manager = SlabManager::new(dir.path().to_path_buf(), SlabConfig::default()).unwrap();
+
+        assert_eq!(manager.tree_size(), 0);
+
+        let leaves: Vec<[u8; 32]> = vec![[1u8; 32], [2u8; 32], [3u8; 32]];
+        manager.append_leaves(&leaves).unwrap();
+
+        assert_eq!(manager.tree_size(), 3);
+    }
+
+    #[test]
+    fn test_lru_eviction() {
+        let dir = tempdir().unwrap();
+        let mut manager = SlabManager::new(
+            dir.path().to_path_buf(),
+            SlabConfig {
+                max_leaves: 2,
+                max_open_slabs: 2,
+            },
+        )
+        .unwrap();
+
+        // Fill first slab
+        manager.append_leaves(&[[1u8; 32], [2u8; 32]]).unwrap();
+
+        // Fill second slab (will create slab 2 as active)
+        manager.append_leaves(&[[3u8; 32], [4u8; 32]]).unwrap();
+
+        // Fill third slab - should trigger eviction
+        manager.append_leaves(&[[5u8; 32], [6u8; 32]]).unwrap();
+
+        // Should have evicted one slab, keeping active and one more
+        assert!(manager.slabs.len() <= manager.config.max_open_slabs);
+
+        // Active slab (3) should still be present
+        assert_eq!(manager.active_slab, Some(3));
+        assert!(manager.slabs.contains_key(&3));
+    }
+
+    #[test]
+    fn test_inclusion_proof_out_of_bounds() {
+        let dir = tempdir().unwrap();
+        let mut manager = SlabManager::new(dir.path().to_path_buf(), SlabConfig::default()).unwrap();
+
+        let leaves: Vec<[u8; 32]> = vec![[1u8; 32], [2u8; 32], [3u8; 32]];
+        manager.append_leaves(&leaves).unwrap();
+
+        let result = manager.get_inclusion_path(5, 3);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn test_multi_slab_spanning() {
+        let dir = tempdir().unwrap();
+        let mut manager = SlabManager::new(
+            dir.path().to_path_buf(),
+            SlabConfig {
+                max_leaves: 10,
+                max_open_slabs: 3,
+            },
+        )
+        .unwrap();
+
+        let leaves: Vec<[u8; 32]> = (0..25).map(|i| [i as u8; 32]).collect();
+        manager.append_leaves(&leaves).unwrap();
+
+        assert_eq!(manager.tree_size(), 25);
+
+        // Should span 3 slabs
+        let num_slabs = manager.num_slabs_for_size(25);
+        assert_eq!(num_slabs, 3);
+    }
+
+    #[test]
+    fn test_multi_slab_root_computation() {
+        let dir = tempdir().unwrap();
+        let mut manager = SlabManager::new(
+            dir.path().to_path_buf(),
+            SlabConfig {
+                max_leaves: 5,
+                max_open_slabs: 5,
+            },
+        )
+        .unwrap();
+
+        let leaves: Vec<[u8; 32]> = (0..12).map(|i| [i as u8; 32]).collect();
+        let root = manager.append_leaves(&leaves).unwrap();
+
+        // Should compute cross-slab root
+        let recomputed_root = manager.get_root(12).unwrap();
+        assert_eq!(root, recomputed_root);
+    }
+
+    #[test]
+    fn test_multi_slab_inclusion_proof() {
+        let dir = tempdir().unwrap();
+        let mut manager = SlabManager::new(
+            dir.path().to_path_buf(),
+            SlabConfig {
+                max_leaves: 8,
+                max_open_slabs: 3,
+            },
+        )
+        .unwrap();
+
+        let leaves: Vec<[u8; 32]> = (0..20).map(|i| [i as u8; 32]).collect();
+        manager.append_leaves(&leaves).unwrap();
+
+        // Test proof from first slab
+        let path1 = manager.get_inclusion_path(3, 20).unwrap();
+        assert!(!path1.is_empty());
+
+        // Test proof from second slab
+        let path2 = manager.get_inclusion_path(10, 20).unwrap();
+        assert!(!path2.is_empty());
+    }
+
+    #[test]
+    fn test_slab_config_default() {
+        let config = SlabConfig::default();
+        assert_eq!(config.max_leaves, DEFAULT_SLAB_CAPACITY);
+        assert_eq!(config.max_open_slabs, 10);
+    }
+
+    #[test]
+    fn test_slab_config_custom() {
+        let config = SlabConfig {
+            max_leaves: 50,
+            max_open_slabs: 5,
+        };
+        assert_eq!(config.max_leaves, 50);
+        assert_eq!(config.max_open_slabs, 5);
+    }
+
+    #[test]
+    fn test_combine_roots_empty() {
+        let roots: Vec<[u8; 32]> = vec![];
+        let result = SlabManager::combine_roots(&roots);
+        assert_eq!(result, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_combine_roots_single() {
+        let root = [42u8; 32];
+        let result = SlabManager::combine_roots(&[root]);
+        assert_eq!(result, root);
+    }
+
+    #[test]
+    fn test_combine_roots_multiple() {
+        let roots = vec![[1u8; 32], [2u8; 32], [3u8; 32]];
+        let result = SlabManager::combine_roots(&roots);
+        assert_ne!(result, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_hash_internal_node() {
+        let left = [1u8; 32];
+        let right = [2u8; 32];
+
+        let hash1 = SlabManager::hash_internal_node(&left, &right);
+        let hash2 = SlabManager::hash_internal_node(&left, &right);
+
+        assert_eq!(hash1, hash2);
+        assert_ne!(hash1, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_leaf_index_to_slab_id() {
+        let dir = tempdir().unwrap();
+        let manager = SlabManager::new(
+            dir.path().to_path_buf(),
+            SlabConfig {
+                max_leaves: 100,
+                max_open_slabs: 2,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(manager.leaf_index_to_slab_id(0), 1);
+        assert_eq!(manager.leaf_index_to_slab_id(50), 1);
+        assert_eq!(manager.leaf_index_to_slab_id(99), 1);
+        assert_eq!(manager.leaf_index_to_slab_id(100), 2);
+        assert_eq!(manager.leaf_index_to_slab_id(250), 3);
+    }
+
+    #[test]
+    fn test_num_slabs_for_size() {
+        let dir = tempdir().unwrap();
+        let manager = SlabManager::new(
+            dir.path().to_path_buf(),
+            SlabConfig {
+                max_leaves: 100,
+                max_open_slabs: 2,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(manager.num_slabs_for_size(1), 1);
+        assert_eq!(manager.num_slabs_for_size(50), 1);
+        assert_eq!(manager.num_slabs_for_size(100), 1);
+        assert_eq!(manager.num_slabs_for_size(101), 2);
+        assert_eq!(manager.num_slabs_for_size(250), 3);
+    }
+
+    #[test]
+    fn test_slab_path_formatting() {
+        let dir = tempdir().unwrap();
+        let manager = SlabManager::new(dir.path().to_path_buf(), SlabConfig::default()).unwrap();
+
+        let path1 = manager.slab_path(1);
+        assert!(path1.ends_with("slab_0001.dat"));
+
+        let path99 = manager.slab_path(99);
+        assert!(path99.ends_with("slab_0099.dat"));
+
+        let path1000 = manager.slab_path(1000);
+        assert!(path1000.ends_with("slab_1000.dat"));
+    }
+
+    #[test]
+    fn test_append_empty_leaves() {
+        let dir = tempdir().unwrap();
+        let mut manager = SlabManager::new(dir.path().to_path_buf(), SlabConfig::default()).unwrap();
+
+        let empty_leaves: Vec<[u8; 32]> = vec![];
+        let root = manager.append_leaves(&empty_leaves).unwrap();
+
+        assert_eq!(manager.tree_size(), 0);
+        assert_eq!(root, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_get_node_nonexistent_slab() {
+        let dir = tempdir().unwrap();
+        let mut manager = SlabManager::new(dir.path().to_path_buf(), SlabConfig::default()).unwrap();
+
+        // Try to get node from non-existent slab
+        let result = manager.get_node(0, 1000);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_touch_slab_updates_lru() {
+        let dir = tempdir().unwrap();
+        let mut manager = SlabManager::new(
+            dir.path().to_path_buf(),
+            SlabConfig {
+                max_leaves: 5,
+                max_open_slabs: 2,
+            },
+        )
+        .unwrap();
+
+        manager.append_leaves(&[[1u8; 32]]).unwrap();
+
+        assert!(!manager.lru_order.is_empty());
+        assert_eq!(manager.lru_order.last(), Some(&1));
+    }
+
+    #[test]
+    fn test_ensure_active_slab_creates_new() {
+        let dir = tempdir().unwrap();
+        let mut manager = SlabManager::new(
+            dir.path().to_path_buf(),
+            SlabConfig {
+                max_leaves: 2,
+                max_open_slabs: 5,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(manager.active_slab, None);
+
+        manager.append_leaves(&[[1u8; 32], [2u8; 32]]).unwrap();
+        assert_eq!(manager.active_slab, Some(1));
+
+        // Fill first slab and trigger new one
+        manager.append_leaves(&[[3u8; 32]]).unwrap();
+        assert_eq!(manager.active_slab, Some(2));
+    }
+
+    #[test]
+    fn test_get_slab_root_by_id_zero_leaves() {
+        let dir = tempdir().unwrap();
+        let mut manager = SlabManager::new(dir.path().to_path_buf(), SlabConfig::default()).unwrap();
+
+        let root = manager.get_slab_root_by_id(1, 0).unwrap();
+        assert_eq!(root, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_local_inclusion_path_errors() {
+        let dir = tempdir().unwrap();
+        let mut manager = SlabManager::new(dir.path().to_path_buf(), SlabConfig::default()).unwrap();
+
+        manager.append_leaves(&[[1u8; 32], [2u8; 32]]).unwrap();
+
+        // tree_size = 0
+        let result = manager.get_local_inclusion_path(1, 0, 0);
+        assert!(result.is_err());
+
+        // local_index >= local_tree_size
+        let result = manager.get_local_inclusion_path(1, 5, 2);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cross_slab_path_generation() {
+        let dir = tempdir().unwrap();
+        let mut manager = SlabManager::new(
+            dir.path().to_path_buf(),
+            SlabConfig {
+                max_leaves: 5,
+                max_open_slabs: 5,
+            },
+        )
+        .unwrap();
+
+        let leaves: Vec<[u8; 32]> = (0..12).map(|i| [i as u8; 32]).collect();
+        manager.append_leaves(&leaves).unwrap();
+
+        let cross_path = manager.get_cross_slab_path(1, 12).unwrap();
+        assert!(!cross_path.is_empty());
+    }
+
+    #[test]
+    fn test_evict_lru_preserves_active() {
+        let dir = tempdir().unwrap();
+        let mut manager = SlabManager::new(
+            dir.path().to_path_buf(),
+            SlabConfig {
+                max_leaves: 2,
+                max_open_slabs: 2,
+            },
+        )
+        .unwrap();
+
+        // Create slab 1
+        manager.append_leaves(&[[1u8; 32], [2u8; 32]]).unwrap();
+        assert_eq!(manager.active_slab, Some(1));
+
+        // Create slab 2 (now active)
+        manager.append_leaves(&[[3u8; 32], [4u8; 32]]).unwrap();
+        assert_eq!(manager.active_slab, Some(2));
+
+        // Create slab 3 - should evict slab 1 (oldest non-active)
+        manager.append_leaves(&[[5u8; 32], [6u8; 32]]).unwrap();
+        let active_id = manager.active_slab.unwrap();
+
+        // Active slab should not be evicted
+        assert_eq!(active_id, 3);
+        assert!(manager.slabs.contains_key(&active_id));
+        assert!(manager.slabs.len() <= manager.config.max_open_slabs);
+    }
+
+    #[test]
+    fn test_get_or_open_slab_reuses_existing() {
+        let dir = tempdir().unwrap();
+        let mut manager = SlabManager::new(dir.path().to_path_buf(), SlabConfig::default()).unwrap();
+
+        manager.append_leaves(&[[1u8; 32]]).unwrap();
+
+        let initial_count = manager.slabs.len();
+
+        // Access same slab again
+        let _slab = manager.get_or_open_slab(1).unwrap();
+
+        assert_eq!(manager.slabs.len(), initial_count);
+    }
+
+    #[test]
+    fn test_multi_slab_boundary_cases() {
+        let dir = tempdir().unwrap();
+        let mut manager = SlabManager::new(
+            dir.path().to_path_buf(),
+            SlabConfig {
+                max_leaves: 10,
+                max_open_slabs: 5,
+            },
+        )
+        .unwrap();
+
+        // Exactly one slab
+        manager.append_leaves(&(0..10).map(|i| [i; 32]).collect::<Vec<_>>()).unwrap();
+        let root1 = manager.get_root(10).unwrap();
+        assert_ne!(root1, [0u8; 32]);
+
+        // One leaf into second slab
+        manager.append_leaves(&[[10u8; 32]]).unwrap();
+        let root2 = manager.get_root(11).unwrap();
+        assert_ne!(root2, [0u8; 32]);
+        assert_ne!(root1, root2);
+    }
+
+    #[test]
+    fn test_inclusion_proof_at_slab_boundary() {
+        let dir = tempdir().unwrap();
+        let mut manager = SlabManager::new(
+            dir.path().to_path_buf(),
+            SlabConfig {
+                max_leaves: 10,
+                max_open_slabs: 5,
+            },
+        )
+        .unwrap();
+
+        let leaves: Vec<[u8; 32]> = (0..15).map(|i| [i as u8; 32]).collect();
+        manager.append_leaves(&leaves).unwrap();
+
+        // Last leaf of first slab
+        let path1 = manager.get_inclusion_path(9, 15).unwrap();
+        assert!(!path1.is_empty());
+
+        // First leaf of second slab
+        let path2 = manager.get_inclusion_path(10, 15).unwrap();
+        assert!(!path2.is_empty());
+    }
 }

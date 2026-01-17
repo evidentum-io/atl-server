@@ -1815,4 +1815,85 @@ mod tests {
         assert_eq!(job.config().interval_secs, 111);
         assert_eq!(job.config().max_batch_size, 222);
     }
+
+    #[tokio::test]
+    #[cfg(feature = "ots")]
+    async fn test_ots_job_tick_with_empty_database() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage);
+        let ots_client: Arc<dyn OtsClient> = Arc::new(MockOtsClient);
+        let config = OtsJobConfig {
+            interval_secs: 1,
+            max_batch_size: 100,
+        };
+
+        let job = OtsJob::new(index, storage, ots_client, config);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
+
+        let job_handle = tokio::spawn(async move {
+            job.run(shutdown_rx).await;
+        });
+
+        sleep(Duration::from_millis(1100)).await;
+        shutdown_tx.send(()).unwrap();
+
+        let result = timeout(Duration::from_secs(2), job_handle).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "ots")]
+    async fn test_ots_job_zero_interval() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage);
+        let ots_client: Arc<dyn OtsClient> = Arc::new(MockOtsClient);
+        let config = OtsJobConfig {
+            interval_secs: 0,
+            max_batch_size: 100,
+        };
+
+        let job = OtsJob::new(index, storage, ots_client, config);
+        assert_eq!(job.config().interval_secs, 0);
+    }
+
+    #[test]
+    #[cfg(feature = "ots")]
+    fn test_ots_job_config_clone() {
+        let config1 = OtsJobConfig {
+            interval_secs: 300,
+            max_batch_size: 50,
+        };
+        let config2 = config1.clone();
+
+        assert_eq!(config1.interval_secs, config2.interval_secs);
+        assert_eq!(config1.max_batch_size, config2.max_batch_size);
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "ots")]
+    async fn test_ots_job_receiver_lagging() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage);
+        let ots_client: Arc<dyn OtsClient> = Arc::new(MockOtsClient);
+        let config = OtsJobConfig {
+            interval_secs: 3600,
+            max_batch_size: 100,
+        };
+
+        let job = OtsJob::new(index, storage, ots_client, config);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
+
+        // Don't pass the receiver to the job immediately
+        let _job_handle = tokio::spawn(async move {
+            // Simulate some work before starting job
+            sleep(Duration::from_millis(10)).await;
+            job.run(shutdown_rx).await;
+        });
+
+        sleep(Duration::from_millis(50)).await;
+        let _ = shutdown_tx.send(());
+
+        // Give time for shutdown to propagate
+        sleep(Duration::from_millis(100)).await;
+    }
 }
