@@ -169,13 +169,181 @@ mod tests {
     use sha2::Digest;
 
     #[test]
-    fn test_client_creation() {
-        let result = Rfc3161Client::free_tsa();
+    fn test_client_creation_success() {
+        let config = TsaConfig {
+            urls: vec!["https://test.example.com/tsr".to_string()],
+            timeout_ms: 5000,
+            username: None,
+            password: None,
+            ca_cert: None,
+        };
+        let result = Rfc3161Client::new(config);
         assert!(result.is_ok());
     }
 
     #[test]
-    #[ignore]
+    fn test_client_creation_free_tsa() {
+        let result = Rfc3161Client::free_tsa();
+        assert!(result.is_ok());
+        let client = result.unwrap();
+        assert_eq!(client.config.urls.len(), 1);
+        assert_eq!(client.config.urls[0], "https://freetsa.org/tsr");
+    }
+
+    #[test]
+    fn test_anchor_type() {
+        let client = Rfc3161Client::free_tsa().unwrap();
+        assert_eq!(client.anchor_type(), AnchorType::Rfc3161);
+    }
+
+    #[test]
+    fn test_service_id_with_urls() {
+        let config = TsaConfig {
+            urls: vec![
+                "https://tsa1.example.com/tsr".to_string(),
+                "https://tsa2.example.com/tsr".to_string(),
+            ],
+            timeout_ms: 5000,
+            username: None,
+            password: None,
+            ca_cert: None,
+        };
+        let client = Rfc3161Client::new(config).unwrap();
+        assert_eq!(client.service_id(), "https://tsa1.example.com/tsr");
+    }
+
+    #[test]
+    fn test_service_id_no_urls() {
+        let config = TsaConfig {
+            urls: vec![],
+            timeout_ms: 5000,
+            username: None,
+            password: None,
+            ca_cert: None,
+        };
+        let client = Rfc3161Client::new(config).unwrap();
+        assert_eq!(client.service_id(), "rfc3161");
+    }
+
+    #[test]
+    fn test_is_final_always_true() {
+        let client = Rfc3161Client::free_tsa().unwrap();
+        let anchor = Anchor {
+            anchor_type: AnchorType::Rfc3161,
+            target: "data_tree_root".to_string(),
+            anchored_hash: [0u8; 32],
+            tree_size: 1,
+            super_tree_size: None,
+            timestamp: 1000000000,
+            token: vec![1, 2, 3],
+            metadata: serde_json::json!({}),
+        };
+        let result = client.is_final(&anchor);
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+    }
+
+    #[test]
+    fn test_verify_wrong_anchor_type() {
+        let client = Rfc3161Client::free_tsa().unwrap();
+        let anchor = Anchor {
+            anchor_type: AnchorType::BitcoinOts,
+            target: "data_tree_root".to_string(),
+            anchored_hash: [0u8; 32],
+            tree_size: 1,
+            super_tree_size: None,
+            timestamp: 1000000000,
+            token: vec![1, 2, 3],
+            metadata: serde_json::json!({}),
+        };
+        let result = client.verify(&anchor);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("not an RFC 3161 anchor"));
+    }
+
+    #[test]
+    fn test_verify_invalid_token() {
+        let client = Rfc3161Client::free_tsa().unwrap();
+        let anchor = Anchor {
+            anchor_type: AnchorType::Rfc3161,
+            target: "data_tree_root".to_string(),
+            anchored_hash: [0u8; 32],
+            tree_size: 1,
+            super_tree_size: None,
+            timestamp: 1000000000,
+            token: vec![0xDE, 0xAD, 0xBE, 0xEF], // Invalid DER
+            metadata: serde_json::json!({}),
+        };
+        let result = client.verify(&anchor);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_timestamp_with_fallback_no_urls() {
+        let config = TsaConfig {
+            urls: vec![],
+            timeout_ms: 5000,
+            username: None,
+            password: None,
+            ca_cert: None,
+        };
+        let client = Rfc3161Client::new(config).unwrap();
+        let hash = [42u8; 32];
+        let result = client.timestamp_with_fallback(&hash);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        match err {
+            AnchorError::NotConfigured(msg) => {
+                assert!(msg.contains("no TSA URLs configured"));
+            }
+            _ => panic!("Expected NotConfigured error"),
+        }
+    }
+
+    #[test]
+    fn test_config_default() {
+        let config = TsaConfig::default();
+        assert_eq!(config.urls.len(), 1);
+        assert_eq!(config.urls[0], "https://freetsa.org/tsr");
+        assert_eq!(config.timeout_ms, 30_000);
+        assert!(config.username.is_none());
+        assert!(config.password.is_none());
+        assert!(config.ca_cert.is_none());
+    }
+
+    #[test]
+    fn test_config_free_tsa() {
+        let config = TsaConfig::free_tsa();
+        assert_eq!(config.urls.len(), 1);
+        assert_eq!(config.urls[0], "https://freetsa.org/tsr");
+    }
+
+    #[test]
+    fn test_config_with_fallback() {
+        let urls = vec![
+            "https://tsa1.example.com/tsr".to_string(),
+            "https://tsa2.example.com/tsr".to_string(),
+        ];
+        let config = TsaConfig::with_fallback(urls.clone(), 10_000);
+        assert_eq!(config.urls, urls);
+        assert_eq!(config.timeout_ms, 10_000);
+    }
+
+    #[test]
+    fn test_anchor_request_structure() {
+        let hash = sha2::Sha256::digest(b"test data").into();
+        let request = AnchorRequest {
+            hash,
+            tree_size: 42,
+            metadata: Some(serde_json::json!({"key": "value"})),
+        };
+        assert_eq!(request.tree_size, 42);
+        assert!(request.metadata.is_some());
+    }
+
+    #[test]
+    #[ignore] // Requires network access
     fn test_freetsa_request() {
         let client = Rfc3161Client::free_tsa().unwrap();
         let hash = sha2::Sha256::digest(b"test data").into();
@@ -188,5 +356,28 @@ mod tests {
 
         let result = client.anchor(&request);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_client_timeout_configuration() {
+        let config = TsaConfig {
+            urls: vec!["https://test.example.com/tsr".to_string()],
+            timeout_ms: 1000,
+            username: None,
+            password: None,
+            ca_cert: None,
+        };
+        let result = Rfc3161Client::new(config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_tsa_response_structure() {
+        let response = TsaResponse {
+            token_der: vec![1, 2, 3, 4],
+            timestamp: 1705000000000000000,
+        };
+        assert_eq!(response.token_der.len(), 4);
+        assert!(response.timestamp > 0);
     }
 }

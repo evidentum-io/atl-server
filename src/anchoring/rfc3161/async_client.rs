@@ -123,6 +123,92 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[test]
+    fn test_async_client_with_config() {
+        let config = TsaConfig {
+            urls: vec!["https://test.example.com/tsr".to_string()],
+            timeout_ms: 5000,
+            username: None,
+            password: None,
+            ca_cert: None,
+        };
+        let result = AsyncRfc3161Client::with_config(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_async_client_with_config_timeout() {
+        let config = TsaConfig {
+            urls: vec![],
+            timeout_ms: 1000,
+            username: None,
+            password: None,
+            ca_cert: None,
+        };
+        let result = AsyncRfc3161Client::with_config(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_async_client_default() {
+        let _client = AsyncRfc3161Client::default();
+        // Should not panic
+    }
+
+    #[tokio::test]
+    async fn test_async_timestamp_invalid_url() {
+        let client = AsyncRfc3161Client::new().unwrap();
+        let hash = [42u8; 32];
+
+        let result = client
+            .timestamp("http://invalid-tsa-url-that-does-not-exist.example", &hash, 1000)
+            .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_async_timestamp_timeout() {
+        let client = AsyncRfc3161Client::new().unwrap();
+        let hash = [42u8; 32];
+
+        // Use a non-routable IP to force timeout
+        let result = client
+            .timestamp("http://192.0.2.1:9999/tsr", &hash, 100)
+            .await;
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_with_invalid_token() {
+        let client = AsyncRfc3161Client::new().unwrap();
+        let hash = [42u8; 32];
+        let response = TsaResponse {
+            token_der: vec![0xDE, 0xAD, 0xBE, 0xEF], // Invalid DER
+            timestamp: 1000000000,
+        };
+
+        let result = client.verify(&response, &hash);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_with_wrong_hash() {
+        let client = AsyncRfc3161Client::new().unwrap();
+        let hash = [42u8; 32];
+        let wrong_hash = [99u8; 32];
+
+        // Create a minimal valid DER structure (this will still fail verification)
+        let response = TsaResponse {
+            token_der: vec![0x30, 0x03, 0x02, 0x01, 0x00], // Minimal SEQUENCE
+            timestamp: 1000000000,
+        };
+
+        let result = client.verify(&response, &wrong_hash);
+        assert!(result.is_err());
+    }
+
     #[tokio::test]
     #[ignore]
     async fn test_async_freetsa_request() {
@@ -134,5 +220,112 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
+    }
+
+    // Mock TSA client for testing service layer
+    pub(crate) struct MockTsaClient {
+        pub should_fail: bool,
+        pub response: Option<TsaResponse>,
+    }
+
+    #[async_trait]
+    impl TsaClient for MockTsaClient {
+        async fn timestamp(
+            &self,
+            _tsa_url: &str,
+            _hash: &[u8; 32],
+            _timeout_ms: u64,
+        ) -> Result<TsaResponse, AnchorError> {
+            if self.should_fail {
+                Err(AnchorError::ServiceError("mock failure".to_string()))
+            } else {
+                Ok(self.response.clone().unwrap_or(TsaResponse {
+                    token_der: vec![0x30, 0x03, 0x02, 0x01, 0x00],
+                    timestamp: 1705000000000000000,
+                }))
+            }
+        }
+
+        fn verify(&self, _response: &TsaResponse, _expected_hash: &[u8; 32]) -> Result<(), AnchorError> {
+            if self.should_fail {
+                Err(AnchorError::TokenInvalid("mock verification failure".to_string()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_success() {
+        let mock = MockTsaClient {
+            should_fail: false,
+            response: Some(TsaResponse {
+                token_der: vec![1, 2, 3, 4],
+                timestamp: 1705000000000000000,
+            }),
+        };
+
+        let hash = [42u8; 32];
+        let result = mock.timestamp("http://mock.example.com/tsr", &hash, 5000).await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert_eq!(response.token_der, vec![1, 2, 3, 4]);
+        assert_eq!(response.timestamp, 1705000000000000000);
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_failure() {
+        let mock = MockTsaClient {
+            should_fail: true,
+            response: None,
+        };
+
+        let hash = [42u8; 32];
+        let result = mock.timestamp("http://mock.example.com/tsr", &hash, 5000).await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            AnchorError::ServiceError(msg) => assert_eq!(msg, "mock failure"),
+            _ => panic!("Expected ServiceError"),
+        }
+    }
+
+    #[test]
+    fn test_mock_client_verify_success() {
+        let mock = MockTsaClient {
+            should_fail: false,
+            response: None,
+        };
+
+        let response = TsaResponse {
+            token_der: vec![1, 2, 3],
+            timestamp: 1000000000,
+        };
+        let hash = [42u8; 32];
+
+        let result = mock.verify(&response, &hash);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_mock_client_verify_failure() {
+        let mock = MockTsaClient {
+            should_fail: true,
+            response: None,
+        };
+
+        let response = TsaResponse {
+            token_der: vec![1, 2, 3],
+            timestamp: 1000000000,
+        };
+        let hash = [42u8; 32];
+
+        let result = mock.verify(&response, &hash);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            AnchorError::TokenInvalid(msg) => assert_eq!(msg, "mock verification failure"),
+            _ => panic!("Expected TokenInvalid"),
+        }
     }
 }
