@@ -602,4 +602,307 @@ mod tests {
 
         let _result = health_check(State(state)).await;
     }
+
+    #[tokio::test]
+    async fn test_node_health_with_different_base_url() {
+        let state = Arc::new(AppState {
+            mode: ServerMode::Node,
+            dispatcher: Arc::new(MockSequencerClientHealthy),
+            storage: None,
+            storage_engine: None,
+            signer: None,
+            access_tokens: None,
+            base_url: "https://example.com:8443".to_string(),
+        });
+
+        let result = check_node_health(state).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_sequencer_health_storage_is_healthy_method_not_called() {
+        // This test verifies that is_initialized is used, not is_healthy
+        struct MockStorageHealthyButNotInitialized;
+
+        #[async_trait]
+        impl Storage for MockStorageHealthyButNotInitialized {
+            async fn append_batch(
+                &self,
+                _params: Vec<crate::traits::AppendParams>,
+            ) -> Result<crate::traits::BatchResult, crate::error::StorageError> {
+                unimplemented!()
+            }
+
+            async fn flush(&self) -> Result<(), crate::error::StorageError> {
+                unimplemented!()
+            }
+
+            fn tree_head(&self) -> crate::traits::TreeHead {
+                unimplemented!()
+            }
+
+            fn origin_id(&self) -> [u8; 32] {
+                unimplemented!()
+            }
+
+            fn is_healthy(&self) -> bool {
+                true // Reports healthy
+            }
+
+            fn get_entry(&self, _id: &uuid::Uuid) -> ServerResult<crate::traits::Entry> {
+                unimplemented!()
+            }
+
+            fn get_inclusion_proof(
+                &self,
+                _entry_id: &uuid::Uuid,
+                _tree_size: Option<u64>,
+            ) -> ServerResult<crate::traits::InclusionProof> {
+                unimplemented!()
+            }
+
+            fn get_consistency_proof(
+                &self,
+                _from_size: u64,
+                _to_size: u64,
+            ) -> ServerResult<crate::traits::ConsistencyProof> {
+                unimplemented!()
+            }
+
+            fn get_anchors(
+                &self,
+                _tree_size: u64,
+            ) -> ServerResult<Vec<crate::traits::anchor::Anchor>> {
+                unimplemented!()
+            }
+
+            fn get_latest_anchored_size(&self) -> ServerResult<Option<u64>> {
+                unimplemented!()
+            }
+
+            fn get_anchors_covering(
+                &self,
+                _target_tree_size: u64,
+                _limit: usize,
+            ) -> ServerResult<Vec<crate::traits::anchor::Anchor>> {
+                unimplemented!()
+            }
+
+            fn get_root_at_size(&self, _tree_size: u64) -> ServerResult<[u8; 32]> {
+                unimplemented!()
+            }
+
+            fn get_super_root(&self, _super_tree_size: u64) -> ServerResult<[u8; 32]> {
+                unimplemented!()
+            }
+
+            fn is_initialized(&self) -> bool {
+                false // Not initialized despite being healthy
+            }
+        }
+
+        let state = Arc::new(AppState {
+            mode: ServerMode::Sequencer,
+            dispatcher: Arc::new(MockSequencerClientHealthy),
+            storage: Some(Arc::new(MockStorageHealthyButNotInitialized)),
+            storage_engine: None,
+            signer: None,
+            access_tokens: None,
+            base_url: "http://localhost:3000".to_string(),
+        });
+
+        let result = check_sequencer_health(state).await;
+        // Should be unhealthy because is_initialized returns false
+        assert!(result.is_err());
+        let (status_code, response) = result.unwrap_err();
+        assert_eq!(status_code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.status, "unhealthy");
+    }
+
+    #[tokio::test]
+    async fn test_health_response_serialization_node_healthy() {
+        let state = Arc::new(AppState {
+            mode: ServerMode::Node,
+            dispatcher: Arc::new(MockSequencerClientHealthy),
+            storage: None,
+            storage_engine: None,
+            signer: None,
+            access_tokens: None,
+            base_url: "http://localhost:3000".to_string(),
+        });
+
+        let result = health_check(State(state)).await;
+        assert!(result.is_ok());
+
+        let json_response = result.unwrap();
+        assert_eq!(json_response.0.status, "healthy");
+        assert_eq!(json_response.0.mode, "NODE");
+        assert_eq!(json_response.0.sequencer_connected, Some(true));
+        assert!(json_response.0.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_health_response_serialization_node_unhealthy() {
+        let state = Arc::new(AppState {
+            mode: ServerMode::Node,
+            dispatcher: Arc::new(MockSequencerClientUnhealthy),
+            storage: None,
+            storage_engine: None,
+            signer: None,
+            access_tokens: None,
+            base_url: "http://localhost:3000".to_string(),
+        });
+
+        let result = health_check(State(state)).await;
+        assert!(result.is_err());
+
+        let (status, json_response) = result.unwrap_err();
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(json_response.0.status, "unhealthy");
+        assert_eq!(json_response.0.mode, "NODE");
+        assert_eq!(json_response.0.sequencer_connected, Some(false));
+        assert!(json_response.0.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_health_response_serialization_sequencer_healthy() {
+        let state = Arc::new(AppState {
+            mode: ServerMode::Sequencer,
+            dispatcher: Arc::new(MockSequencerClientHealthy),
+            storage: Some(Arc::new(MockStorageInitialized)),
+            storage_engine: None,
+            signer: None,
+            access_tokens: None,
+            base_url: "http://localhost:3000".to_string(),
+        });
+
+        let result = health_check(State(state)).await;
+        assert!(result.is_ok());
+
+        let json_response = result.unwrap();
+        assert_eq!(json_response.0.status, "healthy");
+        assert_eq!(json_response.0.mode, "SEQUENCER");
+        assert!(json_response.0.sequencer_connected.is_none());
+        assert!(json_response.0.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_health_response_serialization_sequencer_unhealthy() {
+        let state = Arc::new(AppState {
+            mode: ServerMode::Sequencer,
+            dispatcher: Arc::new(MockSequencerClientHealthy),
+            storage: None,
+            storage_engine: None,
+            signer: None,
+            access_tokens: None,
+            base_url: "http://localhost:3000".to_string(),
+        });
+
+        let result = health_check(State(state)).await;
+        assert!(result.is_err());
+
+        let (status, json_response) = result.unwrap_err();
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(json_response.0.status, "unhealthy");
+        assert_eq!(json_response.0.mode, "SEQUENCER");
+        assert!(json_response.0.sequencer_connected.is_none());
+        assert_eq!(
+            json_response.0.error,
+            Some("Storage unavailable".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_check_node_health_with_all_app_state_fields() {
+        let state = Arc::new(AppState {
+            mode: ServerMode::Node,
+            dispatcher: Arc::new(MockSequencerClientHealthy),
+            storage: None,
+            storage_engine: None,
+            signer: None,
+            access_tokens: None,
+            base_url: "http://test.example.com:9999".to_string(),
+        });
+
+        let result = check_node_health(state).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_check_sequencer_health_with_initialized_storage() {
+        let state = Arc::new(AppState {
+            mode: ServerMode::Sequencer,
+            dispatcher: Arc::new(MockSequencerClientHealthy),
+            storage: Some(Arc::new(MockStorageInitialized)),
+            storage_engine: None,
+            signer: None,
+            access_tokens: None,
+            base_url: "http://localhost:3000".to_string(),
+        });
+
+        let result = check_sequencer_health(state).await;
+        assert!(result.is_ok());
+        let response = result.unwrap().0;
+        assert_eq!(response.status, "healthy");
+        assert_eq!(response.mode, "SEQUENCER");
+    }
+
+    #[tokio::test]
+    async fn test_multiple_health_checks_node_consistent() {
+        let state = Arc::new(AppState {
+            mode: ServerMode::Node,
+            dispatcher: Arc::new(MockSequencerClientHealthy),
+            storage: None,
+            storage_engine: None,
+            signer: None,
+            access_tokens: None,
+            base_url: "http://localhost:3000".to_string(),
+        });
+
+        // Multiple calls should return consistent results
+        for _ in 0..5 {
+            let result = check_node_health(state.clone()).await;
+            assert!(result.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_multiple_health_checks_sequencer_consistent() {
+        let state = Arc::new(AppState {
+            mode: ServerMode::Sequencer,
+            dispatcher: Arc::new(MockSequencerClientHealthy),
+            storage: Some(Arc::new(MockStorageInitialized)),
+            storage_engine: None,
+            signer: None,
+            access_tokens: None,
+            base_url: "http://localhost:3000".to_string(),
+        });
+
+        // Multiple calls should return consistent results
+        for _ in 0..5 {
+            let result = check_sequencer_health(state.clone()).await;
+            assert!(result.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_health_check_error_message_content() {
+        let state = Arc::new(AppState {
+            mode: ServerMode::Node,
+            dispatcher: Arc::new(MockSequencerClientUnhealthy),
+            storage: None,
+            storage_engine: None,
+            signer: None,
+            access_tokens: None,
+            base_url: "http://localhost:3000".to_string(),
+        });
+
+        let result = check_node_health(state).await;
+        assert!(result.is_err());
+
+        let (_, response) = result.unwrap_err();
+        let error_msg = response.0.error.expect("error should be present");
+        assert_eq!(error_msg, "Cannot connect to sequencer");
+        assert!(error_msg.len() > 0);
+    }
 }

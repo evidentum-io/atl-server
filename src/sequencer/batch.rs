@@ -637,4 +637,334 @@ mod tests {
         // With retry_count = 0, should fail immediately without retry
         assert_eq!(mock.get_call_count(), 1);
     }
+
+    #[tokio::test]
+    async fn test_flush_batch_clears_batch_on_success() {
+        let mock = Arc::new(MockStorage::new(false));
+        let storage: Arc<dyn Storage> = mock.clone();
+        let config = SequencerConfig::default();
+        let mut batch = vec![create_test_request(), create_test_request()];
+        let original_size = batch.len();
+
+        flush_batch(&mut batch, &storage, &config).await;
+
+        assert!(batch.is_empty());
+        assert_eq!(original_size, 2);
+        assert_eq!(mock.get_call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_flush_batch_clears_batch_on_failure() {
+        let mock = Arc::new(MockStorage::new(true));
+        let storage: Arc<dyn Storage> = mock.clone();
+        let config = SequencerConfig {
+            retry_count: 1,
+            retry_base_ms: 1,
+            ..Default::default()
+        };
+        let mut batch = vec![create_test_request(), create_test_request()];
+
+        flush_batch(&mut batch, &storage, &config).await;
+
+        // Batch should be cleared even on failure
+        assert!(batch.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_flush_batch_multiple_entries_different_hashes() {
+        let mock = Arc::new(MockStorage::new(false));
+        let storage: Arc<dyn Storage> = mock.clone();
+        let config = SequencerConfig::default();
+
+        let (tx1, rx1) = oneshot::channel();
+        let (tx2, rx2) = oneshot::channel();
+        let (tx3, rx3) = oneshot::channel();
+
+        let mut batch = vec![
+            AppendRequest {
+                params: AppendParams {
+                    payload_hash: [1u8; 32],
+                    metadata_hash: [2u8; 32],
+                    metadata_cleartext: None,
+                    external_id: None,
+                },
+                response_tx: tx1,
+            },
+            AppendRequest {
+                params: AppendParams {
+                    payload_hash: [10u8; 32],
+                    metadata_hash: [20u8; 32],
+                    metadata_cleartext: Some(serde_json::json!({"test": "metadata"})),
+                    external_id: Some("ext-123".to_string()),
+                },
+                response_tx: tx2,
+            },
+            AppendRequest {
+                params: AppendParams {
+                    payload_hash: [100u8; 32],
+                    metadata_hash: [200u8; 32],
+                    metadata_cleartext: None,
+                    external_id: Some("ext-456".to_string()),
+                },
+                response_tx: tx3,
+            },
+        ];
+
+        flush_batch(&mut batch, &storage, &config).await;
+
+        // All three should receive OK responses
+        assert!(rx1.await.expect("rx1").is_ok());
+        assert!(rx2.await.expect("rx2").is_ok());
+        assert!(rx3.await.expect("rx3").is_ok());
+        assert_eq!(mock.get_call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_flush_batch_preserves_entry_order() {
+        let mock = Arc::new(MockStorage::new(false));
+        let storage: Arc<dyn Storage> = mock.clone();
+        let config = SequencerConfig::default();
+
+        let (tx1, rx1) = oneshot::channel();
+        let (tx2, rx2) = oneshot::channel();
+
+        let mut batch = vec![
+            AppendRequest {
+                params: AppendParams {
+                    payload_hash: [1u8; 32],
+                    metadata_hash: [2u8; 32],
+                    metadata_cleartext: None,
+                    external_id: None,
+                },
+                response_tx: tx1,
+            },
+            AppendRequest {
+                params: AppendParams {
+                    payload_hash: [3u8; 32],
+                    metadata_hash: [4u8; 32],
+                    metadata_cleartext: None,
+                    external_id: None,
+                },
+                response_tx: tx2,
+            },
+        ];
+
+        flush_batch(&mut batch, &storage, &config).await;
+
+        let result1 = rx1.await.expect("rx1").expect("ok");
+        let result2 = rx2.await.expect("rx2").expect("ok");
+
+        // First request should get leaf_index 0, second should get 1
+        assert_eq!(result1.leaf_index, 0);
+        assert_eq!(result2.leaf_index, 1);
+    }
+
+    #[tokio::test]
+    async fn test_write_batch_with_retry_multiple_params() {
+        let mock = Arc::new(MockStorage::new(false));
+        let storage: Arc<dyn Storage> = mock.clone();
+        let config = SequencerConfig::default();
+        let params = vec![
+            AppendParams {
+                payload_hash: [1u8; 32],
+                metadata_hash: [2u8; 32],
+                metadata_cleartext: None,
+                external_id: None,
+            },
+            AppendParams {
+                payload_hash: [3u8; 32],
+                metadata_hash: [4u8; 32],
+                metadata_cleartext: Some(serde_json::json!({"key": "value"})),
+                external_id: None,
+            },
+            AppendParams {
+                payload_hash: [5u8; 32],
+                metadata_hash: [6u8; 32],
+                metadata_cleartext: None,
+                external_id: Some("ext-id".to_string()),
+            },
+        ];
+
+        let result = write_batch_with_retry(&storage, &params, &config).await;
+
+        assert!(result.is_ok());
+        let batch_result = result.unwrap();
+        assert_eq!(batch_result.entries.len(), 3);
+        assert_eq!(mock.get_call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_write_batch_with_retry_empty_params() {
+        let mock = Arc::new(MockStorage::new(false));
+        let storage: Arc<dyn Storage> = mock.clone();
+        let config = SequencerConfig::default();
+        let params: Vec<AppendParams> = vec![];
+
+        let result = write_batch_with_retry(&storage, &params, &config).await;
+
+        assert!(result.is_ok());
+        let batch_result = result.unwrap();
+        assert_eq!(batch_result.entries.len(), 0);
+        assert_eq!(mock.get_call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_flush_batch_append_result_fields() {
+        let mock = Arc::new(MockStorage::new(false));
+        let storage: Arc<dyn Storage> = mock.clone();
+        let config = SequencerConfig::default();
+
+        let (tx, rx) = oneshot::channel();
+        let mut batch = vec![AppendRequest {
+            params: AppendParams {
+                payload_hash: [99u8; 32],
+                metadata_hash: [88u8; 32],
+                metadata_cleartext: None,
+                external_id: None,
+            },
+            response_tx: tx,
+        }];
+
+        flush_batch(&mut batch, &storage, &config).await;
+
+        let result = rx.await.expect("should receive").expect("should be ok");
+
+        // Verify AppendResult fields
+        assert!(result.id.to_string().len() > 0); // UUID is set
+        assert_eq!(result.leaf_index, 0);
+        assert_eq!(result.tree_head.tree_size, 1);
+        assert_eq!(result.tree_head.root_hash, [2u8; 32]);
+        assert_eq!(result.tree_head.origin, [3u8; 32]);
+        assert!(result.inclusion_proof.is_empty()); // Proofs are lazy
+    }
+
+    #[tokio::test]
+    async fn test_write_batch_with_retry_fails_with_storage_error() {
+        let mock = Arc::new(MockStorage::new(true));
+        let storage: Arc<dyn Storage> = mock.clone();
+        let config = SequencerConfig {
+            retry_count: 2,
+            retry_base_ms: 1,
+            ..Default::default()
+        };
+        let params = vec![AppendParams {
+            payload_hash: [1u8; 32],
+            metadata_hash: [2u8; 32],
+            metadata_cleartext: None,
+            external_id: None,
+        }];
+
+        let result = write_batch_with_retry(&storage, &params, &config).await;
+
+        assert!(result.is_err());
+        if let Err(ServerError::Storage(StorageError::Database(msg))) = result {
+            assert_eq!(msg, "mock failure");
+        } else {
+            panic!("Expected Storage error with Database variant");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_flush_batch_with_large_batch() {
+        let mock = Arc::new(MockStorage::new(false));
+        let storage: Arc<dyn Storage> = mock.clone();
+        let config = SequencerConfig::default();
+
+        // Create a batch of 10 requests
+        let mut batch = Vec::new();
+        let mut receivers = Vec::new();
+
+        for _ in 0..10 {
+            let (tx, rx) = oneshot::channel();
+            batch.push(AppendRequest {
+                params: AppendParams {
+                    payload_hash: [1u8; 32],
+                    metadata_hash: [2u8; 32],
+                    metadata_cleartext: None,
+                    external_id: None,
+                },
+                response_tx: tx,
+            });
+            receivers.push(rx);
+        }
+
+        flush_batch(&mut batch, &storage, &config).await;
+
+        // All 10 should receive responses
+        for (idx, rx) in receivers.into_iter().enumerate() {
+            let result = rx.await.expect("should receive").expect("should be ok");
+            assert_eq!(result.leaf_index, idx as u64);
+        }
+        assert_eq!(mock.get_call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_write_batch_retry_backoff_timing() {
+        let mock = Arc::new(MockStorage::new(true));
+        let storage: Arc<dyn Storage> = mock.clone();
+        let config = SequencerConfig {
+            retry_count: 4,
+            retry_base_ms: 5,
+            ..Default::default()
+        };
+        let params = vec![AppendParams {
+            payload_hash: [1u8; 32],
+            metadata_hash: [2u8; 32],
+            metadata_cleartext: None,
+            external_id: None,
+        }];
+
+        let start = tokio::time::Instant::now();
+        let result = write_batch_with_retry(&storage, &params, &config).await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err());
+        // Should have delays: 5ms + 10ms + 20ms = 35ms minimum
+        // We allow some slack for scheduling overhead
+        assert!(elapsed.as_millis() >= 30);
+        assert_eq!(mock.get_call_count(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_mock_storage_set_should_fail() {
+        let mock = MockStorage::new(false);
+        assert_eq!(mock.get_call_count(), 0);
+        assert_eq!(mock.get_fail_count(), 0);
+
+        // Set to fail
+        mock.set_should_fail(true);
+
+        let params = vec![AppendParams {
+            payload_hash: [1u8; 32],
+            metadata_hash: [2u8; 32],
+            metadata_cleartext: None,
+            external_id: None,
+        }];
+
+        let result = mock.append_batch(params).await;
+        assert!(result.is_err());
+        assert_eq!(mock.get_call_count(), 1);
+        assert_eq!(mock.get_fail_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_mock_storage_multiple_calls() {
+        let mock = MockStorage::new(false);
+
+        for i in 0..5 {
+            let params = vec![AppendParams {
+                payload_hash: [1u8; 32],
+                metadata_hash: [2u8; 32],
+                metadata_cleartext: None,
+                external_id: None,
+            }];
+
+            let result = mock.append_batch(params).await;
+            assert!(result.is_ok());
+            assert_eq!(mock.get_call_count(), i + 1);
+        }
+
+        assert_eq!(mock.get_call_count(), 5);
+        assert_eq!(mock.get_fail_count(), 0);
+    }
 }
