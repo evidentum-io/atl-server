@@ -1415,4 +1415,49 @@ mod tests {
         let pending = idx.get_pending_ots_anchors().unwrap();
         assert_eq!(pending.len(), 1);
     }
+
+    #[tokio::test]
+    async fn test_submit_anchor_id_returned() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+
+        {
+            let idx = index.lock().await;
+            idx.set_super_tree_size(1).unwrap();
+            idx.set_last_ots_submitted_super_tree_size(0).unwrap();
+        }
+
+        let super_root = [99u8; 32];
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage::new(super_root));
+        let client: Arc<dyn OtsClient> = Arc::new(MockOtsClient::new_success());
+
+        let result = submit_unanchored_trees(&index, &storage, &client, 100).await;
+        assert!(result.is_ok());
+
+        // Verify anchor_id field is properly set
+        let idx = index.lock().await;
+        let pending = idx.get_pending_ots_anchors().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].id > 0);
+    }
+
+    #[tokio::test]
+    async fn test_submit_with_minimal_super_tree_growth() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+
+        {
+            let idx = index.lock().await;
+            idx.set_super_tree_size(1).unwrap();
+            idx.set_last_ots_submitted_super_tree_size(0).unwrap();
+        }
+
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage::new([77u8; 32]));
+        let client: Arc<dyn OtsClient> = Arc::new(MockOtsClient::new_success());
+
+        let result = submit_unanchored_trees(&index, &storage, &client, 100).await;
+        assert!(result.is_ok());
+
+        let idx = index.lock().await;
+        let last_submitted = idx.get_last_ots_submitted_super_tree_size().unwrap();
+        assert_eq!(last_submitted, 1);
+    }
 }

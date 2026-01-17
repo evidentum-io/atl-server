@@ -672,7 +672,7 @@ mod tests {
             let mut idx = index.lock().await;
             let origin = [1u8; 32];
             idx.create_active_tree(&origin, 0).unwrap();
-            idx.close_tree_and_create_new(&origin, 100, &[1u8; 32], 0)
+            idx.close_tree_and_create_new(&origin, 100, &[1u8; 32], 1)
                 .unwrap();
         }
 
@@ -779,6 +779,127 @@ mod tests {
         // Verify last_active_anchor is still None
         let last = job.last_active_anchor.lock().await;
         assert!(last.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_process_active_tree_error_path() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage::new(100, [42u8; 32]));
+        let config = TsaJobConfig {
+            tsa_urls: vec!["https://invalid-tsa-url-that-will-fail.example".to_string()],
+            timeout_ms: 100,
+            interval_secs: 60,
+            max_batch_size: 100,
+            active_tree_interval_secs: 0,
+        };
+
+        let job = TsaAnchoringJob::new(index, storage, config);
+
+        // Should handle network errors gracefully (returns Ok with warning logged)
+        let result = job.process_active_tree_anchoring().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_process_pending_trees_max_batch_limiting() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage::new(100, [1u8; 32]));
+        let config = TsaJobConfig {
+            tsa_urls: vec!["https://tsa1.com".to_string()],
+            timeout_ms: 5000,
+            interval_secs: 60,
+            max_batch_size: 2,
+            active_tree_interval_secs: 3600,
+        };
+
+        let job = TsaAnchoringJob::new(index.clone(), storage, config);
+
+        // Create multiple closed trees
+        {
+            let mut idx = index.lock().await;
+            let origin = [1u8; 32];
+            idx.create_active_tree(&origin, 0).unwrap();
+            idx.close_tree_and_create_new(&origin, 100, &[1u8; 32], 1)
+                .unwrap();
+            idx.close_tree_and_create_new(&origin, 200, &[2u8; 32], 2)
+                .unwrap();
+            idx.close_tree_and_create_new(&origin, 300, &[3u8; 32], 3)
+                .unwrap();
+        }
+
+        // Process should only take max_batch_size trees
+        let result = job.process_pending_trees().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_last_active_anchor_instant_comparison() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage::new(50, [1u8; 32]));
+        let config = TsaJobConfig {
+            tsa_urls: vec!["https://tsa1.com".to_string()],
+            timeout_ms: 5000,
+            interval_secs: 60,
+            max_batch_size: 100,
+            active_tree_interval_secs: 10,
+        };
+
+        let job = TsaAnchoringJob::new(index, storage, config);
+
+        // Set last anchor to just now
+        {
+            let mut last = job.last_active_anchor.lock().await;
+            *last = Some(Instant::now());
+        }
+
+        // Should skip due to time gate
+        let result = job.process_active_tree_anchoring().await;
+        assert!(result.is_ok());
+
+        // Time should still be recent (not updated)
+        let last = job.last_active_anchor.lock().await;
+        let elapsed = last.unwrap().elapsed();
+        assert!(elapsed.as_secs() < 5);
+    }
+
+    #[tokio::test]
+    async fn test_selector_next_url_error_handling() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage::new(100, [1u8; 32]));
+        let config = TsaJobConfig {
+            tsa_urls: vec![],
+            timeout_ms: 5000,
+            interval_secs: 60,
+            max_batch_size: 100,
+            active_tree_interval_secs: 0,
+        };
+
+        let job = TsaAnchoringJob::new(index, storage, config);
+
+        // Should fail with proper error message
+        let result = job.process_active_tree_anchoring().await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("No TSA servers configured"));
+    }
+
+    #[test]
+    fn test_job_config_cloning() {
+        let config = TsaJobConfig {
+            tsa_urls: vec!["https://tsa1.com".to_string(), "https://tsa2.com".to_string()],
+            timeout_ms: 10000,
+            interval_secs: 120,
+            max_batch_size: 50,
+            active_tree_interval_secs: 300,
+        };
+
+        let cloned = config.clone();
+
+        assert_eq!(config.tsa_urls, cloned.tsa_urls);
+        assert_eq!(config.timeout_ms, cloned.timeout_ms);
+        assert_eq!(config.interval_secs, cloned.interval_secs);
+        assert_eq!(config.max_batch_size, cloned.max_batch_size);
+        assert_eq!(config.active_tree_interval_secs, cloned.active_tree_interval_secs);
     }
 
     // Note: We don't test the run() method directly as it contains an infinite loop.

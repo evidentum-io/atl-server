@@ -1376,4 +1376,30 @@ mod tests {
         assert!(elapsed.as_millis() >= 700);
         assert_eq!(mock.get_call_count(), 5);
     }
+
+    #[tokio::test]
+    async fn test_write_batch_retry_backoff_doubling() {
+        let mock = Arc::new(MockStorage::new(true));
+        let storage: Arc<dyn Storage> = mock.clone();
+        let config = SequencerConfig {
+            retry_count: 3,
+            retry_base_ms: 8,
+            ..Default::default()
+        };
+        let params = vec![AppendParams {
+            payload_hash: [1u8; 32],
+            metadata_hash: [2u8; 32],
+            metadata_cleartext: None,
+            external_id: None,
+        }];
+
+        let start = tokio::time::Instant::now();
+        let result = write_batch_with_retry(&storage, &params, &config).await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err());
+        // Backoff: 8ms, then 16ms (doubled) = 24ms minimum
+        assert!(elapsed.as_millis() >= 20);
+        assert_eq!(mock.get_call_count(), 3);
+    }
 }
