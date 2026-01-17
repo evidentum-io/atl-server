@@ -327,4 +327,379 @@ mod tests {
         assert_eq!(job.config().interval_secs, 123);
         assert_eq!(job.config().max_batch_size, 456);
     }
+
+    #[tokio::test]
+    #[cfg(feature = "ots")]
+    async fn test_ots_job_immediate_shutdown() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage);
+        let ots_client: Arc<dyn OtsClient> = Arc::new(MockOtsClient);
+        let config = OtsJobConfig {
+            interval_secs: 3600,
+            max_batch_size: 100,
+        };
+
+        let job = OtsJob::new(index, storage, ots_client, config);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
+
+        // Send shutdown before job starts
+        shutdown_tx.send(()).unwrap();
+
+        let job_handle = tokio::spawn(async move {
+            job.run(shutdown_rx).await;
+        });
+
+        let result = timeout(Duration::from_millis(500), job_handle).await;
+        assert!(result.is_ok(), "Job should complete immediately");
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "ots")]
+    async fn test_ots_job_multiple_ticks() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage);
+
+        let submit_count = Arc::new(AtomicBool::new(false));
+        let upgrade_count = Arc::new(AtomicBool::new(false));
+
+        struct CountingMockOtsClient {
+            submit_count: Arc<AtomicBool>,
+            upgrade_count: Arc<AtomicBool>,
+        }
+
+        #[async_trait]
+        impl OtsClient for CountingMockOtsClient {
+            async fn submit(&self, _hash: &[u8; 32]) -> Result<(String, Vec<u8>), AnchorError> {
+                self.submit_count.store(true, Ordering::SeqCst);
+                Ok(("http://mock.calendar".to_string(), vec![0u8; 32]))
+            }
+
+            async fn upgrade(&self, _proof: &[u8]) -> Result<Option<UpgradeResult>, AnchorError> {
+                self.upgrade_count.store(true, Ordering::SeqCst);
+                Ok(None)
+            }
+        }
+
+        let ots_client: Arc<dyn OtsClient> = Arc::new(CountingMockOtsClient {
+            submit_count: submit_count.clone(),
+            upgrade_count: upgrade_count.clone(),
+        });
+
+        let config = OtsJobConfig {
+            interval_secs: 1, // 1 second interval
+            max_batch_size: 100,
+        };
+
+        let job = OtsJob::new(index, storage, ots_client, config);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
+
+        let job_handle = tokio::spawn(async move {
+            job.run(shutdown_rx).await;
+        });
+
+        // Wait for multiple ticks
+        sleep(Duration::from_millis(2500)).await;
+
+        shutdown_tx.send(()).unwrap();
+
+        let result = timeout(Duration::from_secs(2), job_handle).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "ots")]
+    async fn test_ots_job_with_custom_config() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage);
+        let ots_client: Arc<dyn OtsClient> = Arc::new(MockOtsClient);
+
+        let config = OtsJobConfig {
+            interval_secs: 5,
+            max_batch_size: 25,
+        };
+
+        let job = OtsJob::new(index, storage, ots_client, config.clone());
+
+        assert_eq!(job.config().interval_secs, config.interval_secs);
+        assert_eq!(job.config().max_batch_size, config.max_batch_size);
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "ots")]
+    async fn test_ots_job_shutdown_during_tick() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage);
+
+        struct SlowMockOtsClient;
+
+        #[async_trait]
+        impl OtsClient for SlowMockOtsClient {
+            async fn submit(&self, _hash: &[u8; 32]) -> Result<(String, Vec<u8>), AnchorError> {
+                sleep(Duration::from_millis(100)).await;
+                Ok(("http://mock.calendar".to_string(), vec![0u8; 32]))
+            }
+
+            async fn upgrade(&self, _proof: &[u8]) -> Result<Option<UpgradeResult>, AnchorError> {
+                sleep(Duration::from_millis(100)).await;
+                Ok(None)
+            }
+        }
+
+        let ots_client: Arc<dyn OtsClient> = Arc::new(SlowMockOtsClient);
+
+        let config = OtsJobConfig {
+            interval_secs: 1,
+            max_batch_size: 100,
+        };
+
+        let job = OtsJob::new(index, storage, ots_client, config);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
+
+        let job_handle = tokio::spawn(async move {
+            job.run(shutdown_rx).await;
+        });
+
+        // Let one tick complete
+        sleep(Duration::from_millis(1200)).await;
+
+        // Shutdown during next tick
+        shutdown_tx.send(()).unwrap();
+
+        let result = timeout(Duration::from_secs(3), job_handle).await;
+        assert!(result.is_ok(), "Job should shutdown cleanly");
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "ots")]
+    async fn test_ots_job_error_handling() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage);
+
+        struct ErrorMockOtsClient;
+
+        #[async_trait]
+        impl OtsClient for ErrorMockOtsClient {
+            async fn submit(&self, _hash: &[u8; 32]) -> Result<(String, Vec<u8>), AnchorError> {
+                Err(AnchorError::Network("test error".to_string()))
+            }
+
+            async fn upgrade(&self, _proof: &[u8]) -> Result<Option<UpgradeResult>, AnchorError> {
+                Err(AnchorError::Network("test error".to_string()))
+            }
+        }
+
+        let ots_client: Arc<dyn OtsClient> = Arc::new(ErrorMockOtsClient);
+
+        let config = OtsJobConfig {
+            interval_secs: 1,
+            max_batch_size: 100,
+        };
+
+        let job = OtsJob::new(index, storage, ots_client, config);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
+
+        let job_handle = tokio::spawn(async move {
+            job.run(shutdown_rx).await;
+        });
+
+        // Let it run through at least one tick with errors
+        sleep(Duration::from_millis(1200)).await;
+
+        shutdown_tx.send(()).unwrap();
+
+        let result = timeout(Duration::from_secs(2), job_handle).await;
+        assert!(result.is_ok(), "Job should handle errors gracefully");
+    }
+
+    #[test]
+    #[cfg(feature = "ots")]
+    fn test_ots_job_with_zero_interval() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage);
+        let ots_client: Arc<dyn OtsClient> = Arc::new(MockOtsClient);
+        let config = OtsJobConfig {
+            interval_secs: 0,
+            max_batch_size: 100,
+        };
+
+        let job = OtsJob::new(index, storage, ots_client, config);
+        assert_eq!(job.config().interval_secs, 0);
+    }
+
+    #[test]
+    #[cfg(feature = "ots")]
+    fn test_ots_job_with_zero_batch_size() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage);
+        let ots_client: Arc<dyn OtsClient> = Arc::new(MockOtsClient);
+        let config = OtsJobConfig {
+            interval_secs: 600,
+            max_batch_size: 0,
+        };
+
+        let job = OtsJob::new(index, storage, ots_client, config);
+        assert_eq!(job.config().max_batch_size, 0);
+    }
+
+    #[test]
+    #[cfg(feature = "ots")]
+    fn test_ots_job_with_large_batch_size() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage);
+        let ots_client: Arc<dyn OtsClient> = Arc::new(MockOtsClient);
+        let config = OtsJobConfig {
+            interval_secs: 600,
+            max_batch_size: usize::MAX,
+        };
+
+        let job = OtsJob::new(index, storage, ots_client, config);
+        assert_eq!(job.config().max_batch_size, usize::MAX);
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "ots")]
+    async fn test_ots_job_shutdown_receiver_dropped() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage);
+        let ots_client: Arc<dyn OtsClient> = Arc::new(MockOtsClient);
+        let config = OtsJobConfig {
+            interval_secs: 1,
+            max_batch_size: 100,
+        };
+
+        let job = OtsJob::new(index, storage, ots_client, config);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
+
+        let _job_handle = tokio::spawn(async move {
+            job.run(shutdown_rx).await;
+        });
+
+        // Drop sender immediately
+        drop(shutdown_tx);
+
+        // Job should continue running despite sender being dropped
+        sleep(Duration::from_millis(100)).await;
+
+        // Note: Without a way to signal, the job will run until timeout
+        // This tests that dropping sender doesn't panic
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "ots")]
+    async fn test_ots_job_config_reference_lifetime() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage);
+        let ots_client: Arc<dyn OtsClient> = Arc::new(MockOtsClient);
+        let config = OtsJobConfig {
+            interval_secs: 999,
+            max_batch_size: 888,
+        };
+
+        let job = OtsJob::new(index, storage, ots_client, config);
+
+        // Access config multiple times
+        assert_eq!(job.config().interval_secs, 999);
+        assert_eq!(job.config().max_batch_size, 888);
+        assert_eq!(job.config().interval_secs, 999);
+        assert_eq!(job.config().max_batch_size, 888);
+    }
+
+    #[test]
+    #[cfg(feature = "ots")]
+    fn test_ots_job_construction_with_default_config() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage);
+        let ots_client: Arc<dyn OtsClient> = Arc::new(MockOtsClient);
+        let config = OtsJobConfig::default();
+
+        let job = OtsJob::new(index, storage, ots_client, config);
+        assert_eq!(job.config().interval_secs, 600);
+        assert_eq!(job.config().max_batch_size, 100);
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "ots")]
+    async fn test_ots_job_with_very_short_interval() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage);
+        let ots_client: Arc<dyn OtsClient> = Arc::new(MockOtsClient);
+        let config = OtsJobConfig {
+            interval_secs: 1, // Very short interval
+            max_batch_size: 100,
+        };
+
+        let job = OtsJob::new(index, storage, ots_client, config);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
+
+        let job_handle = tokio::spawn(async move {
+            job.run(shutdown_rx).await;
+        });
+
+        // Let it run for a bit
+        sleep(Duration::from_millis(500)).await;
+
+        shutdown_tx.send(()).unwrap();
+
+        let result = timeout(Duration::from_secs(2), job_handle).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "ots")]
+    async fn test_ots_job_concurrent_shutdown_signals() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage);
+        let ots_client: Arc<dyn OtsClient> = Arc::new(MockOtsClient);
+        let config = OtsJobConfig {
+            interval_secs: 3600,
+            max_batch_size: 100,
+        };
+
+        let job = OtsJob::new(index, storage, ots_client, config);
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(10);
+
+        let job_handle = tokio::spawn(async move {
+            job.run(shutdown_rx).await;
+        });
+
+        sleep(Duration::from_millis(50)).await;
+
+        // Send multiple shutdown signals
+        let _ = shutdown_tx.send(());
+        let _ = shutdown_tx.send(());
+        let _ = shutdown_tx.send(());
+
+        let result = timeout(Duration::from_secs(1), job_handle).await;
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    #[cfg(feature = "ots")]
+    fn test_ots_job_stores_components() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage);
+        let ots_client: Arc<dyn OtsClient> = Arc::new(MockOtsClient);
+        let config = OtsJobConfig {
+            interval_secs: 100,
+            max_batch_size: 200,
+        };
+
+        let job = OtsJob::new(
+            index.clone(),
+            storage.clone(),
+            ots_client.clone(),
+            config.clone(),
+        );
+
+        // Verify config is stored correctly
+        assert_eq!(job.config().interval_secs, config.interval_secs);
+        assert_eq!(job.config().max_batch_size, config.max_batch_size);
+    }
 }

@@ -108,10 +108,10 @@ pub async fn submit_unanchored_trees(
 mod tests {
     use super::*;
     use crate::anchoring::error::AnchorError;
-    use crate::anchoring::ots::OtsClient;
+    use crate::anchoring::ots::{OtsClient, UpgradeResult};
     use crate::error::{ServerError, StorageError};
     use crate::traits::{
-        Anchor, AnchorType, AppendParams, BatchResult, ConsistencyProof, Entry, InclusionProof,
+        Anchor, AppendParams, BatchResult, ConsistencyProof, Entry, InclusionProof,
         TreeHead, Storage,
     };
     use async_trait::async_trait;
@@ -566,5 +566,301 @@ mod tests {
 
         let result = submit_unanchored_trees(&index, &storage, &client, 1000).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_submit_with_zero_super_tree_size() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+
+        // Both sizes are 0
+        {
+            let idx = index.lock().await;
+            idx.set_super_tree_size(0).unwrap();
+            idx.set_last_ots_submitted_super_tree_size(0).unwrap();
+        }
+
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage::new([0u8; 32]));
+        let client = Arc::new(MockOtsClient::new_success());
+        let call_count = client.call_count.clone();
+        let client_trait: Arc<dyn OtsClient> = client;
+
+        let result = submit_unanchored_trees(&index, &storage, &client_trait, 100).await;
+        assert!(result.is_ok());
+
+        // Should not submit when sizes are equal
+        assert_eq!(call_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_submit_index_get_super_tree_size_error() {
+        // Create index and immediately drop the connection by using invalid state
+        use rusqlite::Connection;
+        let conn = Connection::open_in_memory().expect("Failed to create in-memory DB");
+        let store = IndexStore::from_connection(conn);
+        // Don't initialize - this will cause errors
+
+        let index = Arc::new(Mutex::new(store));
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage::new([1u8; 32]));
+        let client: Arc<dyn OtsClient> = Arc::new(MockOtsClient::new_success());
+
+        let result = submit_unanchored_trees(&index, &storage, &client, 100).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_submit_with_different_super_root_values() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+
+        {
+            let idx = index.lock().await;
+            idx.set_super_tree_size(1).unwrap();
+            idx.set_last_ots_submitted_super_tree_size(0).unwrap();
+        }
+
+        // Test with all zeros
+        let storage_zeros: Arc<dyn Storage> = Arc::new(MockStorage::new([0u8; 32]));
+        let client: Arc<dyn OtsClient> = Arc::new(MockOtsClient::new_success());
+        let result = submit_unanchored_trees(&index, &storage_zeros, &client, 100).await;
+        assert!(result.is_ok());
+
+        // Test with all 0xFF
+        {
+            let idx = index.lock().await;
+            idx.set_super_tree_size(2).unwrap();
+        }
+        let storage_ff: Arc<dyn Storage> = Arc::new(MockStorage::new([0xFFu8; 32]));
+        let result = submit_unanchored_trees(&index, &storage_ff, &client, 100).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_submit_verifies_anchor_creation() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+
+        {
+            let idx = index.lock().await;
+            idx.set_super_tree_size(1).unwrap();
+            idx.set_last_ots_submitted_super_tree_size(0).unwrap();
+        }
+
+        let super_root = [42u8; 32];
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage::new(super_root));
+        let client: Arc<dyn OtsClient> = Arc::new(MockOtsClient::new_success());
+
+        let result = submit_unanchored_trees(&index, &storage, &client, 100).await;
+        assert!(result.is_ok());
+
+        // Verify anchor details
+        let idx = index.lock().await;
+        let pending = idx.get_pending_ots_anchors().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].anchor.anchored_hash, super_root);
+        assert_eq!(pending[0].anchor.super_tree_size, Some(1));
+    }
+
+    #[tokio::test]
+    async fn test_submit_concurrent_access() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+
+        {
+            let idx = index.lock().await;
+            idx.set_super_tree_size(2).unwrap();
+            idx.set_last_ots_submitted_super_tree_size(0).unwrap();
+        }
+
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage::new([5u8; 32]));
+        let client: Arc<dyn OtsClient> = Arc::new(MockOtsClient::new_success());
+
+        // Spawn multiple concurrent submissions (though they'll serialize via mutex)
+        let index_clone = index.clone();
+        let storage_clone = storage.clone();
+        let client_clone = client.clone();
+
+        let handle = tokio::spawn(async move {
+            submit_unanchored_trees(&index_clone, &storage_clone, &client_clone, 100).await
+        });
+
+        let result1 = submit_unanchored_trees(&index, &storage, &client, 100).await;
+        let result2 = handle.await.unwrap();
+
+        // Both should succeed
+        assert!(result1.is_ok());
+        assert!(result2.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_submit_network_error_preserves_state() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+
+        {
+            let idx = index.lock().await;
+            idx.set_super_tree_size(1).unwrap();
+            idx.set_last_ots_submitted_super_tree_size(0).unwrap();
+        }
+
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage::new([3u8; 32]));
+        let client: Arc<dyn OtsClient> = Arc::new(MockOtsClient::new_error(
+            AnchorError::Network("connection refused".to_string()),
+        ));
+
+        let result = submit_unanchored_trees(&index, &storage, &client, 100).await;
+        assert!(result.is_ok()); // Function doesn't propagate OTS errors
+
+        // State should be unchanged
+        let idx = index.lock().await;
+        let last_submitted = idx.get_last_ots_submitted_super_tree_size().unwrap();
+        assert_eq!(last_submitted, 0); // Still at original value
+
+        let pending = idx.get_pending_ots_anchors().unwrap();
+        assert_eq!(pending.len(), 0); // No anchor created
+    }
+
+    #[tokio::test]
+    async fn test_submit_invalid_response_error() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+
+        {
+            let idx = index.lock().await;
+            idx.set_super_tree_size(1).unwrap();
+            idx.set_last_ots_submitted_super_tree_size(0).unwrap();
+        }
+
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage::new([4u8; 32]));
+        let client: Arc<dyn OtsClient> = Arc::new(MockOtsClient::new_error(
+            AnchorError::InvalidResponse("invalid proof format".to_string()),
+        ));
+
+        let result = submit_unanchored_trees(&index, &storage, &client, 100).await;
+        assert!(result.is_ok());
+
+        // Verify state unchanged after error
+        let idx = index.lock().await;
+        let last_submitted = idx.get_last_ots_submitted_super_tree_size().unwrap();
+        assert_eq!(last_submitted, 0);
+    }
+
+    #[tokio::test]
+    async fn test_submit_empty_calendar_url() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+
+        struct MockOtsClientEmptyUrl;
+
+        #[async_trait]
+        impl OtsClient for MockOtsClientEmptyUrl {
+            async fn submit(&self, _hash: &[u8; 32]) -> Result<(String, Vec<u8>), AnchorError> {
+                Ok(("".to_string(), vec![1, 2, 3]))
+            }
+
+            async fn upgrade(&self, _proof: &[u8]) -> Result<Option<UpgradeResult>, AnchorError> {
+                unimplemented!()
+            }
+        }
+
+        {
+            let idx = index.lock().await;
+            idx.set_super_tree_size(1).unwrap();
+            idx.set_last_ots_submitted_super_tree_size(0).unwrap();
+        }
+
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage::new([6u8; 32]));
+        let client: Arc<dyn OtsClient> = Arc::new(MockOtsClientEmptyUrl);
+
+        let result = submit_unanchored_trees(&index, &storage, &client, 100).await;
+        assert!(result.is_ok());
+
+        // Verify anchor was still created
+        let idx = index.lock().await;
+        let pending = idx.get_pending_ots_anchors().unwrap();
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_submit_empty_proof() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+
+        struct MockOtsClientEmptyProof;
+
+        #[async_trait]
+        impl OtsClient for MockOtsClientEmptyProof {
+            async fn submit(&self, _hash: &[u8; 32]) -> Result<(String, Vec<u8>), AnchorError> {
+                Ok(("http://test.com".to_string(), vec![]))
+            }
+
+            async fn upgrade(&self, _proof: &[u8]) -> Result<Option<UpgradeResult>, AnchorError> {
+                unimplemented!()
+            }
+        }
+
+        {
+            let idx = index.lock().await;
+            idx.set_super_tree_size(1).unwrap();
+            idx.set_last_ots_submitted_super_tree_size(0).unwrap();
+        }
+
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage::new([7u8; 32]));
+        let client: Arc<dyn OtsClient> = Arc::new(MockOtsClientEmptyProof);
+
+        let result = submit_unanchored_trees(&index, &storage, &client, 100).await;
+        assert!(result.is_ok());
+
+        // Verify anchor was created with empty proof
+        let idx = index.lock().await;
+        let pending = idx.get_pending_ots_anchors().unwrap();
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_submit_very_large_super_tree_size() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+
+        {
+            let idx = index.lock().await;
+            idx.set_super_tree_size(u64::MAX).unwrap();
+            idx.set_last_ots_submitted_super_tree_size(u64::MAX - 1).unwrap();
+        }
+
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage::new([8u8; 32]));
+        let client: Arc<dyn OtsClient> = Arc::new(MockOtsClient::new_success());
+
+        let result = submit_unanchored_trees(&index, &storage, &client, 100).await;
+        assert!(result.is_ok());
+
+        let idx = index.lock().await;
+        let last_submitted = idx.get_last_ots_submitted_super_tree_size().unwrap();
+        assert_eq!(last_submitted, u64::MAX);
+    }
+
+    #[tokio::test]
+    async fn test_submit_idempotency() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+
+        {
+            let idx = index.lock().await;
+            idx.set_super_tree_size(1).unwrap();
+            idx.set_last_ots_submitted_super_tree_size(0).unwrap();
+        }
+
+        let storage: Arc<dyn Storage> = Arc::new(MockStorage::new([9u8; 32]));
+        let client: Arc<dyn OtsClient> = Arc::new(MockOtsClient::new_success());
+
+        // First submission
+        let result1 = submit_unanchored_trees(&index, &storage, &client, 100).await;
+        assert!(result1.is_ok());
+
+        {
+            let idx = index.lock().await;
+            let pending = idx.get_pending_ots_anchors().unwrap();
+            assert_eq!(pending.len(), 1);
+        }
+
+        // Second submission with same state should be no-op
+        let result2 = submit_unanchored_trees(&index, &storage, &client, 100).await;
+        assert!(result2.is_ok());
+
+        {
+            let idx = index.lock().await;
+            let pending = idx.get_pending_ots_anchors().unwrap();
+            assert_eq!(pending.len(), 1); // Still only one anchor
+        }
     }
 }
