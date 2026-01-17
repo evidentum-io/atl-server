@@ -113,3 +113,144 @@ impl RoundRobinSelector {
         Ok(self.urls[current_index].clone())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_selector() {
+        let urls = vec!["https://tsa1.com".to_string(), "https://tsa2.com".to_string()];
+        let selector = RoundRobinSelector::new(urls.clone());
+
+        assert_eq!(selector.urls_count(), 2);
+        assert_eq!(selector.last_index(), 0);
+    }
+
+    #[test]
+    fn test_urls_count() {
+        let selector = RoundRobinSelector::new(vec![
+            "https://tsa1.com".to_string(),
+            "https://tsa2.com".to_string(),
+            "https://tsa3.com".to_string(),
+        ]);
+
+        assert_eq!(selector.urls_count(), 3);
+    }
+
+    #[test]
+    fn test_urls_count_empty() {
+        let selector = RoundRobinSelector::new(vec![]);
+        assert_eq!(selector.urls_count(), 0);
+    }
+
+    #[test]
+    fn test_get_url() {
+        let urls = vec![
+            "https://tsa1.com".to_string(),
+            "https://tsa2.com".to_string(),
+            "https://tsa3.com".to_string(),
+        ];
+        let selector = RoundRobinSelector::new(urls);
+
+        assert_eq!(selector.get_url(0), "https://tsa1.com");
+        assert_eq!(selector.get_url(1), "https://tsa2.com");
+        assert_eq!(selector.get_url(2), "https://tsa3.com");
+    }
+
+    #[test]
+    fn test_get_url_wraps_around() {
+        let urls = vec![
+            "https://tsa1.com".to_string(),
+            "https://tsa2.com".to_string(),
+        ];
+        let selector = RoundRobinSelector::new(urls);
+
+        assert_eq!(selector.get_url(0), "https://tsa1.com");
+        assert_eq!(selector.get_url(1), "https://tsa2.com");
+        assert_eq!(selector.get_url(2), "https://tsa1.com"); // wraps
+        assert_eq!(selector.get_url(3), "https://tsa2.com"); // wraps
+    }
+
+    #[test]
+    fn test_update_and_read_last_index() {
+        let selector = RoundRobinSelector::new(vec!["https://tsa1.com".to_string()]);
+
+        assert_eq!(selector.last_index(), 0);
+
+        selector.update_last_index(5);
+        assert_eq!(selector.last_index(), 5);
+
+        selector.update_last_index(10);
+        assert_eq!(selector.last_index(), 10);
+    }
+
+    #[test]
+    fn test_next_url_empty_urls() {
+        let selector = RoundRobinSelector::new(vec![]);
+        let result = selector.next_url();
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No TSA URLs configured"));
+    }
+
+    #[test]
+    fn test_next_url_single_url() {
+        let selector = RoundRobinSelector::new(vec!["https://tsa1.com".to_string()]);
+
+        let url1 = selector.next_url().unwrap();
+        assert_eq!(url1, "https://tsa1.com");
+        assert_eq!(selector.last_index(), 0);
+
+        let url2 = selector.next_url().unwrap();
+        assert_eq!(url2, "https://tsa1.com");
+        assert_eq!(selector.last_index(), 0);
+    }
+
+    #[test]
+    fn test_next_url_multiple_urls() {
+        let selector = RoundRobinSelector::new(vec![
+            "https://tsa1.com".to_string(),
+            "https://tsa2.com".to_string(),
+            "https://tsa3.com".to_string(),
+        ]);
+
+        // Initial last_index = 0
+        // next_url: current_index = (0 + 1) % 3 = 1
+        let url1 = selector.next_url().unwrap();
+        assert_eq!(url1, "https://tsa2.com");
+        assert_eq!(selector.last_index(), 1);
+
+        let url2 = selector.next_url().unwrap();
+        assert_eq!(url2, "https://tsa3.com");
+        assert_eq!(selector.last_index(), 2);
+
+        let url3 = selector.next_url().unwrap();
+        assert_eq!(url3, "https://tsa1.com");
+        assert_eq!(selector.last_index(), 0); // wraps around
+
+        let url4 = selector.next_url().unwrap();
+        assert_eq!(url4, "https://tsa2.com");
+        assert_eq!(selector.last_index(), 1);
+    }
+
+    #[test]
+    fn test_next_url_starts_from_zero() {
+        let selector = RoundRobinSelector::new(vec![
+            "https://tsa1.com".to_string(),
+            "https://tsa2.com".to_string(),
+        ]);
+
+        // First call should start from index 0 (last_index is 0, so next is (0+1)%2 = 1)
+        // But the URL at index 1 is "https://tsa2.com"
+        // Wait, let me re-check the logic:
+        // initial last_index = 0
+        // next_url: current_index = (0 + 1) % 2 = 1
+        // returns urls[1] = "https://tsa2.com"
+        // stores last_index = 1
+
+        let url1 = selector.next_url().unwrap();
+        assert_eq!(url1, "https://tsa2.com");
+        assert_eq!(selector.last_index(), 1);
+    }
+}
