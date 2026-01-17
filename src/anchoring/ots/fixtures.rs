@@ -58,6 +58,100 @@ pub fn mock_calendar_response(calendar_url: &str) -> Vec<u8> {
     response
 }
 
+/// Create a minimal valid OTS response for testing
+pub fn create_minimal_ots_response(hash: &[u8; 32]) -> Vec<u8> {
+    use atl_core::ots::DetachedTimestampFile;
+
+    // Create using atl_core's builder
+    let calendar_response = mock_calendar_response("https://test.calendar");
+    let file = DetachedTimestampFile::from_calendar_response(*hash, &calendar_response)
+        .expect("failed to create test timestamp");
+
+    file.to_bytes().expect("failed to serialize timestamp")
+}
+
+/// Create a timestamp without pending attestation (for testing)
+pub fn create_timestamp_without_pending(hash: &[u8; 32]) -> atl_core::ots::DetachedTimestampFile {
+    use atl_core::ots::{Attestation, DetachedTimestampFile, DigestType, Step, StepData, Timestamp};
+
+    // Create a timestamp with only unknown attestation type
+    let step = Step {
+        data: StepData::Attestation(Attestation::Unknown {
+            tag: [0xFF; 8],
+            data: vec![],
+        }),
+        output: hash.to_vec(),
+        next: vec![],
+    };
+
+    let timestamp = Timestamp {
+        start_digest: hash.to_vec(),
+        first_step: step,
+    };
+
+    DetachedTimestampFile {
+        digest_type: DigestType::Sha256,
+        timestamp,
+    }
+}
+
+/// Create a timestamp with pending attestation pointing to specific calendar
+pub fn create_timestamp_with_pending(
+    hash: &[u8; 32],
+    calendar_url: &str,
+) -> atl_core::ots::DetachedTimestampFile {
+    use atl_core::ots::{Attestation, DetachedTimestampFile, DigestType, Step, StepData, Timestamp};
+
+    // Use a deterministic commitment based on hash
+    let mut commitment = hash.to_vec();
+    commitment.push(0x01);
+
+    let step = Step {
+        data: StepData::Attestation(Attestation::Pending {
+            uri: calendar_url.to_string(),
+        }),
+        output: commitment,
+        next: vec![],
+    };
+
+    let timestamp = Timestamp {
+        start_digest: hash.to_vec(),
+        first_step: step,
+    };
+
+    DetachedTimestampFile {
+        digest_type: DigestType::Sha256,
+        timestamp,
+    }
+}
+
+/// Create a timestamp with specific URI (for normalization testing)
+pub fn create_timestamp_with_uri(
+    hash: &[u8; 32],
+    uri: &str,
+) -> atl_core::ots::DetachedTimestampFile {
+    create_timestamp_with_pending(hash, uri)
+}
+
+/// Create a minimal upgrade response
+pub fn create_minimal_ots_upgrade_response() -> Vec<u8> {
+    // Minimal upgrade: just some operations
+    vec![
+        0x08, // SHA256 operation
+        0xF0, 0x20, // Prepend 32 bytes
+        // 32 bytes of data
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+        0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
+        0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+        0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20,
+        0x08, // SHA256 operation
+        // Bitcoin attestation
+        0x00, // Attestation marker
+        0x05, 0x88, 0x96, 0x0d, 0x73, 0xd7, 0x19, 0x01, // BITCOIN_TAG
+        0x04, 0x00, 0x00, 0xc3, 0x50, // Block height 700000 in varint
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

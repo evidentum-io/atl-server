@@ -75,6 +75,7 @@ tokio-test = "0.4"
 tower = { version = "0.4", features = ["util"] }
 hyper = "1"
 sha2 = "0.10"
+mockito = "1.5"
 bytes = "1"
 serial_test = "3"
 
