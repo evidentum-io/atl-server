@@ -4,7 +4,7 @@ use thiserror::Error;
 
 /// Anchoring operation errors
 #[allow(dead_code)]
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum AnchorError {
     /// Network communication error
     #[error("network error: {0}")]
