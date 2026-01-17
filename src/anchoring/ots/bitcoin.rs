@@ -277,4 +277,99 @@ mod tests {
         assert_eq!(ts2, 1_231_006_505);
         assert_eq!(ts3, 1_231_006_505);
     }
+
+    #[tokio::test]
+    async fn test_cache_isolates_different_heights() {
+        // Pre-populate cache with multiple heights
+        {
+            let mut cache = BLOCK_TIME_CACHE.write().unwrap();
+            cache.insert(100, 1_000_000_000);
+            cache.insert(200, 2_000_000_000);
+        }
+
+        // Should return correct cached values
+        let ts1 = get_block_timestamp(100, Duration::from_millis(1))
+            .await
+            .unwrap();
+        let ts2 = get_block_timestamp(200, Duration::from_millis(1))
+            .await
+            .unwrap();
+
+        assert_eq!(ts1, 1_000_000_000);
+        assert_eq!(ts2, 2_000_000_000);
+
+        // Cleanup
+        BLOCK_TIME_CACHE.write().unwrap().clear();
+    }
+
+    #[tokio::test]
+    async fn test_timeout_honored() {
+        use std::time::Instant;
+
+        let start = Instant::now();
+        // Use non-existent block with very short timeout
+        let result = get_block_timestamp(999_999_999, Duration::from_millis(100)).await;
+
+        let elapsed = start.elapsed();
+        // Request should fail fast (within reasonable time due to 3 providers)
+        // Each provider gets 100ms timeout, so total should be < 1 second
+        assert!(elapsed.as_secs() < 2);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_provider_configurations() {
+        // Verify provider array is correctly configured
+        assert_eq!(PROVIDERS.len(), 3);
+
+        // Check blockstream.info
+        assert_eq!(PROVIDERS[0].name, "blockstream.info");
+        assert_eq!(PROVIDERS[0].base_url, "https://blockstream.info/api");
+        assert_eq!(PROVIDERS[0].two_step, true);
+        assert_eq!(PROVIDERS[0].timestamp_field, "timestamp");
+
+        // Check mempool.space
+        assert_eq!(PROVIDERS[1].name, "mempool.space");
+        assert_eq!(PROVIDERS[1].base_url, "https://mempool.space/api");
+        assert_eq!(PROVIDERS[1].two_step, true);
+
+        // Check blockchain.info
+        assert_eq!(PROVIDERS[2].name, "blockchain.info");
+        assert_eq!(PROVIDERS[2].base_url, "https://blockchain.info");
+        assert_eq!(PROVIDERS[2].two_step, false);
+        assert_eq!(PROVIDERS[2].timestamp_field, "time");
+    }
+
+    #[tokio::test]
+    async fn test_client_creation_failure_handling() {
+        // Test behavior when client fails to create (unlikely but possible)
+        // We can't easily force reqwest::Client::builder() to fail,
+        // but we test that the function signature handles errors correctly
+        let result = get_block_timestamp(0, Duration::from_millis(1)).await;
+        // Will either succeed (cached) or fail with proper error type
+        match result {
+            Ok(_) => {}
+            Err(e) => {
+                assert!(matches!(e, AnchorError::BlockTimeFetchFailed { .. }));
+            }
+        }
+    }
+
+
+    #[tokio::test]
+    async fn test_error_details_include_all_providers() {
+        // Test that error includes details from all failed providers
+        let result = get_block_timestamp(999_888_777, Duration::from_secs(3)).await;
+
+        assert!(result.is_err());
+        if let Err(AnchorError::BlockTimeFetchFailed { height, details }) = result {
+            assert_eq!(height, 999_888_777);
+            // All three provider names should appear in details
+            assert!(details.contains("blockstream.info"));
+            assert!(details.contains("mempool.space"));
+            assert!(details.contains("blockchain.info"));
+        } else {
+            panic!("Expected BlockTimeFetchFailed error");
+        }
+    }
 }

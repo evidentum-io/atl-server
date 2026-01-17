@@ -165,4 +165,70 @@ mod tests {
         assert!(debug_str.contains("interval_secs"));
         assert!(debug_str.contains("max_batch_size"));
     }
+
+    #[test]
+    #[ignore] // Env vars cause race conditions in parallel test execution
+    fn test_from_env_partial_values() {
+        env::set_var("ATL_OTS_POLL_INTERVAL_SECS", "150");
+        env::remove_var("ATL_OTS_UPGRADE_BATCH_SIZE");
+
+        let config = OtsJobConfig::from_env();
+        assert_eq!(config.interval_secs, 150);
+        assert_eq!(config.max_batch_size, 100); // Default
+
+        env::remove_var("ATL_OTS_POLL_INTERVAL_SECS");
+    }
+
+    #[test]
+    #[ignore] // Env vars cause race conditions in parallel test execution
+    fn test_from_env_with_whitespace() {
+        env::set_var("ATL_OTS_POLL_INTERVAL_SECS", " 200 ");
+        env::set_var("ATL_OTS_UPGRADE_BATCH_SIZE", " 75 ");
+
+        let config = OtsJobConfig::from_env();
+        // parse() trims whitespace automatically
+        assert_eq!(config.interval_secs, 200);
+        assert_eq!(config.max_batch_size, 75);
+
+        env::remove_var("ATL_OTS_POLL_INTERVAL_SECS");
+        env::remove_var("ATL_OTS_UPGRADE_BATCH_SIZE");
+    }
+
+    #[test]
+    #[ignore] // Env vars cause race conditions in parallel test execution
+    fn test_from_env_with_overflow() {
+        env::set_var("ATL_OTS_POLL_INTERVAL_SECS", "99999999999999999999");
+        env::set_var("ATL_OTS_UPGRADE_BATCH_SIZE", "99999999999999999999");
+
+        let config = OtsJobConfig::from_env();
+        // Overflow causes parse failure, fallback to defaults
+        assert_eq!(config.interval_secs, 600);
+        assert_eq!(config.max_batch_size, 100);
+
+        env::remove_var("ATL_OTS_POLL_INTERVAL_SECS");
+        env::remove_var("ATL_OTS_UPGRADE_BATCH_SIZE");
+    }
+
+    #[test]
+    #[ignore] // Env vars cause race conditions in parallel test execution
+    fn test_from_env_empty_string() {
+        env::set_var("ATL_OTS_POLL_INTERVAL_SECS", "");
+        env::set_var("ATL_OTS_UPGRADE_BATCH_SIZE", "");
+
+        let config = OtsJobConfig::from_env();
+        // Empty string fails parse, fallback to defaults
+        assert_eq!(config.interval_secs, 600);
+        assert_eq!(config.max_batch_size, 100);
+
+        env::remove_var("ATL_OTS_POLL_INTERVAL_SECS");
+        env::remove_var("ATL_OTS_UPGRADE_BATCH_SIZE");
+    }
+
+    #[test]
+    fn test_default_values_consistency() {
+        let config1 = OtsJobConfig::default();
+        let config2 = OtsJobConfig::default();
+        assert_eq!(config1.interval_secs, config2.interval_secs);
+        assert_eq!(config1.max_batch_size, config2.max_batch_size);
+    }
 }

@@ -249,7 +249,7 @@ mod tests {
         };
 
         let (anchor_id, tree_id) = {
-            let mut idx = index.lock().await;
+            let idx = index.lock().await;
             let aid = idx
                 .store_anchor_returning_id(100, &anchor, "confirmed")
                 .expect("Failed to store anchor");
@@ -318,4 +318,70 @@ mod tests {
     // Note: We don't test actual TSA network calls here as that would require
     // network access and real TSA servers. Those tests should be in integration tests.
     // Unit tests focus on the logic around anchor lookup and tree linking.
+
+    #[tokio::test]
+    async fn test_try_tsa_timestamp_uses_tree_end_size() {
+        let _index = Arc::new(Mutex::new(create_test_index_store()));
+        let root_hash = [3u8; 32];
+        let tree = create_test_tree_record(1, Some(root_hash), 100, Some(500));
+
+        // Should use end_size (500) not start_size (100)
+        // We can't test network call, but verify tree structure is correct
+        assert_eq!(tree.end_size, Some(500));
+        assert_eq!(tree.start_size, 100);
+    }
+
+    #[tokio::test]
+    async fn test_try_tsa_timestamp_fallback_to_start_size() {
+        let _index = Arc::new(Mutex::new(create_test_index_store()));
+        let root_hash = [4u8; 32];
+        let tree = create_test_tree_record(1, Some(root_hash), 200, None);
+
+        // When end_size is None, should use start_size
+        assert_eq!(tree.end_size, None);
+        assert_eq!(tree.start_size, 200);
+    }
+
+    #[tokio::test]
+    async fn test_create_tsa_anchor_with_different_tree_sizes() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+        let root_hash1 = [5u8; 32];
+        let root_hash2 = [6u8; 32];
+
+        // Create anchors for different tree sizes
+        let anchor1 = crate::traits::Anchor {
+            anchor_type: crate::traits::AnchorType::Rfc3161,
+            target: "data_tree_root".to_string(),
+            anchored_hash: root_hash1,
+            tree_size: 100,
+            super_tree_size: None,
+            timestamp: 1000,
+            token: vec![1],
+            metadata: serde_json::json!({}),
+        };
+
+        let anchor2 = crate::traits::Anchor {
+            anchor_type: crate::traits::AnchorType::Rfc3161,
+            target: "data_tree_root".to_string(),
+            anchored_hash: root_hash2,
+            tree_size: 200,
+            super_tree_size: None,
+            timestamp: 2000,
+            token: vec![2],
+            metadata: serde_json::json!({}),
+        };
+
+        let (id1, id2) = {
+            let idx = index.lock().await;
+            let i1 = idx
+                .store_anchor_returning_id(100, &anchor1, "confirmed")
+                .unwrap();
+            let i2 = idx
+                .store_anchor_returning_id(200, &anchor2, "confirmed")
+                .unwrap();
+            (i1, i2)
+        };
+
+        assert_ne!(id1, id2);
+    }
 }

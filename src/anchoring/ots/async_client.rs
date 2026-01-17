@@ -227,4 +227,101 @@ mod background_simulation {
         // and the Arc<dyn OtsClient> pattern works
         let _client_ref: &dyn OtsClient = ots_client.as_ref();
     }
+
+    /// Test UpgradeResult structure
+    #[test]
+    fn test_upgrade_result_debug() {
+        let result = UpgradeResult {
+            proof: vec![1, 2, 3],
+            status: OtsStatus::Confirmed {
+                block_height: 700000,
+                block_time: 1234567890,
+            },
+        };
+        let debug_str = format!("{:?}", result);
+        assert!(debug_str.contains("UpgradeResult"));
+        assert!(debug_str.contains("proof"));
+        assert!(debug_str.contains("status"));
+    }
+
+    #[test]
+    fn test_upgrade_result_clone() {
+        let result = UpgradeResult {
+            proof: vec![4, 5, 6],
+            status: OtsStatus::Pending {
+                calendar_url: "https://test.com".to_string(),
+            },
+        };
+        let cloned = result.clone();
+        assert_eq!(cloned.proof, result.proof);
+    }
+
+    /// Test timeout is properly configured
+    #[test]
+    fn test_client_timeout_configuration() {
+        let config = OtsConfig {
+            timeout_secs: 42,
+            ..Default::default()
+        };
+        let client = AsyncOtsClient::with_config(config).unwrap();
+        assert_eq!(client.timeout, Duration::from_secs(42));
+    }
+
+    /// Test multiple clients can coexist
+    #[tokio::test]
+    async fn test_multiple_clients_in_parallel() {
+        let clients: Vec<_> = (0..5)
+            .map(|_| AsyncOtsClient::new().expect("client creation failed"))
+            .collect();
+
+        assert_eq!(clients.len(), 5);
+        // All clients should be independently usable
+        for client in clients {
+            assert!(client.timeout > Duration::from_secs(0));
+        }
+    }
+
+    /// Test default client can be created multiple times
+    #[test]
+    fn test_default_client_repeatability() {
+        let _client1 = AsyncOtsClient::default();
+        let _client2 = AsyncOtsClient::default();
+        let _client3 = AsyncOtsClient::default();
+        // Should not panic
+    }
+
+    /// Test AsyncOtsClient can be sent across threads
+    #[tokio::test]
+    async fn test_client_is_send() {
+        let client = AsyncOtsClient::new().unwrap();
+
+        // Spawn task that moves client
+        let handle = tokio::spawn(async move {
+            let _c = client;
+            42
+        });
+
+        let result = handle.await.unwrap();
+        assert_eq!(result, 42);
+    }
+
+    /// Test AsyncOtsClient can be shared across threads with Arc
+    #[tokio::test]
+    async fn test_client_is_sync() {
+        let client = Arc::new(AsyncOtsClient::new().unwrap());
+
+        // Spawn multiple tasks sharing the same client
+        let mut handles = vec![];
+        for _ in 0..3 {
+            let client_clone = Arc::clone(&client);
+            handles.push(tokio::spawn(async move {
+                let _c = client_clone;
+                true
+            }));
+        }
+
+        for handle in handles {
+            assert!(handle.await.unwrap());
+        }
+    }
 }

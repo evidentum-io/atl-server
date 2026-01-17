@@ -609,4 +609,189 @@ mod tests {
         let verifier = atl_core::CheckpointVerifier::from_bytes(&public_key).unwrap();
         assert!(checkpoint.verify(&verifier).is_ok());
     }
+
+    #[test]
+    fn test_checkpoint_signer_clone() {
+        let signer1 = CheckpointSigner::from_bytes(&[42u8; 32]);
+        let signer2 = signer1.clone();
+
+        assert_eq!(signer1.key_id, signer2.key_id);
+        assert_eq!(signer1.public_key_bytes(), signer2.public_key_bytes());
+    }
+
+    #[test]
+    fn test_checkpoint_signer_debug() {
+        let signer = CheckpointSigner::from_bytes(&[42u8; 32]);
+        let debug_str = format!("{:?}", signer);
+        assert!(debug_str.contains("CheckpointSigner"));
+        assert!(debug_str.contains("key_id"));
+    }
+
+    #[test]
+    fn test_checkpoint_signer_from_file_invalid_size() {
+        use std::io::Write;
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join("invalid_key.bin");
+
+        // Write file with wrong size
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(&[0u8; 16])
+            .unwrap();
+
+        let result = CheckpointSigner::from_file(path.to_str().unwrap());
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("signing key must be 32 bytes"));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_checkpoint_signer_from_file_valid() {
+        use std::io::Write;
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join("valid_key.bin");
+
+        // Write valid 32-byte key
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(&[42u8; 32])
+            .unwrap();
+
+        let result = CheckpointSigner::from_file(path.to_str().unwrap());
+        assert!(result.is_ok());
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_checkpoint_signer_from_file_not_found() {
+        let result = CheckpointSigner::from_file("/nonexistent/path/to/key.bin");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_create_signed_checkpoint() {
+        let signer = CheckpointSigner::from_bytes(&[42u8; 32]);
+        let origin = [0xAAu8; 32];
+        let root_hash = [0xBBu8; 32];
+        let tree_size = 100;
+        let timestamp = 1234567890;
+
+        let checkpoint = create_signed_checkpoint(origin, tree_size, root_hash, timestamp, &signer);
+
+        assert_eq!(checkpoint.origin, origin);
+        assert_eq!(checkpoint.tree_size, tree_size);
+        assert_eq!(checkpoint.root_hash, root_hash);
+        assert_eq!(checkpoint.timestamp, timestamp);
+        assert_eq!(checkpoint.key_id, *signer.key_id());
+    }
+
+    #[test]
+    fn test_select_anchors_for_receipt_tsa_only() {
+        let anchors = vec![
+            crate::traits::anchor::Anchor {
+                anchor_type: crate::traits::anchor::AnchorType::Rfc3161,
+                target: "data_tree_root".to_string(),
+                anchored_hash: [0u8; 32],
+                tree_size: 100,
+                super_tree_size: None,
+                timestamp: 1000,
+                token: vec![],
+                metadata: serde_json::json!({}),
+            },
+            crate::traits::anchor::Anchor {
+                anchor_type: crate::traits::anchor::AnchorType::BitcoinOts,
+                target: "data_tree_root".to_string(), // Wrong target
+                anchored_hash: [0u8; 32],
+                tree_size: 100,
+                super_tree_size: Some(5),
+                timestamp: 2000,
+                token: vec![],
+                metadata: serde_json::json!({}),
+            },
+        ];
+
+        let selected = select_anchors_for_receipt(&anchors, 0);
+        // Should only include TSA anchor (OTS has wrong target)
+        assert_eq!(selected.len(), 1);
+        assert!(matches!(
+            selected[0].anchor_type,
+            crate::traits::anchor::AnchorType::Rfc3161
+        ));
+    }
+
+    #[test]
+    fn test_select_anchors_for_receipt_ots_coverage() {
+        let anchors = vec![
+            crate::traits::anchor::Anchor {
+                anchor_type: crate::traits::anchor::AnchorType::BitcoinOts,
+                target: "super_root".to_string(),
+                anchored_hash: [0u8; 32],
+                tree_size: 100,
+                super_tree_size: Some(5), // Covers data_tree_index 0-4
+                timestamp: 1000,
+                token: vec![],
+                metadata: serde_json::json!({}),
+            },
+        ];
+
+        // data_tree_index = 3 should be covered (3 < 5)
+        let selected = select_anchors_for_receipt(&anchors, 3);
+        assert_eq!(selected.len(), 1);
+
+        // data_tree_index = 5 should NOT be covered (5 >= 5)
+        let selected = select_anchors_for_receipt(&anchors, 5);
+        assert_eq!(selected.len(), 0);
+    }
+
+    #[test]
+    fn test_select_anchors_for_receipt_mixed() {
+        let anchors = vec![
+            crate::traits::anchor::Anchor {
+                anchor_type: crate::traits::anchor::AnchorType::Rfc3161,
+                target: "data_tree_root".to_string(),
+                anchored_hash: [0u8; 32],
+                tree_size: 100,
+                super_tree_size: None,
+                timestamp: 1000,
+                token: vec![],
+                metadata: serde_json::json!({}),
+            },
+            crate::traits::anchor::Anchor {
+                anchor_type: crate::traits::anchor::AnchorType::BitcoinOts,
+                target: "super_root".to_string(),
+                anchored_hash: [0u8; 32],
+                tree_size: 200,
+                super_tree_size: Some(10),
+                timestamp: 2000,
+                token: vec![],
+                metadata: serde_json::json!({}),
+            },
+        ];
+
+        // Both should be included for data_tree_index = 5
+        let selected = select_anchors_for_receipt(&anchors, 5);
+        assert_eq!(selected.len(), 2);
+    }
+
+    #[test]
+    fn test_select_anchors_filters_other_type() {
+        let anchors = vec![crate::traits::anchor::Anchor {
+            anchor_type: crate::traits::anchor::AnchorType::Other,
+            target: "data_tree_root".to_string(),
+            anchored_hash: [0u8; 32],
+            tree_size: 100,
+            super_tree_size: None,
+            timestamp: 1000,
+            token: vec![],
+            metadata: serde_json::json!({}),
+        }];
+
+        let selected = select_anchors_for_receipt(&anchors, 0);
+        assert_eq!(selected.len(), 0); // Other type should be filtered out
+    }
 }
