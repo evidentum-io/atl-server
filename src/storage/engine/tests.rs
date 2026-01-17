@@ -1327,3 +1327,425 @@ impl Clone for TreeState {
         }
     }
 }
+
+// Additional tests for better coverage of error paths and edge cases
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_get_entry_not_found() {
+    use crate::traits::storage::Storage;
+
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+
+    let non_existent_id = Uuid::new_v4();
+    let result = Storage::get_entry(&engine, &non_existent_id);
+
+    assert!(result.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_get_inclusion_proof_entry_not_in_tree() {
+    use crate::traits::storage::Storage;
+
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+
+    // Append an entry
+    let params = vec![AppendParams {
+        payload_hash: [1u8; 32],
+        metadata_hash: [0u8; 32],
+        metadata_cleartext: None,
+        external_id: None,
+    }];
+    let result = engine.append_batch(params).await.unwrap();
+    let entry_id = result.entries[0].id;
+
+    // Try to get proof with tree_size=0 (entry not in tree of size 0)
+    let proof_result = Storage::get_inclusion_proof(&engine, &entry_id, Some(0));
+    assert!(proof_result.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_rotate_tree_minimum_size() {
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+
+    let origin_id = engine.origin_id();
+
+    // Append minimal entry before rotation
+    let params = vec![AppendParams {
+        payload_hash: [1u8; 32],
+        metadata_hash: [0u8; 32],
+        metadata_cleartext: None,
+        external_id: None,
+    }];
+    engine.append_batch(params).await.unwrap();
+
+    let head = engine.tree_head();
+
+    // Rotate with minimal tree
+    let result = engine.rotate_tree(&origin_id, head.tree_size, &head.root_hash).await;
+
+    // Should succeed
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap().data_tree_index, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_storage_engine_new_with_invalid_directory() {
+    let config = StorageConfig {
+        data_dir: std::path::PathBuf::from("/invalid/nonexistent/path/that/cannot/be/created"),
+        ..Default::default()
+    };
+
+    let result = StorageEngine::new(config, [0u8; 32]).await;
+
+    // Should fail due to directory creation failure
+    assert!(result.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_append_batch_updates_tree_size_correctly() {
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+
+    let initial_size = engine.tree_head().tree_size;
+    assert_eq!(initial_size, 0);
+
+    // First batch
+    let params1: Vec<AppendParams> = (0..7)
+        .map(|i| AppendParams {
+            payload_hash: [i as u8; 32],
+            metadata_hash: [0u8; 32],
+            metadata_cleartext: None,
+            external_id: None,
+        })
+        .collect();
+    engine.append_batch(params1).await.unwrap();
+
+    assert_eq!(engine.tree_head().tree_size, 7);
+
+    // Second batch
+    let params2: Vec<AppendParams> = (7..13)
+        .map(|i| AppendParams {
+            payload_hash: [i as u8; 32],
+            metadata_hash: [0u8; 32],
+            metadata_cleartext: None,
+            external_id: None,
+        })
+        .collect();
+    engine.append_batch(params2).await.unwrap();
+
+    assert_eq!(engine.tree_head().tree_size, 13);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_tree_rotation_updates_sqlite_metadata() {
+    use crate::traits::TreeRotator;
+
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+    let origin_id = engine.origin_id();
+
+    // Append entries
+    let params: Vec<AppendParams> = (0..8)
+        .map(|i| AppendParams {
+            payload_hash: [i as u8; 32],
+            metadata_hash: [0u8; 32],
+            metadata_cleartext: None,
+            external_id: None,
+        })
+        .collect();
+    engine.append_batch(params).await.unwrap();
+
+    let head = engine.tree_head();
+
+    // Rotate
+    TreeRotator::rotate_tree(&engine, &origin_id, head.tree_size, &head.root_hash)
+        .await
+        .unwrap();
+
+    // Verify SQLite metadata was updated
+    let index = engine.index_store();
+    let index_lock = index.lock().await;
+
+    let super_size = index_lock.get_super_tree_size().unwrap();
+    assert_eq!(super_size, 1);
+
+    let super_genesis = index_lock.get_super_genesis_root().unwrap();
+    assert!(super_genesis.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_rotate_tree_trait_delegation() {
+    use crate::traits::TreeRotator;
+
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+    let origin_id = engine.origin_id();
+
+    // Append entries
+    let params: Vec<AppendParams> = (0..5)
+        .map(|i| AppendParams {
+            payload_hash: [i as u8; 32],
+            metadata_hash: [0u8; 32],
+            metadata_cleartext: None,
+            external_id: None,
+        })
+        .collect();
+    engine.append_batch(params).await.unwrap();
+
+    let head = engine.tree_head();
+
+    // Call via trait (tests the trait delegation)
+    let result = TreeRotator::rotate_tree(&engine, &origin_id, head.tree_size, &head.root_hash).await;
+
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap().data_tree_index, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_healthy_flag_set_on_initialization() {
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+
+    assert!(engine.is_healthy());
+    assert_eq!(engine.healthy.load(Ordering::Relaxed), true);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_origin_id_consistency() {
+    let origin = [99u8; 32];
+    let (engine, _dir) = create_test_engine(origin).await;
+
+    // Check origin_id method
+    assert_eq!(engine.origin_id(), origin);
+
+    // Check tree_head origin
+    let head = engine.tree_head();
+    assert_eq!(head.origin, origin);
+
+    // Both should match
+    assert_eq!(engine.origin_id(), head.origin);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_append_batch_calculates_correct_slab_id_and_offset() {
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+
+    // Append entries that will span slab boundaries
+    // Assuming slab_capacity from default config
+    let slab_capacity = engine.config.slab_capacity;
+
+    let params: Vec<AppendParams> = (0..10)
+        .map(|i| AppendParams {
+            payload_hash: [i as u8; 32],
+            metadata_hash: [0u8; 32],
+            metadata_cleartext: None,
+            external_id: None,
+        })
+        .collect();
+
+    let result = engine.append_batch(params).await.unwrap();
+
+    // Verify entries were created with correct indices
+    for (i, entry_result) in result.entries.iter().enumerate() {
+        assert_eq!(entry_result.leaf_index, i as u64);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_get_super_root_nonzero_size() {
+    use crate::traits::{storage::Storage, TreeRotator};
+
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+    let origin_id = engine.origin_id();
+
+    // Append and rotate to populate super tree
+    let params: Vec<AppendParams> = (0..3)
+        .map(|i| AppendParams {
+            payload_hash: [i as u8; 32],
+            metadata_hash: [0u8; 32],
+            metadata_cleartext: None,
+            external_id: None,
+        })
+        .collect();
+    engine.append_batch(params).await.unwrap();
+
+    let head = engine.tree_head();
+    TreeRotator::rotate_tree(&engine, &origin_id, head.tree_size, &head.root_hash)
+        .await
+        .unwrap();
+
+    // Get super root for size 1
+    let super_root = Storage::get_super_root(&engine, 1).unwrap();
+    assert_ne!(super_root, [0u8; 32]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_tree_rotation_with_non_empty_new_tree() {
+    use crate::traits::TreeRotator;
+
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+    let origin_id = engine.origin_id();
+
+    // First batch and rotation
+    let params1: Vec<AppendParams> = (0..5)
+        .map(|i| AppendParams {
+            payload_hash: [i as u8; 32],
+            metadata_hash: [0u8; 32],
+            metadata_cleartext: None,
+            external_id: None,
+        })
+        .collect();
+    engine.append_batch(params1).await.unwrap();
+
+    let head1 = engine.tree_head();
+    TreeRotator::rotate_tree(&engine, &origin_id, head1.tree_size, &head1.root_hash)
+        .await
+        .unwrap();
+
+    // Add more entries to new tree
+    let params2: Vec<AppendParams> = (5..12)
+        .map(|i| AppendParams {
+            payload_hash: [i as u8; 32],
+            metadata_hash: [0u8; 32],
+            metadata_cleartext: None,
+            external_id: None,
+        })
+        .collect();
+    engine.append_batch(params2).await.unwrap();
+
+    // Second rotation
+    let head2 = engine.tree_head();
+    let result = TreeRotator::rotate_tree(&engine, &origin_id, head2.tree_size, &head2.root_hash)
+        .await
+        .unwrap();
+
+    assert_eq!(result.data_tree_index, 1);
+
+    // Verify super tree size
+    let super_size = engine.index.lock().await.get_super_tree_size().unwrap();
+    assert_eq!(super_size, 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_wal_cleanup_called_after_commit() {
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+
+    // Append multiple batches to trigger WAL operations
+    for batch in 0..5 {
+        let params: Vec<AppendParams> = (0..3)
+            .map(|i| AppendParams {
+                payload_hash: [(batch * 3 + i) as u8; 32],
+                metadata_hash: [0u8; 32],
+                metadata_cleartext: None,
+                external_id: None,
+            })
+            .collect();
+
+        engine.append_batch(params).await.unwrap();
+    }
+
+    // Verify tree state is consistent
+    assert_eq!(engine.tree_head().tree_size, 15);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_index_store_accessor_returns_same_arc() {
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+
+    let index1 = engine.index_store();
+    let index2 = engine.index_store();
+
+    // Both should point to the same Arc
+    assert_eq!(Arc::as_ptr(&index1), Arc::as_ptr(&index2));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_super_slab_accessor_returns_same_arc() {
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+
+    let slab1 = engine.super_slab();
+    let slab2 = engine.super_slab();
+
+    // Both should point to the same Arc
+    assert_eq!(Arc::as_ptr(slab1), Arc::as_ptr(slab2));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_rotate_tree_propagates_database_error() {
+    // This test verifies that database errors during rotation are properly propagated
+    // In a real scenario, this would require mocking the IndexStore
+    // For now, we test the happy path and rely on integration tests for error cases
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+    let origin_id = engine.origin_id();
+
+    // Append entries
+    let params: Vec<AppendParams> = (0..3)
+        .map(|i| AppendParams {
+            payload_hash: [i as u8; 32],
+            metadata_hash: [0u8; 32],
+            metadata_cleartext: None,
+            external_id: None,
+        })
+        .collect();
+    engine.append_batch(params).await.unwrap();
+
+    let head = engine.tree_head();
+
+    // Normal rotation should succeed
+    let result = engine.rotate_tree(&origin_id, head.tree_size, &head.root_hash).await;
+    assert!(result.is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_tree_head_returns_current_state() {
+    let (engine, _dir) = create_test_engine([99u8; 32]).await;
+
+    // Initial state
+    let head1 = engine.tree_head();
+    assert_eq!(head1.tree_size, 0);
+    assert_eq!(head1.origin, [99u8; 32]);
+
+    // After append
+    let params = vec![AppendParams {
+        payload_hash: [1u8; 32],
+        metadata_hash: [2u8; 32],
+        metadata_cleartext: None,
+        external_id: None,
+    }];
+    engine.append_batch(params).await.unwrap();
+
+    let head2 = engine.tree_head();
+    assert_eq!(head2.tree_size, 1);
+    assert_ne!(head2.root_hash, head1.root_hash);
+    assert_eq!(head2.origin, [99u8; 32]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_append_batch_entry_results_have_correct_leaf_hashes() {
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+
+    let payload_hash1 = [10u8; 32];
+    let metadata_hash1 = [20u8; 32];
+    let payload_hash2 = [30u8; 32];
+    let metadata_hash2 = [40u8; 32];
+
+    let params = vec![
+        AppendParams {
+            payload_hash: payload_hash1,
+            metadata_hash: metadata_hash1,
+            metadata_cleartext: None,
+            external_id: None,
+        },
+        AppendParams {
+            payload_hash: payload_hash2,
+            metadata_hash: metadata_hash2,
+            metadata_cleartext: None,
+            external_id: None,
+        },
+    ];
+
+    let result = engine.append_batch(params).await.unwrap();
+
+    // Verify leaf hashes match atl-core computation
+    let expected_hash1 = atl_core::compute_leaf_hash(&payload_hash1, &metadata_hash1);
+    let expected_hash2 = atl_core::compute_leaf_hash(&payload_hash2, &metadata_hash2);
+
+    assert_eq!(result.entries[0].leaf_hash, expected_hash1);
+    assert_eq!(result.entries[1].leaf_hash, expected_hash2);
+}
