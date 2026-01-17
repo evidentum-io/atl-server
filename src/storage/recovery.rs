@@ -394,4 +394,286 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(super_slab.leaf_count(), 0);
     }
+
+    #[tokio::test]
+    async fn test_reconcile_exact_mismatch_single_tree() {
+        // Arrange: 1 closed tree, Super-Tree size = 0
+        let (mut index, _index_dir) = create_test_index();
+        let (mut super_slab, _slabs_dir) = create_test_super_slab();
+
+        create_active_tree(&index);
+        let hash = [42u8; 32];
+        close_tree(&mut index, 100, hash, 0);
+
+        // Act
+        let result = reconcile_super_tree(&mut index, &mut super_slab).await;
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(super_slab.leaf_count(), 1);
+        let actual_root = super_slab.get_node(0, 0).unwrap();
+        assert_eq!(actual_root, hash);
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_large_batch_missing_trees() {
+        // Arrange: 10 closed trees, Super-Tree size = 3
+        let (mut index, _index_dir) = create_test_index();
+        let (mut super_slab, _slabs_dir) = create_test_super_slab();
+
+        create_active_tree(&index);
+
+        let mut roots = Vec::new();
+        for i in 0..10 {
+            let mut hash = [0u8; 32];
+            hash[0] = (i + 1) as u8;
+            roots.push(hash);
+            close_tree(&mut index, (i + 1) * 100, hash, i);
+        }
+
+        // Append first 3 trees to Super-Tree
+        for root in roots.iter().take(3) {
+            super_slab.append_leaf(root).unwrap();
+        }
+
+        // Act
+        let result = reconcile_super_tree(&mut index, &mut super_slab).await;
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(super_slab.leaf_count(), 10);
+
+        // Verify all roots are in correct order
+        for (i, expected_root) in roots.iter().enumerate() {
+            let actual_root = super_slab.get_node(0, i as u64).unwrap();
+            assert_eq!(&actual_root, expected_root);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_corruption_detection_significant_gap() {
+        // Arrange: 2 closed trees, Super-Tree size = 10 (corruption)
+        let (mut index, _index_dir) = create_test_index();
+        let (mut super_slab, _slabs_dir) = create_test_super_slab();
+
+        create_active_tree(&index);
+        close_tree(&mut index, 100, [1u8; 32], 0);
+        close_tree(&mut index, 200, [2u8; 32], 1);
+
+        // Create Super-Tree with 10 leaves (corruption scenario)
+        for i in 0..10 {
+            let mut hash = [0u8; 32];
+            hash[0] = (i + 1) as u8;
+            super_slab.append_leaf(&hash).unwrap();
+        }
+
+        // Act
+        let result = reconcile_super_tree(&mut index, &mut super_slab).await;
+
+        // Assert
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, StorageError::Corruption(_)));
+        assert!(err.to_string().contains("2 closed trees"));
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_maintains_consistency_after_partial_append() {
+        // Arrange: 5 closed trees, Super-Tree size = 2
+        let (mut index, _index_dir) = create_test_index();
+        let (mut super_slab, _slabs_dir) = create_test_super_slab();
+
+        create_active_tree(&index);
+
+        let mut roots = Vec::new();
+        for i in 0..5 {
+            let mut hash = [0u8; 32];
+            hash[31] = (i + 1) as u8; // Use last byte for variation
+            roots.push(hash);
+            close_tree(&mut index, (i + 1) * 100, hash, i);
+        }
+
+        // Append first 2 trees
+        super_slab.append_leaf(&roots[0]).unwrap();
+        super_slab.append_leaf(&roots[1]).unwrap();
+
+        // Act
+        let result = reconcile_super_tree(&mut index, &mut super_slab).await;
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(super_slab.leaf_count(), 5);
+
+        // Verify order is maintained
+        for (i, expected_root) in roots.iter().enumerate() {
+            let actual_root = super_slab.get_node(0, i as u64).unwrap();
+            assert_eq!(&actual_root, expected_root);
+        }
+    }
+
+    #[test]
+    fn test_closed_trees_ordered_empty_database() {
+        // Arrange: Empty database
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::storage::index::schema::SCHEMA_V3)
+            .unwrap();
+        let index = IndexStore::from_connection(conn);
+
+        // Act
+        let trees = index.get_closed_trees_ordered().unwrap();
+
+        // Assert
+        assert_eq!(trees.len(), 0);
+    }
+
+    #[test]
+    fn test_closed_trees_ordered_single_tree() {
+        // Arrange: Single closed tree
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::storage::index::schema::SCHEMA_V3)
+            .unwrap();
+        let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+
+        conn.execute(
+            "INSERT INTO trees (origin_id, status, start_size, end_size, root_hash, created_at, closed_at, data_tree_index)
+             VALUES (?1, 'pending_bitcoin', 0, 100, ?2, ?3, ?4, 0)",
+            rusqlite::params![&[1u8; 32], &[1u8; 32], now, now + 100],
+        )
+        .unwrap();
+
+        let index = IndexStore::from_connection(conn);
+
+        // Act
+        let trees = index.get_closed_trees_ordered().unwrap();
+
+        // Assert
+        assert_eq!(trees.len(), 1);
+        assert_eq!(trees[0].root_hash, [1u8; 32]);
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_all_same_root_hash() {
+        // Arrange: 3 closed trees with identical root hashes (edge case)
+        let (mut index, _index_dir) = create_test_index();
+        let (mut super_slab, _slabs_dir) = create_test_super_slab();
+
+        create_active_tree(&index);
+        let same_hash = [99u8; 32];
+
+        for i in 0..3 {
+            close_tree(&mut index, (i + 1) * 100, same_hash, i);
+        }
+
+        // Act
+        let result = reconcile_super_tree(&mut index, &mut super_slab).await;
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(super_slab.leaf_count(), 3);
+
+        // Verify all have same hash
+        for i in 0..3 {
+            let actual_root = super_slab.get_node(0, i as u64).unwrap();
+            assert_eq!(actual_root, same_hash);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_with_varied_hash_values() {
+        // Arrange: Trees with different hash patterns
+        let (mut index, _index_dir) = create_test_index();
+        let (mut super_slab, _slabs_dir) = create_test_super_slab();
+
+        create_active_tree(&index);
+        let mut low_hash = [1u8; 32];
+        low_hash[0] = 0;
+        low_hash[31] = 1;
+
+        let max_hash = [255u8; 32];
+
+        close_tree(&mut index, 100, low_hash, 0);
+        close_tree(&mut index, 200, max_hash, 1);
+
+        // Act
+        let result = reconcile_super_tree(&mut index, &mut super_slab).await;
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(super_slab.leaf_count(), 2);
+        assert_eq!(super_slab.get_node(0, 0).unwrap(), low_hash);
+        assert_eq!(super_slab.get_node(0, 1).unwrap(), max_hash);
+    }
+
+    #[test]
+    fn test_closed_trees_ordered_filtering_active_trees() {
+        // Arrange: Mix of active and closed trees
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::storage::index::schema::SCHEMA_V3)
+            .unwrap();
+        let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+
+        // Insert closed trees first (data_tree_index 0, 1, 2)
+        for i in 0..3 {
+            conn.execute(
+                "INSERT INTO trees (origin_id, status, start_size, end_size, root_hash, created_at, closed_at, data_tree_index)
+                 VALUES (?1, 'pending_bitcoin', ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    &[(i + 1) as u8; 32],
+                    i * 100,
+                    (i + 1) * 100,
+                    &[(i + 1) as u8; 32],
+                    now,
+                    now + ((i + 1) * 100),
+                    i as i64,
+                ],
+            )
+            .unwrap();
+        }
+
+        // Insert active tree (data_tree_index 3, should be excluded)
+        conn.execute(
+            "INSERT INTO trees (origin_id, status, start_size, end_size, root_hash, created_at, closed_at, data_tree_index)
+             VALUES (?1, 'active', 300, 300, ?2, ?3, NULL, 3)",
+            rusqlite::params![&[0u8; 32], &[0u8; 32], now],
+        )
+        .unwrap();
+
+        let index = IndexStore::from_connection(conn);
+
+        // Act
+        let trees = index.get_closed_trees_ordered().unwrap();
+
+        // Assert: Should only return closed trees, sorted by closed_at
+        assert_eq!(trees.len(), 3);
+        for (i, tree) in trees.iter().enumerate() {
+            assert_eq!(tree.root_hash[0], (i + 1) as u8);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_verifies_final_state_strictly() {
+        // Arrange: Setup where final verification would catch mismatch
+        let (mut index, _index_dir) = create_test_index();
+        let (mut super_slab, _slabs_dir) = create_test_super_slab();
+
+        create_active_tree(&index);
+
+        // Create scenario: 2 closed trees
+        close_tree(&mut index, 100, [1u8; 32], 0);
+        close_tree(&mut index, 200, [2u8; 32], 1);
+
+        // Pre-append first tree
+        super_slab.append_leaf(&[1u8; 32]).unwrap();
+
+        // Act
+        let result = reconcile_super_tree(&mut index, &mut super_slab).await;
+
+        // Assert
+        assert!(result.is_ok());
+        assert_eq!(super_slab.leaf_count(), 2);
+
+        // Verify both trees are present
+        assert_eq!(super_slab.get_node(0, 0).unwrap(), [1u8; 32]);
+        assert_eq!(super_slab.get_node(0, 1).unwrap(), [2u8; 32]);
+    }
 }

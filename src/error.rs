@@ -329,6 +329,8 @@ impl From<reqwest::Error> for ServerError {
 mod tests {
     use super::*;
 
+    // ========== Status Code Tests ==========
+
     #[test]
     fn test_error_status_codes() {
         assert_eq!(
@@ -348,11 +350,113 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(feature = "rfc3161", feature = "ots"))]
-    fn test_is_recoverable() {
-        assert!(ServerError::Anchoring(AnchorError::Timeout(30)).is_recoverable());
-        assert!(!ServerError::EntryNotFound("x".into()).is_recoverable());
+    fn test_status_code_bad_request_variants() {
+        assert_eq!(
+            ServerError::InvalidArgument("test".into()).status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            ServerError::InvalidSignature("test".into()).status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            ServerError::InvalidUuid("test".into()).status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            ServerError::LeafIndexOutOfBounds {
+                index: 10,
+                tree_size: 5
+            }
+            .status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            ServerError::TreeSizeMismatch {
+                expected: 100,
+                actual: 50
+            }
+            .status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            ServerError::EntryNotInTree("test".into()).status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            ServerError::SuperTreeNotInitialized.status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            ServerError::TreeNotClosed.status_code(),
+            StatusCode::BAD_REQUEST
+        );
     }
+
+    #[test]
+    fn test_status_code_unauthorized_variants() {
+        assert_eq!(ServerError::AuthMissing.status_code(), StatusCode::UNAUTHORIZED);
+        assert_eq!(ServerError::AuthInvalid.status_code(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn test_status_code_conflict() {
+        assert_eq!(
+            ServerError::DuplicateEntry("test".into()).status_code(),
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[test]
+    fn test_status_code_unsupported_media_type() {
+        assert_eq!(
+            ServerError::UnsupportedContentType("test".into()).status_code(),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+    }
+
+    #[test]
+    fn test_status_code_not_implemented() {
+        assert_eq!(
+            ServerError::NotSupported("test".into()).status_code(),
+            StatusCode::NOT_IMPLEMENTED
+        );
+    }
+
+    #[test]
+    #[cfg(any(feature = "rfc3161", feature = "ots"))]
+    fn test_status_code_service_unavailable_anchoring() {
+        assert_eq!(
+            ServerError::ServiceUnavailable("test".into()).status_code(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            ServerError::Anchoring(AnchorError::Network("test".into())).status_code(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            ServerError::Anchoring(AnchorError::Timeout(30)).status_code(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            ServerError::Anchoring(AnchorError::ServiceError("test".into())).status_code(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[test]
+    fn test_status_code_internal_server_error_variants() {
+        assert_eq!(
+            ServerError::Internal("test".into()).status_code(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            ServerError::Config("test".into()).status_code(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    // ========== Error Code Tests ==========
 
     #[test]
     fn test_error_codes() {
@@ -367,10 +471,122 @@ mod tests {
     }
 
     #[test]
+    fn test_all_error_code_variants() {
+        assert_eq!(
+            ServerError::DuplicateEntry("x".into()).error_code(),
+            "DUPLICATE_ENTRY"
+        );
+        assert_eq!(
+            ServerError::EntryNotInTree("x".into()).error_code(),
+            "ENTRY_NOT_IN_TREE"
+        );
+        assert_eq!(
+            ServerError::LeafIndexOutOfBounds {
+                index: 10,
+                tree_size: 5
+            }
+            .error_code(),
+            "INDEX_OUT_OF_BOUNDS"
+        );
+        assert_eq!(
+            ServerError::TreeSizeMismatch {
+                expected: 100,
+                actual: 50
+            }
+            .error_code(),
+            "TREE_SIZE_MISMATCH"
+        );
+        assert_eq!(
+            ServerError::SuperTreeNotInitialized.error_code(),
+            "SUPER_TREE_NOT_INITIALIZED"
+        );
+        assert_eq!(ServerError::TreeNotClosed.error_code(), "TREE_NOT_CLOSED");
+        assert_eq!(
+            ServerError::InvalidArgument("x".into()).error_code(),
+            "INVALID_ARGUMENT"
+        );
+        assert_eq!(
+            ServerError::InvalidSignature("x".into()).error_code(),
+            "INVALID_SIGNATURE"
+        );
+        assert_eq!(
+            ServerError::InvalidUuid("x".into()).error_code(),
+            "INVALID_UUID"
+        );
+        assert_eq!(
+            ServerError::UnsupportedContentType("x".into()).error_code(),
+            "UNSUPPORTED_CONTENT_TYPE"
+        );
+        assert_eq!(ServerError::AuthMissing.error_code(), "AUTH_MISSING");
+        assert_eq!(ServerError::AuthInvalid.error_code(), "AUTH_INVALID");
+        assert_eq!(
+            ServerError::Storage(StorageError::Corruption("x".into())).error_code(),
+            "STORAGE_ERROR"
+        );
+        assert_eq!(
+            ServerError::NotSupported("x".into()).error_code(),
+            "NOT_SUPPORTED"
+        );
+        assert_eq!(
+            ServerError::ServiceUnavailable("x".into()).error_code(),
+            "SERVICE_UNAVAILABLE"
+        );
+        assert_eq!(ServerError::Internal("x".into()).error_code(), "INTERNAL_ERROR");
+        assert_eq!(ServerError::Config("x".into()).error_code(), "CONFIG_ERROR");
+    }
+
+    #[test]
+    #[cfg(any(feature = "rfc3161", feature = "ots"))]
+    fn test_error_code_anchoring() {
+        assert_eq!(
+            ServerError::Anchoring(AnchorError::Timeout(30)).error_code(),
+            "ANCHORING_ERROR"
+        );
+    }
+
+    // ========== Recoverability Tests ==========
+
+    #[test]
+    #[cfg(any(feature = "rfc3161", feature = "ots"))]
+    fn test_is_recoverable() {
+        assert!(ServerError::Anchoring(AnchorError::Timeout(30)).is_recoverable());
+        assert!(!ServerError::EntryNotFound("x".into()).is_recoverable());
+    }
+
+    #[test]
+    #[cfg(any(feature = "rfc3161", feature = "ots"))]
+    fn test_is_recoverable_anchoring_variants() {
+        assert!(ServerError::Anchoring(AnchorError::Network("test".into())).is_recoverable());
+        assert!(ServerError::Anchoring(AnchorError::Timeout(60)).is_recoverable());
+        assert!(!ServerError::Anchoring(AnchorError::TokenInvalid("test".into())).is_recoverable());
+    }
+
+    #[test]
+    fn test_is_recoverable_storage_variants() {
+        assert!(
+            ServerError::Storage(StorageError::ConnectionFailed("test".into())).is_recoverable()
+        );
+        assert!(!ServerError::Storage(StorageError::Corruption("test".into())).is_recoverable());
+        assert!(!ServerError::Storage(StorageError::NotInitialized).is_recoverable());
+    }
+
+    #[test]
+    fn test_is_recoverable_non_recoverable_errors() {
+        assert!(!ServerError::InvalidHash("x".into()).is_recoverable());
+        assert!(!ServerError::DuplicateEntry("x".into()).is_recoverable());
+        assert!(!ServerError::AuthInvalid.is_recoverable());
+        assert!(!ServerError::Internal("x".into()).is_recoverable());
+    }
+
+    // ========== Trait Tests ==========
+
+    #[test]
     fn test_error_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<ServerError>();
     }
+
+    // ========== Conversion Tests ==========
 
     #[test]
     fn test_storage_error_not_found_converts_to_entry_not_found() {
@@ -403,5 +619,207 @@ mod tests {
             ServerError::Storage(StorageError::Io(_))
         ));
         assert_eq!(server_err.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn test_serde_json_error_conversion() {
+        let json_err = serde_json::from_str::<i32>("invalid json").unwrap_err();
+        let server_err: ServerError = json_err.into();
+
+        assert!(matches!(server_err, ServerError::InvalidArgument(_)));
+        assert_eq!(server_err.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_uuid_error_conversion() {
+        let uuid_err = uuid::Uuid::parse_str("invalid-uuid").unwrap_err();
+        let server_err: ServerError = uuid_err.into();
+
+        assert!(matches!(server_err, ServerError::InvalidUuid(_)));
+        assert_eq!(server_err.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_hex_error_conversion() {
+        let hex_err = hex::decode("invalid_hex").unwrap_err();
+        let server_err: ServerError = hex_err.into();
+
+        assert!(matches!(server_err, ServerError::InvalidHash(_)));
+        assert_eq!(server_err.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_base64_error_conversion() {
+        use base64::Engine;
+        let b64_err = base64::engine::general_purpose::STANDARD
+            .decode("!@#$%")
+            .unwrap_err();
+        let server_err: ServerError = b64_err.into();
+
+        assert!(matches!(server_err, ServerError::InvalidArgument(_)));
+        assert_eq!(server_err.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_rusqlite_error_conversion() {
+        let sql_err = rusqlite::Error::InvalidQuery;
+        let server_err: ServerError = sql_err.into();
+
+        assert!(matches!(
+            server_err,
+            ServerError::Storage(StorageError::Sqlite(_))
+        ));
+    }
+
+    // ========== StorageError Display Tests ==========
+
+    #[test]
+    fn test_storage_error_display() {
+        assert_eq!(
+            StorageError::ConnectionFailed("timeout".into()).to_string(),
+            "connection failed: timeout"
+        );
+        assert_eq!(
+            StorageError::QueryFailed("syntax error".into()).to_string(),
+            "query failed: syntax error"
+        );
+        assert_eq!(
+            StorageError::TransactionFailed("deadlock".into()).to_string(),
+            "transaction failed: deadlock"
+        );
+        assert_eq!(
+            StorageError::MigrationFailed("v2 to v3".into()).to_string(),
+            "migration failed: v2 to v3"
+        );
+        assert_eq!(
+            StorageError::Corruption("checksum mismatch".into()).to_string(),
+            "data corruption: checksum mismatch"
+        );
+        assert_eq!(
+            StorageError::NotInitialized.to_string(),
+            "storage not initialized"
+        );
+        assert_eq!(StorageError::ReadOnly.to_string(), "storage is read-only");
+        assert_eq!(
+            StorageError::Database("connection lost".into()).to_string(),
+            "Database error: connection lost"
+        );
+        assert_eq!(
+            StorageError::NotFound("entry".into()).to_string(),
+            "Not found: entry"
+        );
+        assert_eq!(
+            StorageError::InvalidRange("0..10".into()).to_string(),
+            "Invalid range: 0..10"
+        );
+        assert_eq!(
+            StorageError::InvalidIndex("5".into()).to_string(),
+            "Invalid index: 5"
+        );
+    }
+
+    // ========== ServerError Display Tests ==========
+
+    #[test]
+    fn test_server_error_display() {
+        assert_eq!(
+            ServerError::EntryNotFound("abc".into()).to_string(),
+            "entry not found: abc"
+        );
+        assert_eq!(
+            ServerError::DuplicateEntry("abc".into()).to_string(),
+            "duplicate entry: abc"
+        );
+        assert_eq!(
+            ServerError::EntryNotInTree("abc".into()).to_string(),
+            "entry not in tree: abc"
+        );
+        assert_eq!(
+            ServerError::LeafIndexOutOfBounds {
+                index: 10,
+                tree_size: 5
+            }
+            .to_string(),
+            "leaf index 10 out of bounds for tree size 5"
+        );
+        assert_eq!(
+            ServerError::TreeSizeMismatch {
+                expected: 100,
+                actual: 50
+            }
+            .to_string(),
+            "tree size mismatch: expected 100, got 50"
+        );
+        assert_eq!(
+            ServerError::SuperTreeNotInitialized.to_string(),
+            "Super-Tree not initialized - no trees have been closed yet"
+        );
+        assert_eq!(
+            ServerError::TreeNotClosed.to_string(),
+            "Entry's tree is still active, not yet in Super-Tree"
+        );
+        assert_eq!(
+            ServerError::InvalidArgument("test".into()).to_string(),
+            "invalid argument: test"
+        );
+        assert_eq!(
+            ServerError::InvalidHash("test".into()).to_string(),
+            "invalid hash: test"
+        );
+        assert_eq!(
+            ServerError::InvalidSignature("test".into()).to_string(),
+            "invalid signature: test"
+        );
+        assert_eq!(
+            ServerError::InvalidUuid("test".into()).to_string(),
+            "invalid UUID: test"
+        );
+        assert_eq!(
+            ServerError::UnsupportedContentType("test".into()).to_string(),
+            "unsupported content type: test"
+        );
+        assert_eq!(ServerError::AuthMissing.to_string(), "authorization required");
+        assert_eq!(
+            ServerError::AuthInvalid.to_string(),
+            "invalid authorization token"
+        );
+        assert_eq!(
+            ServerError::NotSupported("test".into()).to_string(),
+            "not supported: test"
+        );
+        assert_eq!(
+            ServerError::ServiceUnavailable("test".into()).to_string(),
+            "service unavailable: test"
+        );
+        assert_eq!(
+            ServerError::Internal("test".into()).to_string(),
+            "internal error: test"
+        );
+        assert_eq!(
+            ServerError::Config("test".into()).to_string(),
+            "configuration error: test"
+        );
+    }
+
+    // ========== Storage Error Conversion Tests ==========
+
+    #[test]
+    fn test_storage_error_other_variants_convert_to_storage() {
+        let variants = vec![
+            StorageError::QueryFailed("test".into()),
+            StorageError::TransactionFailed("test".into()),
+            StorageError::MigrationFailed("test".into()),
+            StorageError::Corruption("test".into()),
+            StorageError::NotInitialized,
+            StorageError::ReadOnly,
+            StorageError::Database("test".into()),
+            StorageError::InvalidRange("test".into()),
+            StorageError::InvalidIndex("test".into()),
+        ];
+
+        for storage_err in variants {
+            let server_err: ServerError = storage_err.into();
+            assert!(matches!(server_err, ServerError::Storage(_)));
+        }
     }
 }
