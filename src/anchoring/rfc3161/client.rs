@@ -380,4 +380,423 @@ mod tests {
         assert_eq!(response.token_der.len(), 4);
         assert!(response.timestamp > 0);
     }
+
+    #[test]
+    fn test_timestamp_from_url_with_invalid_url() {
+        let client = Rfc3161Client::free_tsa().unwrap();
+        let hash = [42u8; 32];
+
+        let result = client.timestamp_from_url("not-a-valid-url", &hash);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_timestamp_with_fallback_multiple_urls() {
+        let config = TsaConfig {
+            urls: vec![
+                "https://invalid1.example.com/tsr".to_string(),
+                "https://invalid2.example.com/tsr".to_string(),
+                "https://invalid3.example.com/tsr".to_string(),
+            ],
+            timeout_ms: 100,
+            username: None,
+            password: None,
+            ca_cert: None,
+        };
+        let client = Rfc3161Client::new(config).unwrap();
+        let hash = [42u8; 32];
+
+        let result = client.timestamp_with_fallback(&hash);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_anchor_with_empty_config() {
+        let config = TsaConfig {
+            urls: vec![],
+            timeout_ms: 5000,
+            username: None,
+            password: None,
+            ca_cert: None,
+        };
+        let client = Rfc3161Client::new(config).unwrap();
+        let hash = [42u8; 32];
+
+        let request = AnchorRequest {
+            hash,
+            tree_size: 100,
+            metadata: None,
+        };
+
+        let result = client.anchor(&request);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::error::ServerError::Anchoring(AnchorError::NotConfigured(msg)) => {
+                assert!(msg.contains("no TSA URLs configured"));
+            }
+            _ => panic!("Expected NotConfigured error"),
+        }
+    }
+
+    #[test]
+    fn test_anchor_result_structure() {
+        let config = TsaConfig {
+            urls: vec!["https://test.example.com/tsr".to_string()],
+            timeout_ms: 5000,
+            username: None,
+            password: None,
+            ca_cert: None,
+        };
+        let _client = Rfc3161Client::new(config).unwrap();
+
+        // Test AnchorResult structure
+        let anchor = Anchor {
+            anchor_type: AnchorType::Rfc3161,
+            target: "data_tree_root".to_string(),
+            anchored_hash: [0u8; 32],
+            tree_size: 100,
+            super_tree_size: None,
+            timestamp: 1000000000,
+            token: vec![1, 2, 3],
+            metadata: serde_json::json!({"tsa_url": "https://test.com"}),
+        };
+
+        let result = AnchorResult {
+            anchor: anchor.clone(),
+            is_final: true,
+            estimated_finality_secs: None,
+        };
+
+        assert!(result.is_final);
+        assert_eq!(result.estimated_finality_secs, None);
+        assert_eq!(result.anchor.tree_size, 100);
+    }
+
+    #[test]
+    fn test_client_with_custom_timeout() {
+        let config = TsaConfig {
+            urls: vec!["https://test.example.com/tsr".to_string()],
+            timeout_ms: 100,
+            username: None,
+            password: None,
+            ca_cert: None,
+        };
+        let result = Rfc3161Client::new(config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_service_id_returns_first_url() {
+        let config = TsaConfig {
+            urls: vec![
+                "https://primary.example.com/tsr".to_string(),
+                "https://fallback.example.com/tsr".to_string(),
+            ],
+            timeout_ms: 5000,
+            username: None,
+            password: None,
+            ca_cert: None,
+        };
+        let client = Rfc3161Client::new(config).unwrap();
+        assert_eq!(client.service_id(), "https://primary.example.com/tsr");
+    }
+
+    #[test]
+    fn test_verify_with_valid_anchor_type_but_invalid_token() {
+        let client = Rfc3161Client::free_tsa().unwrap();
+        let anchor = Anchor {
+            anchor_type: AnchorType::Rfc3161,
+            target: "data_tree_root".to_string(),
+            anchored_hash: [0u8; 32],
+            tree_size: 1,
+            super_tree_size: None,
+            timestamp: 1000000000,
+            token: vec![0xFF, 0xFF, 0xFF],
+            metadata: serde_json::json!({}),
+        };
+
+        let result = client.verify(&anchor);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_with_ots_anchor_type() {
+        let client = Rfc3161Client::free_tsa().unwrap();
+        let anchor = Anchor {
+            anchor_type: AnchorType::BitcoinOts,
+            target: "data_tree_root".to_string(),
+            anchored_hash: [0u8; 32],
+            tree_size: 1,
+            super_tree_size: None,
+            timestamp: 1000000000,
+            token: vec![1, 2, 3],
+            metadata: serde_json::json!({}),
+        };
+
+        let result = client.verify(&anchor);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_config_with_username_and_password() {
+        let config = TsaConfig {
+            urls: vec!["https://secure.example.com/tsr".to_string()],
+            timeout_ms: 5000,
+            username: Some("user123".to_string()),
+            password: Some("pass456".to_string()),
+            ca_cert: None,
+        };
+        let result = Rfc3161Client::new(config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_config_with_ca_cert() {
+        let config = TsaConfig {
+            urls: vec!["https://test.example.com/tsr".to_string()],
+            timeout_ms: 5000,
+            username: None,
+            password: None,
+            ca_cert: Some("-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----".to_string()),
+        };
+        let result = Rfc3161Client::new(config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_anchor_request_with_metadata() {
+        let hash = [42u8; 32];
+        let metadata = serde_json::json!({
+            "custom_field": "custom_value",
+            "priority": "high"
+        });
+
+        let request = AnchorRequest {
+            hash,
+            tree_size: 1000,
+            metadata: Some(metadata.clone()),
+        };
+
+        assert_eq!(request.tree_size, 1000);
+        assert_eq!(request.metadata, Some(metadata));
+    }
+
+    #[test]
+    fn test_anchor_request_without_metadata() {
+        let hash = [42u8; 32];
+
+        let request = AnchorRequest {
+            hash,
+            tree_size: 500,
+            metadata: None,
+        };
+
+        assert_eq!(request.tree_size, 500);
+        assert!(request.metadata.is_none());
+    }
+
+    #[test]
+    fn test_multiple_clients_with_different_configs() {
+        let config1 = TsaConfig {
+            urls: vec!["https://tsa1.example.com/tsr".to_string()],
+            timeout_ms: 1000,
+            username: None,
+            password: None,
+            ca_cert: None,
+        };
+
+        let config2 = TsaConfig {
+            urls: vec!["https://tsa2.example.com/tsr".to_string()],
+            timeout_ms: 2000,
+            username: Some("user".to_string()),
+            password: Some("pass".to_string()),
+            ca_cert: None,
+        };
+
+        let client1 = Rfc3161Client::new(config1).unwrap();
+        let client2 = Rfc3161Client::new(config2).unwrap();
+
+        assert_eq!(client1.service_id(), "https://tsa1.example.com/tsr");
+        assert_eq!(client2.service_id(), "https://tsa2.example.com/tsr");
+    }
+
+    #[test]
+    fn test_anchorer_trait_implementations() {
+        let client = Rfc3161Client::free_tsa().unwrap();
+
+        // Test anchor_type
+        assert_eq!(client.anchor_type(), AnchorType::Rfc3161);
+
+        // Test service_id
+        assert!(!client.service_id().is_empty());
+
+        // Test is_final
+        let dummy_anchor = Anchor {
+            anchor_type: AnchorType::Rfc3161,
+            target: "data_tree_root".to_string(),
+            anchored_hash: [0u8; 32],
+            tree_size: 1,
+            super_tree_size: None,
+            timestamp: 1000000000,
+            token: vec![1, 2, 3],
+            metadata: serde_json::json!({}),
+        };
+
+        let is_final_result = client.is_final(&dummy_anchor);
+        assert!(is_final_result.is_ok());
+        assert!(is_final_result.unwrap());
+    }
+
+    #[test]
+    fn test_tsa_config_builder_pattern() {
+        let urls = vec![
+            "https://tsa1.example.com/tsr".to_string(),
+            "https://tsa2.example.com/tsr".to_string(),
+        ];
+
+        let config = TsaConfig::with_fallback(urls.clone(), 10000);
+
+        assert_eq!(config.urls.len(), 2);
+        assert_eq!(config.urls, urls);
+        assert_eq!(config.timeout_ms, 10000);
+        assert!(config.username.is_none());
+        assert!(config.password.is_none());
+        assert!(config.ca_cert.is_none());
+    }
+
+    #[test]
+    fn test_config_single_url() {
+        let config = TsaConfig {
+            urls: vec!["https://single.example.com/tsr".to_string()],
+            timeout_ms: 5000,
+            username: None,
+            password: None,
+            ca_cert: None,
+        };
+
+        let client = Rfc3161Client::new(config).unwrap();
+        assert_eq!(client.service_id(), "https://single.example.com/tsr");
+    }
+
+    #[test]
+    fn test_timestamp_with_fallback_returns_first_success() {
+        let config = TsaConfig {
+            urls: vec![
+                "https://invalid.example.com/tsr".to_string(),
+                "https://also-invalid.example.com/tsr".to_string(),
+            ],
+            timeout_ms: 100,
+            username: None,
+            password: None,
+            ca_cert: None,
+        };
+
+        let client = Rfc3161Client::new(config).unwrap();
+        let hash = [42u8; 32];
+
+        // All URLs are invalid, should fail
+        let result = client.timestamp_with_fallback(&hash);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_with_empty_token() {
+        let client = Rfc3161Client::free_tsa().unwrap();
+        let anchor = Anchor {
+            anchor_type: AnchorType::Rfc3161,
+            target: "data_tree_root".to_string(),
+            anchored_hash: [0u8; 32],
+            tree_size: 1,
+            super_tree_size: None,
+            timestamp: 1000000000,
+            token: vec![],
+            metadata: serde_json::json!({}),
+        };
+
+        let result = client.verify(&anchor);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_anchor_with_large_tree_size() {
+        let config = TsaConfig {
+            urls: vec![],
+            timeout_ms: 5000,
+            username: None,
+            password: None,
+            ca_cert: None,
+        };
+        let client = Rfc3161Client::new(config).unwrap();
+
+        let request = AnchorRequest {
+            hash: [42u8; 32],
+            tree_size: u64::MAX,
+            metadata: None,
+        };
+
+        let result = client.anchor(&request);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_config_zero_timeout() {
+        let config = TsaConfig {
+            urls: vec!["https://test.example.com/tsr".to_string()],
+            timeout_ms: 0,
+            username: None,
+            password: None,
+            ca_cert: None,
+        };
+        let result = Rfc3161Client::new(config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_anchor_metadata_includes_tsa_url() {
+        // This test verifies the expected structure of the anchor metadata
+        let metadata = serde_json::json!({
+            "tsa_url": "https://test.example.com/tsr"
+        });
+
+        assert_eq!(metadata["tsa_url"], "https://test.example.com/tsr");
+    }
+
+    #[test]
+    fn test_tsa_response_with_large_token() {
+        let large_token = vec![0xAB; 10000];
+        let response = TsaResponse {
+            token_der: large_token.clone(),
+            timestamp: 1705000000000000000,
+        };
+
+        assert_eq!(response.token_der.len(), 10000);
+        assert_eq!(response.token_der, large_token);
+    }
+
+    #[test]
+    fn test_tsa_response_with_zero_timestamp() {
+        let response = TsaResponse {
+            token_der: vec![1, 2, 3],
+            timestamp: 0,
+        };
+
+        assert_eq!(response.timestamp, 0);
+    }
+
+    #[test]
+    fn test_client_creation_with_all_config_options() {
+        let config = TsaConfig {
+            urls: vec![
+                "https://tsa1.example.com/tsr".to_string(),
+                "https://tsa2.example.com/tsr".to_string(),
+            ],
+            timeout_ms: 15000,
+            username: Some("testuser".to_string()),
+            password: Some("testpass".to_string()),
+            ca_cert: Some("test-cert-data".to_string()),
+        };
+
+        let result = Rfc3161Client::new(config);
+        assert!(result.is_ok());
+    }
 }

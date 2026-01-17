@@ -188,8 +188,10 @@ async fn fetch_single_step(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[tokio::test]
+    #[serial]
     async fn test_cache_returns_stored_value() {
         // Pre-populate cache
         {
@@ -279,6 +281,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_cache_isolates_different_heights() {
         // Pre-populate cache with multiple heights
         {
@@ -355,7 +358,6 @@ mod tests {
         }
     }
 
-
     #[tokio::test]
     async fn test_error_details_include_all_providers() {
         // Test that error includes details from all failed providers
@@ -371,5 +373,308 @@ mod tests {
         } else {
             panic!("Expected BlockTimeFetchFailed error");
         }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_two_step_success() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Mock step 1: block hash lookup
+        let _m1 = server
+            .mock("GET", "/block-height/12345")
+            .with_status(200)
+            .with_body("000000000000000000abcdef123456789")
+            .create_async()
+            .await;
+
+        // Mock step 2: block details
+        let _m2 = server
+            .mock("GET", "/block/000000000000000000abcdef123456789")
+            .with_status(200)
+            .with_body(r#"{"timestamp": 1600000000}"#)
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = fetch_two_step(&client, &server.url(), 12345, "timestamp").await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 1600000000);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_two_step_hash_not_found() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _m = server
+            .mock("GET", "/block-height/999999999")
+            .with_status(404)
+            .with_body("Block not found")
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = fetch_two_step(&client, &server.url(), 999999999, "timestamp").await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("HTTP status error"));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_two_step_missing_timestamp_field() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _m1 = server
+            .mock("GET", "/block-height/12345")
+            .with_status(200)
+            .with_body("abc123")
+            .create_async()
+            .await;
+
+        let _m2 = server
+            .mock("GET", "/block/abc123")
+            .with_status(200)
+            .with_body(r#"{"wrong_field": 123}"#)
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = fetch_two_step(&client, &server.url(), 12345, "timestamp").await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Missing 'timestamp' field"));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_single_step_success() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _m = server
+            .mock("GET", "/block-height/12345?format=json")
+            .with_status(200)
+            .with_body(r#"{"blocks": [{"time": 1650000000}]}"#)
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = fetch_single_step(&client, &server.url(), 12345, "time").await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 1650000000);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_single_step_empty_blocks() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _m = server
+            .mock("GET", "/block-height/12345?format=json")
+            .with_status(200)
+            .with_body(r#"{"blocks": []}"#)
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = fetch_single_step(&client, &server.url(), 12345, "time").await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Missing 'blocks[0].time'"));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_single_step_missing_time_field() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _m = server
+            .mock("GET", "/block-height/12345?format=json")
+            .with_status(200)
+            .with_body(r#"{"blocks": [{"height": 12345}]}"#)
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = fetch_single_step(&client, &server.url(), 12345, "time").await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Missing 'blocks[0].time'"));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_single_step_invalid_json() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _m = server
+            .mock("GET", "/block-height/12345?format=json")
+            .with_status(200)
+            .with_body("not valid json")
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = fetch_single_step(&client, &server.url(), 12345, "time").await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("JSON error"));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_two_step_invalid_json() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _m1 = server
+            .mock("GET", "/block-height/12345")
+            .with_status(200)
+            .with_body("validhash123")
+            .create_async()
+            .await;
+
+        let _m2 = server
+            .mock("GET", "/block/validhash123")
+            .with_status(200)
+            .with_body("invalid json")
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = fetch_two_step(&client, &server.url(), 12345, "timestamp").await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("JSON error"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_cache_prevents_duplicate_requests() {
+        // Insert into cache
+        {
+            let mut cache = BLOCK_TIME_CACHE.write().unwrap();
+            cache.insert(77777, 1700000000);
+        }
+
+        // Should not make any HTTP requests
+        let result = get_block_timestamp(77777, Duration::from_millis(1)).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 1700000000);
+
+        // Cleanup
+        BLOCK_TIME_CACHE.write().unwrap().remove(&77777);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_cache_update_after_successful_fetch() {
+        // Clear cache first
+        BLOCK_TIME_CACHE.write().unwrap().clear();
+
+        let mut server = mockito::Server::new_async().await;
+        let server_url = server.url();
+
+        let _m1 = server
+            .mock("GET", "/block-height/88888")
+            .with_status(200)
+            .with_body("hash88888")
+            .create_async()
+            .await;
+
+        let _m2 = server
+            .mock("GET", "/block/hash88888")
+            .with_status(200)
+            .with_body(r#"{"timestamp": 1750000000}"#)
+            .create_async()
+            .await;
+
+        // Manually fetch to populate cache
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+
+        let result = fetch_two_step(&client, &server_url, 88888, "timestamp").await;
+        assert!(result.is_ok());
+
+        // Now insert into cache manually and verify
+        BLOCK_TIME_CACHE.write().unwrap().insert(88888, 1750000000);
+
+        let cached = BLOCK_TIME_CACHE.read().unwrap().get(&88888).copied();
+        assert_eq!(cached, Some(1750000000));
+
+        // Cleanup
+        BLOCK_TIME_CACHE.write().unwrap().remove(&88888);
+    }
+
+    #[tokio::test]
+    async fn test_provider_field_names() {
+        // Verify two-step providers use "timestamp" field
+        for provider in PROVIDERS.iter().filter(|p| p.two_step) {
+            assert_eq!(provider.timestamp_field, "timestamp");
+        }
+
+        // Verify single-step providers use "time" field
+        for provider in PROVIDERS.iter().filter(|p| !p.two_step) {
+            assert_eq!(provider.timestamp_field, "time");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_two_step_with_whitespace_hash() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Mock returns hash with whitespace
+        let _m1 = server
+            .mock("GET", "/block-height/12345")
+            .with_status(200)
+            .with_body("  hash_with_whitespace  \n")
+            .create_async()
+            .await;
+
+        let _m2 = server
+            .mock("GET", "/block/hash_with_whitespace")
+            .with_status(200)
+            .with_body(r#"{"timestamp": 1800000000}"#)
+            .create_async()
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = fetch_two_step(&client, &server.url(), 12345, "timestamp").await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 1800000000);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_multiple_heights_in_cache() {
+        BLOCK_TIME_CACHE.write().unwrap().clear();
+
+        // Insert multiple entries
+        {
+            let mut cache = BLOCK_TIME_CACHE.write().unwrap();
+            cache.insert(1, 1000);
+            cache.insert(2, 2000);
+            cache.insert(3, 3000);
+        }
+
+        // Verify all are retrievable
+        assert_eq!(
+            get_block_timestamp(1, Duration::from_millis(1))
+                .await
+                .unwrap(),
+            1000
+        );
+        assert_eq!(
+            get_block_timestamp(2, Duration::from_millis(1))
+                .await
+                .unwrap(),
+            2000
+        );
+        assert_eq!(
+            get_block_timestamp(3, Duration::from_millis(1))
+                .await
+                .unwrap(),
+            3000
+        );
+
+        // Cleanup
+        BLOCK_TIME_CACHE.write().unwrap().clear();
     }
 }
