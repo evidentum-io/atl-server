@@ -731,4 +731,465 @@ mod tests {
             assert_eq!(stored, Some(i));
         }
     }
+
+    #[test]
+    fn test_tree_status_as_str() {
+        assert_eq!(TreeStatus::Active.as_str(), "active");
+        assert_eq!(TreeStatus::PendingBitcoin.as_str(), "pending_bitcoin");
+        assert_eq!(TreeStatus::Closed.as_str(), "closed");
+    }
+
+    #[test]
+    fn test_tree_status_parse() {
+        assert_eq!(TreeStatus::parse("active"), Some(TreeStatus::Active));
+        assert_eq!(TreeStatus::parse("pending_bitcoin"), Some(TreeStatus::PendingBitcoin));
+        assert_eq!(TreeStatus::parse("closed"), Some(TreeStatus::Closed));
+        assert_eq!(TreeStatus::parse("invalid"), None);
+        assert_eq!(TreeStatus::parse(""), None);
+    }
+
+    #[test]
+    fn test_get_active_tree_empty() {
+        let store = create_test_index_store();
+        let tree = store.get_active_tree().unwrap();
+        assert!(tree.is_none());
+    }
+
+    #[test]
+    fn test_get_active_tree_exists() {
+        let store = create_test_index_store();
+        let origin_id = [0xaa; 32];
+        let tree_id = store.create_active_tree(&origin_id, 0).unwrap();
+
+        let active = store.get_active_tree().unwrap().unwrap();
+        assert_eq!(active.id, tree_id);
+        assert_eq!(active.status, TreeStatus::Active);
+        assert_eq!(active.start_size, 0);
+    }
+
+    #[test]
+    fn test_create_active_tree_with_non_zero_start() {
+        let store = create_test_index_store();
+        let origin_id = [0xbb; 32];
+        let tree_id = store.create_active_tree(&origin_id, 100).unwrap();
+
+        let tree = store.get_active_tree().unwrap().unwrap();
+        assert_eq!(tree.id, tree_id);
+        assert_eq!(tree.start_size, 100);
+    }
+
+    #[test]
+    fn test_set_tree_bitcoin_anchor() {
+        let mut store = create_test_index_store();
+        let origin_id = [0xcc; 32];
+        store.create_active_tree(&origin_id, 0).unwrap();
+        let result = store
+            .close_tree_and_create_new(&origin_id, 100, &[0x11; 32], 0)
+            .unwrap();
+
+        store.set_tree_bitcoin_anchor(result.closed_tree_id, 42).unwrap();
+
+        let tree = store.get_tree(result.closed_tree_id).unwrap().unwrap();
+        assert_eq!(tree.bitcoin_anchor_id, Some(42));
+    }
+
+    #[test]
+    fn test_set_tree_bitcoin_anchor_nonexistent() {
+        let store = create_test_index_store();
+        // Should not error, just no-op
+        let result = store.set_tree_bitcoin_anchor(999, 42);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_get_trees_pending_tsa_empty() {
+        let store = create_test_index_store();
+        let trees = store.get_trees_pending_tsa().unwrap();
+        assert_eq!(trees.len(), 0);
+    }
+
+    #[test]
+    fn test_get_trees_pending_tsa_includes_pending_bitcoin() {
+        let mut store = create_test_index_store();
+        let origin_id = [0xdd; 32];
+        store.create_active_tree(&origin_id, 0).unwrap();
+        let result = store
+            .close_tree_and_create_new(&origin_id, 100, &[0x22; 32], 0)
+            .unwrap();
+
+        let pending = store.get_trees_pending_tsa().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, result.closed_tree_id);
+        assert_eq!(pending[0].status, TreeStatus::PendingBitcoin);
+    }
+
+    #[test]
+    fn test_get_trees_pending_tsa_filters_with_tsa_anchor() {
+        let mut store = create_test_index_store();
+        let origin_id = [0xee; 32];
+        store.create_active_tree(&origin_id, 0).unwrap();
+        let result = store
+            .close_tree_and_create_new(&origin_id, 100, &[0x33; 32], 0)
+            .unwrap();
+
+        // Set TSA anchor
+        store.update_tree_tsa_anchor(result.closed_tree_id, 123).unwrap();
+
+        let pending = store.get_trees_pending_tsa().unwrap();
+        assert_eq!(pending.len(), 0); // Should be filtered out
+    }
+
+    #[test]
+    fn test_get_trees_pending_bitcoin_confirmation_empty() {
+        let store = create_test_index_store();
+        let trees = store.get_trees_pending_bitcoin_confirmation().unwrap();
+        assert_eq!(trees.len(), 0);
+    }
+
+    #[test]
+    fn test_get_trees_pending_bitcoin_confirmation() {
+        let mut store = create_test_index_store();
+        let origin_id = [0xff; 32];
+        store.create_active_tree(&origin_id, 0).unwrap();
+        let result = store
+            .close_tree_and_create_new(&origin_id, 100, &[0x44; 32], 0)
+            .unwrap();
+
+        let pending = store.get_trees_pending_bitcoin_confirmation().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, result.closed_tree_id);
+    }
+
+    #[test]
+    fn test_mark_tree_closed() {
+        let mut store = create_test_index_store();
+        let origin_id = [0xab; 32];
+        store.create_active_tree(&origin_id, 0).unwrap();
+        let result = store
+            .close_tree_and_create_new(&origin_id, 100, &[0x55; 32], 0)
+            .unwrap();
+
+        store.mark_tree_closed(result.closed_tree_id).unwrap();
+
+        let tree = store.get_tree(result.closed_tree_id).unwrap().unwrap();
+        assert_eq!(tree.status, TreeStatus::Closed);
+    }
+
+    #[test]
+    fn test_mark_tree_closed_nonexistent() {
+        let store = create_test_index_store();
+        // Should not error, just no-op
+        let result = store.mark_tree_closed(999);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_update_tree_tsa_anchor() {
+        let mut store = create_test_index_store();
+        let origin_id = [0xcd; 32];
+        store.create_active_tree(&origin_id, 0).unwrap();
+        let result = store
+            .close_tree_and_create_new(&origin_id, 100, &[0x66; 32], 0)
+            .unwrap();
+
+        store.update_tree_tsa_anchor(result.closed_tree_id, 789).unwrap();
+
+        let tree = store.get_tree(result.closed_tree_id).unwrap().unwrap();
+        assert_eq!(tree.tsa_anchor_id, Some(789));
+    }
+
+    #[test]
+    fn test_get_tree_nonexistent() {
+        let store = create_test_index_store();
+        let tree = store.get_tree(999).unwrap();
+        assert!(tree.is_none());
+    }
+
+    #[test]
+    fn test_get_tree_covering_entry_no_match() {
+        let store = create_test_index_store();
+        let tree = store.get_tree_covering_entry(500).unwrap();
+        assert!(tree.is_none());
+    }
+
+    #[test]
+    fn test_get_tree_covering_entry_match() {
+        let mut store = create_test_index_store();
+        let origin_id = [0xef; 32];
+        store.create_active_tree(&origin_id, 0).unwrap();
+        let result = store
+            .close_tree_and_create_new(&origin_id, 100, &[0x77; 32], 0)
+            .unwrap();
+
+        // Query for entry within range [0, 100)
+        let tree = store.get_tree_covering_entry(50).unwrap().unwrap();
+        assert_eq!(tree.id, result.closed_tree_id);
+        assert_eq!(tree.start_size, 0);
+        assert_eq!(tree.end_size, Some(100));
+    }
+
+    #[test]
+    fn test_get_tree_covering_entry_excludes_active() {
+        let mut store = create_test_index_store();
+        let origin_id = [0x12; 32];
+        store.create_active_tree(&origin_id, 0).unwrap();
+
+        // Active tree should not be returned
+        let tree = store.get_tree_covering_entry(50).unwrap();
+        assert!(tree.is_none());
+    }
+
+    #[test]
+    fn test_get_tree_covering_entry_boundary() {
+        let mut store = create_test_index_store();
+        let origin_id = [0x34; 32];
+        store.create_active_tree(&origin_id, 0).unwrap();
+        let result = store
+            .close_tree_and_create_new(&origin_id, 100, &[0x88; 32], 0)
+            .unwrap();
+
+        // At start boundary
+        let tree_start = store.get_tree_covering_entry(0).unwrap().unwrap();
+        assert_eq!(tree_start.id, result.closed_tree_id);
+
+        // At end boundary (exclusive)
+        let tree_end = store.get_tree_covering_entry(100).unwrap();
+        assert!(tree_end.is_none());
+
+        // Just before end
+        let tree_before_end = store.get_tree_covering_entry(99).unwrap().unwrap();
+        assert_eq!(tree_before_end.id, result.closed_tree_id);
+    }
+
+    #[test]
+    fn test_get_tree_by_bitcoin_anchor_id_nonexistent() {
+        let store = create_test_index_store();
+        let tree = store.get_tree_by_bitcoin_anchor_id(999).unwrap();
+        assert!(tree.is_none());
+    }
+
+    #[test]
+    fn test_get_tree_by_bitcoin_anchor_id_match() {
+        let mut store = create_test_index_store();
+        let origin_id = [0x56; 32];
+        store.create_active_tree(&origin_id, 0).unwrap();
+        let result = store
+            .close_tree_and_create_new(&origin_id, 100, &[0x99; 32], 0)
+            .unwrap();
+
+        store.set_tree_bitcoin_anchor(result.closed_tree_id, 555).unwrap();
+
+        let tree = store.get_tree_by_bitcoin_anchor_id(555).unwrap().unwrap();
+        assert_eq!(tree.id, result.closed_tree_id);
+        assert_eq!(tree.bitcoin_anchor_id, Some(555));
+    }
+
+    #[test]
+    fn test_get_closed_trees_ordered_empty() {
+        let store = create_test_index_store();
+        let trees = store.get_closed_trees_ordered().unwrap();
+        assert_eq!(trees.len(), 0);
+    }
+
+    #[test]
+    fn test_get_closed_trees_ordered_multiple() {
+        let mut store = create_test_index_store();
+        let origin_id = [0x78; 32];
+        store.create_active_tree(&origin_id, 0).unwrap();
+
+        for i in 0..3 {
+            let _ = store
+                .close_tree_and_create_new(&origin_id, (i + 1) * 100, &[i as u8; 32], i)
+                .unwrap();
+        }
+
+        let trees = store.get_closed_trees_ordered().unwrap();
+        assert_eq!(trees.len(), 3);
+
+        // Verify ordering by closed_at
+        for i in 0..2 {
+            assert!(trees[i].closed_at <= trees[i + 1].closed_at);
+        }
+    }
+
+    #[test]
+    fn test_update_tree_first_entry_at() {
+        let store = create_test_index_store();
+        let origin_id = [0x9a; 32];
+        let tree_id = store.create_active_tree(&origin_id, 0).unwrap();
+
+        // Initially null
+        let tree_before = store.get_tree(tree_id).unwrap().unwrap();
+        assert!(tree_before.first_entry_at.is_none());
+
+        store.update_tree_first_entry_at(tree_id).unwrap();
+
+        let tree_after = store.get_tree(tree_id).unwrap().unwrap();
+        assert!(tree_after.first_entry_at.is_some());
+    }
+
+    #[test]
+    fn test_update_tree_first_entry_at_idempotent() {
+        let store = create_test_index_store();
+        let origin_id = [0xbc; 32];
+        let tree_id = store.create_active_tree(&origin_id, 0).unwrap();
+
+        store.update_tree_first_entry_at(tree_id).unwrap();
+        let first_timestamp = store
+            .get_tree(tree_id)
+            .unwrap()
+            .unwrap()
+            .first_entry_at
+            .unwrap();
+
+        // Second update should not change timestamp
+        store.update_tree_first_entry_at(tree_id).unwrap();
+        let second_timestamp = store
+            .get_tree(tree_id)
+            .unwrap()
+            .unwrap()
+            .first_entry_at
+            .unwrap();
+
+        assert_eq!(first_timestamp, second_timestamp);
+    }
+
+    #[test]
+    fn test_update_first_entry_at_for_active_tree() {
+        let store = create_test_index_store();
+        let origin_id = [0xde; 32];
+        let tree_id = store.create_active_tree(&origin_id, 0).unwrap();
+
+        store.update_first_entry_at_for_active_tree().unwrap();
+
+        let tree = store.get_tree(tree_id).unwrap().unwrap();
+        assert!(tree.first_entry_at.is_some());
+    }
+
+    #[test]
+    fn test_update_first_entry_at_for_active_tree_no_active() {
+        let store = create_test_index_store();
+        // Should not error when no active tree exists
+        let result = store.update_first_entry_at_for_active_tree();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_get_all_closed_trees_empty() {
+        let store = create_test_index_store();
+        let trees = store.get_all_closed_trees().unwrap();
+        assert_eq!(trees.len(), 0);
+    }
+
+    #[test]
+    fn test_get_all_closed_trees_excludes_active() {
+        let mut store = create_test_index_store();
+        let origin_id = [0x21; 32];
+        store.create_active_tree(&origin_id, 0).unwrap();
+
+        // Close tree
+        let result = store
+            .close_tree_and_create_new(&origin_id, 100, &[0xaa; 32], 0)
+            .unwrap();
+
+        let trees = store.get_all_closed_trees().unwrap();
+        assert_eq!(trees.len(), 1);
+        assert_eq!(trees[0].id, result.closed_tree_id);
+    }
+
+    #[test]
+    fn test_get_tree_data_tree_index_negative_value() {
+        let mut store = create_test_index_store();
+        let origin_id = [0x43; 32];
+        store.create_active_tree(&origin_id, 0).unwrap();
+        let result = store
+            .close_tree_and_create_new(&origin_id, 100, &[0xbb; 32], 0)
+            .unwrap();
+
+        // Manually set negative value (simulating corruption)
+        store
+            .connection()
+            .execute(
+                "UPDATE trees SET data_tree_index = -1 WHERE id = ?1",
+                [result.closed_tree_id],
+            )
+            .unwrap();
+
+        let index = store.get_tree_data_tree_index(result.closed_tree_id).unwrap();
+        assert!(index.is_none(), "Should return None for negative values");
+    }
+
+    #[test]
+    fn test_row_to_tree_invalid_origin_id_size() {
+        let store = create_test_index_store();
+
+        // Manually insert invalid data
+        store
+            .connection()
+            .execute(
+                "INSERT INTO trees (id, origin_id, status, start_size, created_at)
+                 VALUES (999, X'AA', 'active', 0, 0)",
+                [],
+            )
+            .unwrap();
+
+        let result = store.get_tree(999);
+        assert!(result.is_err(), "Should fail with invalid origin_id size");
+    }
+
+    #[test]
+    fn test_row_to_tree_invalid_status_fallback() {
+        let store = create_test_index_store();
+
+        // Manually insert invalid status
+        store
+            .connection()
+            .execute(
+                "INSERT INTO trees (id, origin_id, status, start_size, created_at)
+                 VALUES (999, X'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', 'invalid_status', 0, 0)",
+                [],
+            )
+            .unwrap();
+
+        let tree = store.get_tree(999).unwrap().unwrap();
+        // Should fallback to Active
+        assert_eq!(tree.status, TreeStatus::Active);
+    }
+
+    #[test]
+    fn test_tree_record_optional_fields_none() {
+        let store = create_test_index_store();
+        let origin_id = [0x65; 32];
+        let tree_id = store.create_active_tree(&origin_id, 0).unwrap();
+
+        let tree = store.get_tree(tree_id).unwrap().unwrap();
+        assert!(tree.end_size.is_none());
+        assert!(tree.root_hash.is_none());
+        assert!(tree.first_entry_at.is_none());
+        assert!(tree.closed_at.is_none());
+        assert!(tree.tsa_anchor_id.is_none());
+        assert!(tree.bitcoin_anchor_id.is_none());
+    }
+
+    #[test]
+    fn test_tree_record_all_fields_populated() {
+        let mut store = create_test_index_store();
+        let origin_id = [0x87; 32];
+        store.create_active_tree(&origin_id, 0).unwrap();
+        let result = store
+            .close_tree_and_create_new(&origin_id, 100, &[0xcc; 32], 0)
+            .unwrap();
+
+        store.update_tree_tsa_anchor(result.closed_tree_id, 111).unwrap();
+        store.set_tree_bitcoin_anchor(result.closed_tree_id, 222).unwrap();
+        store.mark_tree_closed(result.closed_tree_id).unwrap();
+
+        let tree = store.get_tree(result.closed_tree_id).unwrap().unwrap();
+        assert!(tree.end_size.is_some());
+        assert!(tree.root_hash.is_some());
+        assert!(tree.closed_at.is_some());
+        assert_eq!(tree.tsa_anchor_id, Some(111));
+        assert_eq!(tree.bitcoin_anchor_id, Some(222));
+        assert_eq!(tree.status, TreeStatus::Closed);
+    }
 }
