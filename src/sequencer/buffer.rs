@@ -109,3 +109,307 @@ impl SequencerHandle {
         Ok(results)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::traits::TreeHead;
+
+    fn create_test_params() -> AppendParams {
+        AppendParams {
+            payload_hash: [1u8; 32],
+            metadata_hash: [2u8; 32],
+            metadata_cleartext: Some(serde_json::json!({"test": "data"})),
+            external_id: Some("test-id".to_string()),
+        }
+    }
+
+    fn create_test_append_result() -> Result<AppendResult, ServerError> {
+        Ok(AppendResult {
+            id: uuid::Uuid::new_v4(),
+            leaf_index: 42,
+            tree_head: TreeHead {
+                tree_size: 100,
+                root_hash: [3u8; 32],
+                origin: [4u8; 32],
+            },
+            inclusion_proof: vec![],
+            timestamp: chrono::Utc::now(),
+        })
+    }
+
+    #[tokio::test]
+    async fn test_append_request_creation() {
+        let params = create_test_params();
+        let (tx, _rx) = oneshot::channel();
+
+        let request = AppendRequest {
+            params: params.clone(),
+            response_tx: tx,
+        };
+
+        assert_eq!(request.params.payload_hash, [1u8; 32]);
+        assert_eq!(request.params.metadata_hash, [2u8; 32]);
+    }
+
+    #[tokio::test]
+    async fn test_sequencer_handle_new() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<AppendRequest>(10);
+        let handle = SequencerHandle::new(tx);
+
+        // Verify handle is clonable
+        let _handle_clone = handle.clone();
+    }
+
+    #[tokio::test]
+    async fn test_sequencer_handle_has_capacity() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<AppendRequest>(10);
+        let handle = SequencerHandle::new(tx);
+
+        assert!(handle.has_capacity());
+    }
+
+    #[tokio::test]
+    async fn test_sequencer_handle_buffer_utilization_empty() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<AppendRequest>(10);
+        let handle = SequencerHandle::new(tx);
+
+        let utilization = handle.buffer_utilization();
+        assert!(utilization >= 0.0 && utilization <= 1.0);
+    }
+
+    #[tokio::test]
+    async fn test_sequencer_handle_append_success() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AppendRequest>(10);
+        let handle = SequencerHandle::new(tx);
+
+        let params = create_test_params();
+
+        // Spawn task to simulate sequencer response
+        let append_task = tokio::spawn(async move {
+            handle.append(params).await
+        });
+
+        // Receive request and send response
+        if let Some(request) = rx.recv().await {
+            let _ = request.response_tx.send(create_test_append_result());
+        }
+
+        let result = append_task.await.expect("task should complete");
+        assert!(result.is_ok());
+    }
+
+    // NOTE: test_sequencer_handle_append_buffer_full removed - send().await blocks, doesn't fail
+
+    #[tokio::test]
+    async fn test_sequencer_handle_append_channel_closed() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<AppendRequest>(10);
+        let handle = SequencerHandle::new(tx);
+
+        // Drop receiver to simulate sequencer shutdown
+        drop(rx);
+
+        let params = create_test_params();
+        let result = handle.append(params).await;
+
+        assert!(result.is_err());
+        match result {
+            Err(ServerError::ServiceUnavailable(msg)) => {
+                assert!(msg.contains("buffer full"));
+            }
+            _ => panic!("Expected ServiceUnavailable error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sequencer_handle_append_response_dropped() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AppendRequest>(10);
+        let handle = SequencerHandle::new(tx);
+
+        let params = create_test_params();
+
+        // Spawn task to simulate sequencer response
+        let append_task = tokio::spawn(async move {
+            handle.append(params).await
+        });
+
+        // Receive request but drop it without responding
+        if let Some(_request) = rx.recv().await {
+            // Drop request without sending response
+        }
+
+        let result = append_task.await.expect("task should complete");
+        assert!(result.is_err());
+        match result {
+            Err(ServerError::Internal(msg)) => {
+                assert!(msg.contains("dropped response channel"));
+            }
+            _ => panic!("Expected Internal error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sequencer_handle_append_error_response() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AppendRequest>(10);
+        let handle = SequencerHandle::new(tx);
+
+        let params = create_test_params();
+
+        // Spawn task to simulate sequencer response
+        let append_task = tokio::spawn(async move {
+            handle.append(params).await
+        });
+
+        // Receive request and send error response
+        if let Some(request) = rx.recv().await {
+            let _ = request.response_tx.send(Err(ServerError::Internal("test error".into())));
+        }
+
+        let result = append_task.await.expect("task should complete");
+        assert!(result.is_err());
+        match result {
+            Err(ServerError::Internal(msg)) => {
+                assert_eq!(msg, "test error");
+            }
+            _ => panic!("Expected Internal error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sequencer_handle_append_batch_success() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AppendRequest>(10);
+        let handle = SequencerHandle::new(tx);
+
+        let params_batch = vec![create_test_params(), create_test_params(), create_test_params()];
+        let batch_size = params_batch.len();
+
+        // Spawn task to simulate sequencer responses
+        let append_task = tokio::spawn(async move {
+            handle.append_batch(params_batch).await
+        });
+
+        // Receive all requests and send responses
+        for _ in 0..batch_size {
+            if let Some(request) = rx.recv().await {
+                let _ = request.response_tx.send(create_test_append_result());
+            }
+        }
+
+        let result = append_task.await.expect("task should complete");
+        assert!(result.is_ok());
+        let results = result.expect("should have results");
+        assert_eq!(results.len(), batch_size);
+    }
+
+    #[tokio::test]
+    async fn test_sequencer_handle_append_batch_empty() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<AppendRequest>(10);
+        let handle = SequencerHandle::new(tx);
+
+        let params_batch = vec![];
+        let result = handle.append_batch(params_batch).await;
+
+        assert!(result.is_ok());
+        let results = result.expect("should have results");
+        assert_eq!(results.len(), 0);
+    }
+
+    // NOTE: test_sequencer_handle_append_batch_buffer_full removed - send().await blocks, doesn't fail
+
+    #[tokio::test]
+    async fn test_sequencer_handle_append_batch_response_dropped() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AppendRequest>(10);
+        let handle = SequencerHandle::new(tx);
+
+        let params_batch = vec![create_test_params()];
+
+        // Spawn task to simulate sequencer response
+        let append_task = tokio::spawn(async move {
+            handle.append_batch(params_batch).await
+        });
+
+        // Receive request but drop without responding
+        if let Some(_request) = rx.recv().await {
+            // Drop without sending response
+        }
+
+        let result = append_task.await.expect("task should complete");
+        assert!(result.is_err());
+        match result {
+            Err(ServerError::Internal(msg)) => {
+                assert!(msg.contains("dropped response channel"));
+            }
+            _ => panic!("Expected Internal error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sequencer_handle_append_batch_partial_error() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AppendRequest>(10);
+        let handle = SequencerHandle::new(tx);
+
+        let params_batch = vec![create_test_params(), create_test_params()];
+
+        // Spawn task to simulate sequencer responses
+        let append_task = tokio::spawn(async move {
+            handle.append_batch(params_batch).await
+        });
+
+        // First request succeeds
+        if let Some(request) = rx.recv().await {
+            let _ = request.response_tx.send(create_test_append_result());
+        }
+
+        // Second request fails
+        if let Some(request) = rx.recv().await {
+            let _ = request.response_tx.send(Err(ServerError::Internal("batch error".into())));
+        }
+
+        let result = append_task.await.expect("task should complete");
+        assert!(result.is_err());
+        match result {
+            Err(ServerError::Internal(msg)) => {
+                assert_eq!(msg, "batch error");
+            }
+            _ => panic!("Expected Internal error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sequencer_handle_buffer_utilization_full() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<AppendRequest>(2);
+        let handle = SequencerHandle::new(tx.clone());
+
+        // Fill buffer completely
+        let (tx1, _rx1) = oneshot::channel();
+        let (tx2, _rx2) = oneshot::channel();
+
+        let _ = tx.send(AppendRequest {
+            params: create_test_params(),
+            response_tx: tx1,
+        }).await;
+
+        let _ = tx.send(AppendRequest {
+            params: create_test_params(),
+            response_tx: tx2,
+        }).await;
+
+        let utilization = handle.buffer_utilization();
+        assert!(utilization > 0.5); // Should be highly utilized
+    }
+
+    #[tokio::test]
+    async fn test_sequencer_handle_has_capacity_when_full() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<AppendRequest>(1);
+        let handle = SequencerHandle::new(tx.clone());
+
+        // Fill buffer
+        let (fill_tx, _fill_rx) = oneshot::channel();
+        let _ = tx.send(AppendRequest {
+            params: create_test_params(),
+            response_tx: fill_tx,
+        }).await;
+
+        assert!(!handle.has_capacity());
+    }
+}
