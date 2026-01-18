@@ -151,8 +151,8 @@ impl ChainIndex {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::store::ChainTreeStatus;
+    use super::*;
     use rusqlite::Connection;
 
     fn create_test_chain_index() -> ChainIndex {
@@ -177,11 +177,7 @@ mod tests {
         ChainIndex { conn }
     }
 
-    fn insert_tree(
-        index: &ChainIndex,
-        tree_id: i64,
-        data_tree_index: u64,
-    ) -> rusqlite::Result<()> {
+    fn insert_tree(index: &ChainIndex, tree_id: i64, data_tree_index: u64) -> rusqlite::Result<()> {
         index.conn.execute(
             "INSERT INTO trees (tree_id, origin_id, root_hash, tree_size, data_tree_index, status, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -231,7 +227,7 @@ mod tests {
 
         let result = ChainIndex::verify_chain_link(&_index, &tree_prev, &tree_next);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), true);
+        assert!(result.unwrap());
     }
 
     #[test]

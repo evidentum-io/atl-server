@@ -634,7 +634,8 @@ mod tests {
     #[test]
     fn test_get_root_zero_size() {
         let dir = tempdir().unwrap();
-        let mut manager = SlabManager::new(dir.path().to_path_buf(), SlabConfig::default()).unwrap();
+        let mut manager =
+            SlabManager::new(dir.path().to_path_buf(), SlabConfig::default()).unwrap();
 
         let root = manager.get_root(0).unwrap();
         assert_eq!(root, [0u8; 32]);
@@ -665,7 +666,8 @@ mod tests {
     #[test]
     fn test_flush_operation() {
         let dir = tempdir().unwrap();
-        let mut manager = SlabManager::new(dir.path().to_path_buf(), SlabConfig::default()).unwrap();
+        let mut manager =
+            SlabManager::new(dir.path().to_path_buf(), SlabConfig::default()).unwrap();
 
         let leaves: Vec<[u8; 32]> = vec![[1u8; 32], [2u8; 32]];
         manager.append_leaves(&leaves).unwrap();
@@ -677,7 +679,8 @@ mod tests {
     #[test]
     fn test_tree_size_getter() {
         let dir = tempdir().unwrap();
-        let mut manager = SlabManager::new(dir.path().to_path_buf(), SlabConfig::default()).unwrap();
+        let mut manager =
+            SlabManager::new(dir.path().to_path_buf(), SlabConfig::default()).unwrap();
 
         assert_eq!(manager.tree_size(), 0);
 
@@ -719,7 +722,8 @@ mod tests {
     #[test]
     fn test_inclusion_proof_out_of_bounds() {
         let dir = tempdir().unwrap();
-        let mut manager = SlabManager::new(dir.path().to_path_buf(), SlabConfig::default()).unwrap();
+        let mut manager =
+            SlabManager::new(dir.path().to_path_buf(), SlabConfig::default()).unwrap();
 
         let leaves: Vec<[u8; 32]> = vec![[1u8; 32], [2u8; 32], [3u8; 32]];
         manager.append_leaves(&leaves).unwrap();
@@ -901,7 +905,8 @@ mod tests {
     #[test]
     fn test_append_empty_leaves() {
         let dir = tempdir().unwrap();
-        let mut manager = SlabManager::new(dir.path().to_path_buf(), SlabConfig::default()).unwrap();
+        let mut manager =
+            SlabManager::new(dir.path().to_path_buf(), SlabConfig::default()).unwrap();
 
         let empty_leaves: Vec<[u8; 32]> = vec![];
         let root = manager.append_leaves(&empty_leaves).unwrap();
@@ -913,7 +918,8 @@ mod tests {
     #[test]
     fn test_get_node_nonexistent_slab() {
         let dir = tempdir().unwrap();
-        let mut manager = SlabManager::new(dir.path().to_path_buf(), SlabConfig::default()).unwrap();
+        let mut manager =
+            SlabManager::new(dir.path().to_path_buf(), SlabConfig::default()).unwrap();
 
         // Try to get node from non-existent slab
         let result = manager.get_node(0, 1000);
@@ -963,7 +969,8 @@ mod tests {
     #[test]
     fn test_get_slab_root_by_id_zero_leaves() {
         let dir = tempdir().unwrap();
-        let mut manager = SlabManager::new(dir.path().to_path_buf(), SlabConfig::default()).unwrap();
+        let mut manager =
+            SlabManager::new(dir.path().to_path_buf(), SlabConfig::default()).unwrap();
 
         let root = manager.get_slab_root_by_id(1, 0).unwrap();
         assert_eq!(root, [0u8; 32]);
@@ -972,7 +979,8 @@ mod tests {
     #[test]
     fn test_local_inclusion_path_errors() {
         let dir = tempdir().unwrap();
-        let mut manager = SlabManager::new(dir.path().to_path_buf(), SlabConfig::default()).unwrap();
+        let mut manager =
+            SlabManager::new(dir.path().to_path_buf(), SlabConfig::default()).unwrap();
 
         manager.append_leaves(&[[1u8; 32], [2u8; 32]]).unwrap();
 
@@ -1037,7 +1045,8 @@ mod tests {
     #[test]
     fn test_get_or_open_slab_reuses_existing() {
         let dir = tempdir().unwrap();
-        let mut manager = SlabManager::new(dir.path().to_path_buf(), SlabConfig::default()).unwrap();
+        let mut manager =
+            SlabManager::new(dir.path().to_path_buf(), SlabConfig::default()).unwrap();
 
         manager.append_leaves(&[[1u8; 32]]).unwrap();
 
@@ -1062,7 +1071,9 @@ mod tests {
         .unwrap();
 
         // Exactly one slab
-        manager.append_leaves(&(0..10).map(|i| [i; 32]).collect::<Vec<_>>()).unwrap();
+        manager
+            .append_leaves(&(0..10).map(|i| [i; 32]).collect::<Vec<_>>())
+            .unwrap();
         let root1 = manager.get_root(10).unwrap();
         assert_ne!(root1, [0u8; 32]);
 

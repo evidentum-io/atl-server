@@ -440,7 +440,10 @@ mod background_simulation {
         for config in configs {
             let client = AsyncOtsClient::with_config(config.clone());
             assert!(client.is_ok());
-            assert_eq!(client.unwrap().timeout, Duration::from_secs(config.timeout_secs));
+            assert_eq!(
+                client.unwrap().timeout,
+                Duration::from_secs(config.timeout_secs)
+            );
         }
     }
 

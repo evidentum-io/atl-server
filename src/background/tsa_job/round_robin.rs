@@ -120,7 +120,10 @@ mod tests {
 
     #[test]
     fn test_new_selector() {
-        let urls = vec!["https://tsa1.com".to_string(), "https://tsa2.com".to_string()];
+        let urls = vec![
+            "https://tsa1.com".to_string(),
+            "https://tsa2.com".to_string(),
+        ];
         let selector = RoundRobinSelector::new(urls.clone());
 
         assert_eq!(selector.urls_count(), 2);
@@ -191,7 +194,10 @@ mod tests {
         let result = selector.next_url();
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("No TSA URLs configured"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("No TSA URLs configured"));
     }
 
     #[test]
@@ -256,8 +262,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_anchor_with_round_robin_no_urls() {
-        use crate::storage::index::{IndexStore, TreeRecord};
         use crate::storage::index::lifecycle::TreeStatus;
+        use crate::storage::index::{IndexStore, TreeRecord};
         use rusqlite::Connection;
         use std::sync::Arc;
         use tokio::sync::Mutex;
@@ -294,13 +300,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_anchor_with_round_robin_single_url_failure() {
-        use crate::storage::index::{IndexStore, TreeRecord};
         use crate::storage::index::lifecycle::TreeStatus;
+        use crate::storage::index::{IndexStore, TreeRecord};
         use rusqlite::Connection;
         use std::sync::Arc;
         use tokio::sync::Mutex;
 
-        let selector = RoundRobinSelector::new(vec!["https://invalid-tsa-server.example.com/tsr".to_string()]);
+        let selector = RoundRobinSelector::new(vec![
+            "https://invalid-tsa-server.example.com/tsr".to_string()
+        ]);
         let conn = Connection::open_in_memory().unwrap();
         let index = IndexStore::from_connection(conn);
         index.initialize().unwrap();
@@ -324,13 +332,16 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("All 1 TSA servers failed"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("All 1 TSA servers failed"));
     }
 
     #[tokio::test]
     async fn test_anchor_with_round_robin_multiple_urls_all_fail() {
-        use crate::storage::index::{IndexStore, TreeRecord};
         use crate::storage::index::lifecycle::TreeStatus;
+        use crate::storage::index::{IndexStore, TreeRecord};
         use rusqlite::Connection;
         use std::sync::Arc;
         use tokio::sync::Mutex;
@@ -370,8 +381,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_anchor_with_round_robin_respects_round_robin_order() {
-        use crate::storage::index::{IndexStore, TreeRecord};
         use crate::storage::index::lifecycle::TreeStatus;
+        use crate::storage::index::{IndexStore, TreeRecord};
         use rusqlite::Connection;
         use std::sync::Arc;
         use tokio::sync::Mutex;
@@ -481,9 +492,16 @@ mod tests {
         // Due to concurrent access with Relaxed ordering, we can't guarantee exact final value
         // but we can verify that the index is within valid range [0, 2]
         let final_index = selector.last_index();
-        assert!(final_index < 3, "last_index should be < 3, got {}", final_index);
+        assert!(
+            final_index < 3,
+            "last_index should be < 3, got {}",
+            final_index
+        );
 
         // Verify AtomicUsize works correctly - at least some increments happened
-        assert!(final_index <= 1000, "last_index should not exceed total increments");
+        assert!(
+            final_index <= 1000,
+            "last_index should not exceed total increments"
+        );
     }
 }

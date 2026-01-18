@@ -226,7 +226,10 @@ mod tests {
 
         assert!(result.is_err());
         // Network error or timeout are both acceptable
-        assert!(matches!(result, Err(AnchorError::Network(_)) | Err(AnchorError::Timeout(_))));
+        assert!(matches!(
+            result,
+            Err(AnchorError::Network(_)) | Err(AnchorError::Timeout(_))
+        ));
     }
 
     #[tokio::test]
@@ -332,7 +335,10 @@ mod tests {
 
         assert!(result.is_err());
         // Network error or timeout are both acceptable
-        assert!(matches!(result, Err(AnchorError::Network(_)) | Err(AnchorError::Timeout(_))));
+        assert!(matches!(
+            result,
+            Err(AnchorError::Network(_)) | Err(AnchorError::Timeout(_))
+        ));
     }
 
     #[tokio::test]

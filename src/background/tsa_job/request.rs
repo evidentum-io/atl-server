@@ -224,10 +224,7 @@ mod tests {
         let result = try_tsa_timestamp(&tree, "https://freetsa.org/tsr", &index, 5000).await;
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("has no root_hash"));
+        assert!(result.unwrap_err().to_string().contains("has no root_hash"));
     }
 
     #[tokio::test]
@@ -454,9 +451,7 @@ mod tests {
 
         // Verify that anchor was stored with correct metadata
         let idx = index.lock().await;
-        let stored_anchors = idx
-            .get_anchors(400)
-            .expect("Failed to get anchors");
+        let stored_anchors = idx.get_anchors(400).expect("Failed to get anchors");
 
         assert!(!stored_anchors.is_empty());
         let stored = &stored_anchors[0];
@@ -559,9 +554,7 @@ mod tests {
 
         // Retrieve and verify target
         let idx = index.lock().await;
-        let stored_anchors = idx
-            .get_anchors(600)
-            .expect("Failed to get anchors");
+        let stored_anchors = idx.get_anchors(600).expect("Failed to get anchors");
 
         assert!(!stored_anchors.is_empty());
         let stored = &stored_anchors[0];

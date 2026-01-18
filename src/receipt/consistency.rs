@@ -95,11 +95,14 @@ mod tests {
         }
 
         fn add_consistency_proof(&self, from: u64, to: u64, path: Vec<[u8; 32]>) {
-            self.consistency_proofs.lock().unwrap().push(ConsistencyProof {
-                from_size: from,
-                to_size: to,
-                path,
-            });
+            self.consistency_proofs
+                .lock()
+                .unwrap()
+                .push(ConsistencyProof {
+                    from_size: from,
+                    to_size: to,
+                    path,
+                });
         }
 
         fn set_error(&self, should_error: bool) {

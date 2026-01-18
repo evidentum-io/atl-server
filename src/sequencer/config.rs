@@ -83,7 +83,7 @@ mod tests {
         assert_eq!(config.buffer_size, 100_000);
         assert_eq!(config.retry_count, 3);
         assert_eq!(config.retry_base_ms, 10);
-        assert_eq!(config.sync_mode, false);
+        assert!(!config.sync_mode);
     }
 
     #[test]
@@ -123,7 +123,7 @@ mod tests {
         assert_eq!(config.buffer_size, 100_000);
         assert_eq!(config.retry_count, 3);
         assert_eq!(config.retry_base_ms, 10);
-        assert_eq!(config.sync_mode, false);
+        assert!(!config.sync_mode);
     }
 
     #[test]
@@ -176,7 +176,7 @@ mod tests {
     fn test_from_env_sync_mode_true() {
         std::env::set_var("ATL_SYNC_MODE", "true");
         let config = SequencerConfig::from_env();
-        assert_eq!(config.sync_mode, true);
+        assert!(config.sync_mode);
         std::env::remove_var("ATL_SYNC_MODE");
     }
 
@@ -185,7 +185,7 @@ mod tests {
     fn test_from_env_sync_mode_one() {
         std::env::set_var("ATL_SYNC_MODE", "1");
         let config = SequencerConfig::from_env();
-        assert_eq!(config.sync_mode, true);
+        assert!(config.sync_mode);
         std::env::remove_var("ATL_SYNC_MODE");
     }
 
@@ -194,7 +194,7 @@ mod tests {
     fn test_from_env_sync_mode_false() {
         std::env::set_var("ATL_SYNC_MODE", "false");
         let config = SequencerConfig::from_env();
-        assert_eq!(config.sync_mode, false);
+        assert!(!config.sync_mode);
         std::env::remove_var("ATL_SYNC_MODE");
     }
 
@@ -203,7 +203,7 @@ mod tests {
     fn test_from_env_sync_mode_invalid() {
         std::env::set_var("ATL_SYNC_MODE", "invalid");
         let config = SequencerConfig::from_env();
-        assert_eq!(config.sync_mode, false);
+        assert!(!config.sync_mode);
         std::env::remove_var("ATL_SYNC_MODE");
     }
 
@@ -242,7 +242,7 @@ mod tests {
         assert_eq!(config.buffer_size, 20_000);
         assert_eq!(config.retry_count, 7);
         assert_eq!(config.retry_base_ms, 15);
-        assert_eq!(config.sync_mode, true);
+        assert!(config.sync_mode);
 
         // Cleanup
         std::env::remove_var("ATL_BATCH_SIZE");

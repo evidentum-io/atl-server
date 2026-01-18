@@ -328,18 +328,18 @@ mod tests {
         // Check blockstream.info
         assert_eq!(PROVIDERS[0].name, "blockstream.info");
         assert_eq!(PROVIDERS[0].base_url, "https://blockstream.info/api");
-        assert_eq!(PROVIDERS[0].two_step, true);
+        assert!(PROVIDERS[0].two_step);
         assert_eq!(PROVIDERS[0].timestamp_field, "timestamp");
 
         // Check mempool.space
         assert_eq!(PROVIDERS[1].name, "mempool.space");
         assert_eq!(PROVIDERS[1].base_url, "https://mempool.space/api");
-        assert_eq!(PROVIDERS[1].two_step, true);
+        assert!(PROVIDERS[1].two_step);
 
         // Check blockchain.info
         assert_eq!(PROVIDERS[2].name, "blockchain.info");
         assert_eq!(PROVIDERS[2].base_url, "https://blockchain.info");
-        assert_eq!(PROVIDERS[2].two_step, false);
+        assert!(!PROVIDERS[2].two_step);
         assert_eq!(PROVIDERS[2].timestamp_field, "time");
     }
 

@@ -326,8 +326,9 @@ mod tests {
         let response = parse_timestamp_response(&der).unwrap();
 
         // Expected hash: SHA-256("test")
-        let expected_hash = hex::decode("954d5a49fd70d9b8bcdb35d252267829957f7ef7fa6c74f88419bdc5e82209f4")
-            .unwrap();
+        let expected_hash =
+            hex::decode("954d5a49fd70d9b8bcdb35d252267829957f7ef7fa6c74f88419bdc5e82209f4")
+                .unwrap();
         let mut hash_array = [0u8; 32];
         hash_array.copy_from_slice(&expected_hash);
 

@@ -101,7 +101,10 @@ mod tests {
     fn test_from_env_disabled_true() {
         with_env("ATL_BACKGROUND_DISABLED", Some("true"), || {
             let config = BackgroundConfig::from_env();
-            assert!(config.disabled, "disabled should be true when set to 'true'");
+            assert!(
+                config.disabled,
+                "disabled should be true when set to 'true'"
+            );
         });
     }
 
@@ -119,7 +122,10 @@ mod tests {
     fn test_from_env_disabled_false() {
         with_env("ATL_BACKGROUND_DISABLED", Some("false"), || {
             let config = BackgroundConfig::from_env();
-            assert!(!config.disabled, "disabled should be false when set to 'false'");
+            assert!(
+                !config.disabled,
+                "disabled should be false when set to 'false'"
+            );
         });
     }
 
@@ -137,7 +143,10 @@ mod tests {
     fn test_from_env_disabled_invalid_value() {
         with_env("ATL_BACKGROUND_DISABLED", Some("invalid"), || {
             let config = BackgroundConfig::from_env();
-            assert!(!config.disabled, "disabled should default to false on invalid value");
+            assert!(
+                !config.disabled,
+                "disabled should default to false on invalid value"
+            );
         });
     }
 
@@ -146,7 +155,10 @@ mod tests {
     fn test_from_env_disabled_empty_string() {
         with_env("ATL_BACKGROUND_DISABLED", Some(""), || {
             let config = BackgroundConfig::from_env();
-            assert!(!config.disabled, "disabled should be false for empty string");
+            assert!(
+                !config.disabled,
+                "disabled should be false for empty string"
+            );
         });
     }
 
@@ -232,7 +244,10 @@ mod tests {
             disabled: true,
             ..Default::default()
         };
-        assert!(config.disabled, "disabled field should be public and mutable");
+        assert!(
+            config.disabled,
+            "disabled field should be public and mutable"
+        );
     }
 
     #[test]

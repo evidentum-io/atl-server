@@ -140,11 +140,11 @@ pub async fn check_and_close_if_needed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::StorageError;
     use crate::storage::chain_index::ChainIndex;
     use crate::storage::index::lifecycle::{ClosedTreeMetadata, TreeRotationResult};
     use crate::storage::index::queries::IndexStore;
     use crate::traits::{Storage, TreeHead, TreeRotator};
-    use crate::error::StorageError;
     use std::path::Path;
     use tempfile::tempdir;
 
@@ -422,8 +422,8 @@ mod tests {
         // Set first_entry_at to 2 hours ago
         {
             let conn = index.connection();
-            let two_hours_ago = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-                - (2 * 3600 * 1_000_000_000);
+            let two_hours_ago =
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) - (2 * 3600 * 1_000_000_000);
             conn.execute(
                 "UPDATE trees SET first_entry_at = ?1 WHERE status = 'active'",
                 rusqlite::params![two_hours_ago],
@@ -461,8 +461,8 @@ mod tests {
         // Set first_entry_at to 2 hours ago but tree size hasn't increased
         {
             let conn = index.connection();
-            let two_hours_ago = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-                - (2 * 3600 * 1_000_000_000);
+            let two_hours_ago =
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) - (2 * 3600 * 1_000_000_000);
             conn.execute(
                 "UPDATE trees SET first_entry_at = ?1 WHERE status = 'active'",
                 rusqlite::params![two_hours_ago],
@@ -500,8 +500,8 @@ mod tests {
         // Set first_entry_at to 2 hours ago
         {
             let conn = index.connection();
-            let two_hours_ago = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-                - (2 * 3600 * 1_000_000_000);
+            let two_hours_ago =
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) - (2 * 3600 * 1_000_000_000);
             conn.execute(
                 "UPDATE trees SET first_entry_at = ?1 WHERE status = 'active'",
                 rusqlite::params![two_hours_ago],
@@ -678,8 +678,7 @@ mod tests {
         // Set first_entry_at to 1 second ago
         {
             let conn = index.connection();
-            let one_sec_ago =
-                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) - 1_000_000_000;
+            let one_sec_ago = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) - 1_000_000_000;
             conn.execute(
                 "UPDATE trees SET first_entry_at = ?1 WHERE status = 'active'",
                 rusqlite::params![one_sec_ago],
@@ -713,8 +712,8 @@ mod tests {
         // Set first_entry_at to 2 hours ago
         {
             let conn = index.connection();
-            let two_hours_ago = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-                - (2 * 3600 * 1_000_000_000);
+            let two_hours_ago =
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) - (2 * 3600 * 1_000_000_000);
             conn.execute(
                 "UPDATE trees SET first_entry_at = ?1 WHERE status = 'active'",
                 rusqlite::params![two_hours_ago],
@@ -752,8 +751,8 @@ mod tests {
         // Set first_entry_at to 2 hours ago
         {
             let conn = index.connection();
-            let two_hours_ago = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-                - (2 * 3600 * 1_000_000_000);
+            let two_hours_ago =
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) - (2 * 3600 * 1_000_000_000);
             conn.execute(
                 "UPDATE trees SET first_entry_at = ?1 WHERE status = 'active'",
                 rusqlite::params![two_hours_ago],
@@ -797,8 +796,8 @@ mod tests {
         // Set first_entry_at to 2 hours ago
         {
             let conn = index.connection();
-            let two_hours_ago = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-                - (2 * 3600 * 1_000_000_000);
+            let two_hours_ago =
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) - (2 * 3600 * 1_000_000_000);
             conn.execute(
                 "UPDATE trees SET first_entry_at = ?1 WHERE status = 'active'",
                 rusqlite::params![two_hours_ago],
@@ -964,8 +963,8 @@ mod tests {
         // Set first_entry_at to future timestamp (shouldn't happen in practice)
         {
             let conn = index.connection();
-            let future = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-                + (3600 * 1_000_000_000);
+            let future =
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) + (3600 * 1_000_000_000);
             conn.execute(
                 "UPDATE trees SET first_entry_at = ?1 WHERE status = 'active'",
                 rusqlite::params![future],
@@ -1000,8 +999,7 @@ mod tests {
         // Set first_entry_at to 1 second ago
         {
             let conn = index.connection();
-            let one_sec_ago =
-                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) - 1_000_000_000;
+            let one_sec_ago = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) - 1_000_000_000;
             conn.execute(
                 "UPDATE trees SET first_entry_at = ?1 WHERE status = 'active'",
                 rusqlite::params![one_sec_ago],
@@ -1036,8 +1034,8 @@ mod tests {
         // Set first_entry_at to 2 hours ago
         {
             let conn = index.connection();
-            let two_hours_ago = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-                - (2 * 3600 * 1_000_000_000);
+            let two_hours_ago =
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) - (2 * 3600 * 1_000_000_000);
             conn.execute(
                 "UPDATE trees SET first_entry_at = ?1 WHERE status = 'active'",
                 rusqlite::params![two_hours_ago],

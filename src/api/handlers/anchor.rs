@@ -443,7 +443,10 @@ mod tests {
 
         let result = create_anchor(State(state), headers, body).await;
 
-        assert!(matches!(result, Err(ServerError::UnsupportedContentType(_))));
+        assert!(matches!(
+            result,
+            Err(ServerError::UnsupportedContentType(_))
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -515,10 +518,7 @@ mod tests {
 
         let result = anchor_json(state, body).await;
 
-        assert!(matches!(
-            result,
-            Err(ServerError::ServiceUnavailable(_))
-        ));
+        assert!(matches!(result, Err(ServerError::ServiceUnavailable(_))));
     }
 
     #[tokio::test(flavor = "multi_thread")]

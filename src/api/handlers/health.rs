@@ -244,10 +244,7 @@ mod tests {
             unimplemented!()
         }
 
-        fn get_anchors(
-            &self,
-            _tree_size: u64,
-        ) -> ServerResult<Vec<crate::traits::anchor::Anchor>> {
+        fn get_anchors(&self, _tree_size: u64) -> ServerResult<Vec<crate::traits::anchor::Anchor>> {
             unimplemented!()
         }
 
@@ -323,10 +320,7 @@ mod tests {
             unimplemented!()
         }
 
-        fn get_anchors(
-            &self,
-            _tree_size: u64,
-        ) -> ServerResult<Vec<crate::traits::anchor::Anchor>> {
+        fn get_anchors(&self, _tree_size: u64) -> ServerResult<Vec<crate::traits::anchor::Anchor>> {
             unimplemented!()
         }
 
@@ -903,7 +897,7 @@ mod tests {
         let (_, response) = result.unwrap_err();
         let error_msg = response.0.error.expect("error should be present");
         assert_eq!(error_msg, "Cannot connect to sequencer");
-        assert!(error_msg.len() > 0);
+        assert!(!error_msg.is_empty());
     }
 
     #[tokio::test]
@@ -1225,9 +1219,7 @@ mod tests {
         let state_not_initialized = Arc::new(AppState {
             mode: ServerMode::Sequencer,
             dispatcher: Arc::new(MockSequencerClientHealthy),
-            storage: Some(Arc::new(MockStorageVariant {
-                initialized: false,
-            })),
+            storage: Some(Arc::new(MockStorageVariant { initialized: false })),
             storage_engine: None,
             signer: None,
             access_tokens: None,
@@ -1313,7 +1305,10 @@ mod tests {
         let (status, response) = result.unwrap_err();
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(response.0.status, "unhealthy");
-        assert_eq!(response.0.error, Some("Cannot connect to sequencer".to_string()));
+        assert_eq!(
+            response.0.error,
+            Some("Cannot connect to sequencer".to_string())
+        );
     }
 
     #[tokio::test]

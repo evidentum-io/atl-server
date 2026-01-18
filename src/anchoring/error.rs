@@ -159,9 +159,8 @@ mod tests {
     #[cfg(feature = "rfc3161")]
     fn test_from_encode_error() {
         use rasn::error::{BerEncodeErrorKind, EncodeError};
-        let encode_err = EncodeError::from(BerEncodeErrorKind::InvalidObjectIdentifier {
-            oid: vec![1, 2],
-        });
+        let encode_err =
+            EncodeError::from(BerEncodeErrorKind::InvalidObjectIdentifier { oid: vec![1, 2] });
         let anchor_err: AnchorError = encode_err.into();
         let error_msg = anchor_err.to_string();
         assert!(error_msg.contains("ASN.1 error"));

@@ -221,7 +221,10 @@ mod tests {
 
         let runner = BackgroundJobRunner::new(storage, chain_index, config);
 
-        assert!(!runner.config.disabled, "Config should not be disabled by default");
+        assert!(
+            !runner.config.disabled,
+            "Config should not be disabled by default"
+        );
     }
 
     #[tokio::test]
@@ -236,7 +239,10 @@ mod tests {
 
         let runner = BackgroundJobRunner::new(storage, chain_index, config);
 
-        assert!(runner.config.disabled, "Config.disabled should be preserved");
+        assert!(
+            runner.config.disabled,
+            "Config.disabled should be preserved"
+        );
     }
 
     #[tokio::test]
@@ -283,7 +289,11 @@ mod tests {
         let runner = BackgroundJobRunner::new(storage, chain_index, config);
         let handles = runner.start().await.unwrap();
 
-        assert_eq!(handles.len(), 0, "Should return empty handles when disabled");
+        assert_eq!(
+            handles.len(),
+            0,
+            "Should return empty handles when disabled"
+        );
     }
 
     #[tokio::test]
@@ -346,11 +356,7 @@ mod tests {
         // With OTS: TreeCloser + TSA + OtsJob = 3
         // Without OTS: TreeCloser + TSA = 2
         #[cfg(feature = "ots")]
-        assert_eq!(
-            handles.len(),
-            3,
-            "Should spawn TreeCloser + TSA + OtsJob"
-        );
+        assert_eq!(handles.len(), 3, "Should spawn TreeCloser + TSA + OtsJob");
 
         #[cfg(not(feature = "ots"))]
         assert_eq!(
@@ -415,7 +421,10 @@ mod tests {
         let handles = runner.start().await.unwrap();
 
         // Should include OtsJob
-        assert!(handles.len() >= 2, "Should spawn at least TreeCloser + OtsJob");
+        assert!(
+            handles.len() >= 2,
+            "Should spawn at least TreeCloser + OtsJob"
+        );
 
         runner.shutdown();
         for handle in handles {
@@ -707,11 +716,8 @@ mod tests {
         let chain_index = create_test_chain_index(&temp_dir).await;
 
         // Both should construct successfully (test passes if no panic)
-        let _runner1 = BackgroundJobRunner::new(
-            storage1,
-            chain_index.clone(),
-            BackgroundConfig::default(),
-        );
+        let _runner1 =
+            BackgroundJobRunner::new(storage1, chain_index.clone(), BackgroundConfig::default());
         let _runner2 = BackgroundJobRunner::new(storage2, chain_index, BackgroundConfig::default());
     }
 }

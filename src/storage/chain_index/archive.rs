@@ -197,8 +197,8 @@ pub struct ArchivedTree {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::store::ChainTreeStatus;
+    use super::*;
     use rusqlite::Connection;
     use tempfile::TempDir;
 
@@ -272,10 +272,7 @@ mod tests {
             bucket: "my-bucket".to_string(),
             key: "path/to/tree.archive".to_string(),
         };
-        assert_eq!(
-            location.to_uri(),
-            "s3://my-bucket/path/to/tree.archive"
-        );
+        assert_eq!(location.to_uri(), "s3://my-bucket/path/to/tree.archive");
     }
 
     #[test]
@@ -423,7 +420,11 @@ mod tests {
 
         for tree_id in [0, 1, 100, i64::MAX] {
             let result = index.load_tree_from_archive(tree_id).unwrap();
-            assert!(result.is_none(), "Stub should return None for tree_id={}", tree_id);
+            assert!(
+                result.is_none(),
+                "Stub should return None for tree_id={}",
+                tree_id
+            );
         }
     }
 
@@ -444,7 +445,9 @@ mod tests {
         let hash = [255u8; 32];
 
         for (tree_id, leaf_index) in [(0, 0), (1, 100), (42, 9999)] {
-            let result = index.verify_from_archive(tree_id, leaf_index, &hash).unwrap();
+            let result = index
+                .verify_from_archive(tree_id, leaf_index, &hash)
+                .unwrap();
             assert!(
                 !result,
                 "Stub should return false for tree={}, leaf={}",
@@ -517,7 +520,10 @@ mod tests {
 
         // Should not fail (UPDATE just affects 0 rows)
         let result = index.mark_tree_archived(999, &location);
-        assert!(result.is_ok(), "UPDATE on non-existent tree should not error");
+        assert!(
+            result.is_ok(),
+            "UPDATE on non-existent tree should not error"
+        );
     }
 
     #[test]
@@ -613,7 +619,13 @@ mod tests {
     #[test]
     fn test_get_trees_ready_for_archival_filters_already_archived() {
         let (index, _temp) = create_test_index();
-        insert_test_tree(&index, 1, "archived", Some("btc_1"), Some("s3://bucket/tree1"));
+        insert_test_tree(
+            &index,
+            1,
+            "archived",
+            Some("btc_1"),
+            Some("s3://bucket/tree1"),
+        );
         insert_test_tree(&index, 2, "closed", Some("btc_2"), None);
 
         let result = index.get_trees_ready_for_archival().unwrap();

@@ -375,9 +375,10 @@ mod tests {
 
     #[test]
     fn test_config_mutation() {
-        let mut config = OtsJobConfig::default();
-        config.interval_secs = 1234;
-        config.max_batch_size = 5678;
+        let config = OtsJobConfig {
+            interval_secs: 1234,
+            max_batch_size: 5678,
+        };
 
         assert_eq!(config.interval_secs, 1234);
         assert_eq!(config.max_batch_size, 5678);

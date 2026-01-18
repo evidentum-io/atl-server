@@ -79,12 +79,12 @@ impl TreeCloser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::StorageError;
     use crate::storage::chain_index::ChainIndex;
     use crate::storage::index::lifecycle::ClosedTreeMetadata;
-    use crate::storage::index::queries::IndexStore;
     use crate::storage::index::lifecycle::TreeRotationResult;
+    use crate::storage::index::queries::IndexStore;
     use crate::traits::{Storage, TreeHead, TreeRotator};
-    use crate::error::StorageError;
     use std::path::Path;
     use tempfile::tempdir;
 
@@ -457,7 +457,10 @@ mod tests {
         let _ = shutdown_tx.send(()); // This might fail if receiver already closed
 
         let result = tokio::time::timeout(Duration::from_millis(500), closer_handle).await;
-        assert!(result.is_ok(), "TreeCloser should handle multiple shutdown signals");
+        assert!(
+            result.is_ok(),
+            "TreeCloser should handle multiple shutdown signals"
+        );
     }
 
     #[tokio::test]
@@ -619,8 +622,8 @@ mod tests {
         // Set first_entry_at to 2 hours ago to trigger closure attempt
         {
             let conn = index.connection();
-            let two_hours_ago = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-                - (2 * 3600 * 1_000_000_000);
+            let two_hours_ago =
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) - (2 * 3600 * 1_000_000_000);
             conn.execute(
                 "UPDATE trees SET first_entry_at = ?1 WHERE status = 'active'",
                 rusqlite::params![two_hours_ago],
@@ -655,6 +658,9 @@ mod tests {
 
         // Should still shutdown gracefully despite errors in logic
         let result = tokio::time::timeout(Duration::from_secs(2), closer_handle).await;
-        assert!(result.is_ok(), "TreeCloser should shutdown gracefully even with errors");
+        assert!(
+            result.is_ok(),
+            "TreeCloser should shutdown gracefully even with errors"
+        );
     }
 }

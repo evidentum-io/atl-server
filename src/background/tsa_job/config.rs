@@ -111,15 +111,21 @@ mod tests {
     #[test]
     #[serial]
     fn test_from_env_multiple_urls() {
-        std::env::set_var("ATL_TSA_URLS", "https://test1.com/tsr, https://test2.com/tsr, https://test3.com/tsr");
+        std::env::set_var(
+            "ATL_TSA_URLS",
+            "https://test1.com/tsr, https://test2.com/tsr, https://test3.com/tsr",
+        );
 
         let config = TsaJobConfig::from_env();
 
-        assert_eq!(config.tsa_urls, vec![
-            "https://test1.com/tsr",
-            "https://test2.com/tsr",
-            "https://test3.com/tsr"
-        ]);
+        assert_eq!(
+            config.tsa_urls,
+            vec![
+                "https://test1.com/tsr",
+                "https://test2.com/tsr",
+                "https://test3.com/tsr"
+            ]
+        );
 
         std::env::remove_var("ATL_TSA_URLS");
     }
@@ -223,7 +229,10 @@ mod tests {
     #[test]
     #[serial]
     fn test_from_env_all_custom_values() {
-        std::env::set_var("ATL_TSA_URLS", "https://custom1.com/tsr,https://custom2.com/tsr");
+        std::env::set_var(
+            "ATL_TSA_URLS",
+            "https://custom1.com/tsr,https://custom2.com/tsr",
+        );
         std::env::set_var("ATL_TSA_TIMEOUT_MS", "15000");
         std::env::set_var("ATL_TSA_INTERVAL_SECS", "90");
         std::env::set_var("ATL_TSA_JOB_BATCH_SIZE", "200");
@@ -231,7 +240,10 @@ mod tests {
 
         let config = TsaJobConfig::from_env();
 
-        assert_eq!(config.tsa_urls, vec!["https://custom1.com/tsr", "https://custom2.com/tsr"]);
+        assert_eq!(
+            config.tsa_urls,
+            vec!["https://custom1.com/tsr", "https://custom2.com/tsr"]
+        );
         assert_eq!(config.timeout_ms, 15000);
         assert_eq!(config.interval_secs, 90);
         assert_eq!(config.max_batch_size, 200);

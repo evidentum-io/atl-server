@@ -125,8 +125,8 @@ pub async fn poll_pending_anchors(
 #[cfg(all(test, feature = "ots"))]
 mod tests {
     use super::*;
-    use crate::anchoring::ots::{OtsClient, OtsStatus, UpgradeResult};
     use crate::anchoring::error::AnchorError;
+    use crate::anchoring::ots::{OtsClient, OtsStatus, UpgradeResult};
     use crate::storage::index::AnchorWithId;
     use crate::traits::{Anchor, AnchorType};
     use async_trait::async_trait;
@@ -238,13 +238,8 @@ mod tests {
         // Create a pending OTS anchor
         let anchor_id = {
             let mut idx = index.lock().await;
-            idx.submit_super_root_ots_anchor(
-                &vec![0u8; 32],
-                "http://calendar.example",
-                &[0u8; 32],
-                1,
-            )
-            .unwrap()
+            idx.submit_super_root_ots_anchor(&[0u8; 32], "http://calendar.example", &[0u8; 32], 1)
+                .unwrap()
         };
 
         let client: Arc<dyn OtsClient> = Arc::new(MockOtsClient::new_no_upgrade());
@@ -266,13 +261,8 @@ mod tests {
         // Create a pending OTS anchor
         let anchor_id = {
             let mut idx = index.lock().await;
-            idx.submit_super_root_ots_anchor(
-                &vec![0u8; 32],
-                "http://calendar.example",
-                &[0u8; 32],
-                1,
-            )
-            .unwrap()
+            idx.submit_super_root_ots_anchor(&[0u8; 32], "http://calendar.example", &[0u8; 32], 1)
+                .unwrap()
         };
 
         let client: Arc<dyn OtsClient> = Arc::new(MockOtsClient::new_pending());
@@ -293,20 +283,16 @@ mod tests {
         let index = Arc::new(Mutex::new(create_test_index_store()));
 
         // Create a pending OTS anchor
-        let anchor_id = {
+        let _anchor_id = {
             let mut idx = index.lock().await;
-            idx.submit_super_root_ots_anchor(
-                &vec![0u8; 32],
-                "http://calendar.example",
-                &[0u8; 32],
-                1,
-            )
-            .unwrap()
+            idx.submit_super_root_ots_anchor(&[0u8; 32], "http://calendar.example", &[0u8; 32], 1)
+                .unwrap()
         };
 
         let block_height = 800000u64;
         let block_time = 1700000000u64;
-        let client: Arc<dyn OtsClient> = Arc::new(MockOtsClient::new_confirmed(block_height, block_time));
+        let client: Arc<dyn OtsClient> =
+            Arc::new(MockOtsClient::new_confirmed(block_height, block_time));
 
         let result = poll_pending_anchors(&index, &client, 100).await;
         assert!(result.is_ok());
@@ -324,18 +310,13 @@ mod tests {
         // Create a pending OTS anchor
         let _anchor_id = {
             let mut idx = index.lock().await;
-            idx.submit_super_root_ots_anchor(
-                &vec![0u8; 32],
-                "http://calendar.example",
-                &[0u8; 32],
-                1,
-            )
-            .unwrap()
+            idx.submit_super_root_ots_anchor(&[0u8; 32], "http://calendar.example", &[0u8; 32], 1)
+                .unwrap()
         };
 
-        let client: Arc<dyn OtsClient> = Arc::new(MockOtsClient::new_error(
-            AnchorError::Network("timeout".to_string()),
-        ));
+        let client: Arc<dyn OtsClient> = Arc::new(MockOtsClient::new_error(AnchorError::Network(
+            "timeout".to_string(),
+        )));
 
         let result = poll_pending_anchors(&index, &client, 100).await;
         assert!(result.is_ok()); // Should not fail, just log warning
@@ -354,10 +335,12 @@ mod tests {
         {
             let mut idx = index.lock().await;
             for i in 0..5 {
+                let hash = [i as u8; 32];
+                let root = [i as u8; 32];
                 idx.submit_super_root_ots_anchor(
-                    &vec![i as u8; 32],
+                    &hash,
                     "http://calendar.example",
-                    &[i as u8; 32],
+                    &root,
                     i as u64 + 1,
                 )
                 .unwrap();
@@ -384,10 +367,12 @@ mod tests {
         {
             let mut idx = index.lock().await;
             for i in 0..3 {
+                let hash = [i as u8; 32];
+                let root = [i as u8; 32];
                 idx.submit_super_root_ots_anchor(
-                    &vec![i as u8; 32],
+                    &hash,
                     "http://calendar.example",
-                    &[i as u8; 32],
+                    &root,
                     i as u64 + 1,
                 )
                 .unwrap();
@@ -441,13 +426,8 @@ mod tests {
         // Create a pending anchor
         {
             let mut idx = index.lock().await;
-            idx.submit_super_root_ots_anchor(
-                &vec![0u8; 32],
-                "http://calendar.example",
-                &[0u8; 32],
-                1,
-            )
-            .unwrap();
+            idx.submit_super_root_ots_anchor(&[0u8; 32], "http://calendar.example", &[0u8; 32], 1)
+                .unwrap();
         }
 
         let client: Arc<dyn OtsClient> = Arc::new(MockOtsClient::new_no_upgrade());

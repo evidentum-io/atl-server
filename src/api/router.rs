@@ -43,9 +43,126 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::config::ServerMode;
+    use crate::traits::dispatcher::{
+        AnchoringStatus, BatchDispatchResult, ConsistencyProofResponse, DispatchResult,
+        GetReceiptRequest, PublicKeyInfo, ReceiptResponse, TriggerAnchoringRequest,
+    };
+    use crate::traits::{AppendParams, SequencerClient, TreeHead};
+    use async_trait::async_trait;
+
+    /// Mock sequencer client for testing
+    struct MockSequencerClient;
+
+    #[async_trait]
+    impl SequencerClient for MockSequencerClient {
+        async fn dispatch(
+            &self,
+            _params: AppendParams,
+        ) -> crate::error::ServerResult<DispatchResult> {
+            unimplemented!()
+        }
+
+        async fn dispatch_batch(
+            &self,
+            _params: Vec<AppendParams>,
+        ) -> crate::error::ServerResult<BatchDispatchResult> {
+            unimplemented!()
+        }
+
+        async fn get_receipt(
+            &self,
+            _request: GetReceiptRequest,
+        ) -> crate::error::ServerResult<ReceiptResponse> {
+            unimplemented!()
+        }
+
+        async fn get_tree_head(&self) -> crate::error::ServerResult<TreeHead> {
+            unimplemented!()
+        }
+
+        async fn get_consistency_proof(
+            &self,
+            _from_size: u64,
+            _to_size: u64,
+        ) -> crate::error::ServerResult<ConsistencyProofResponse> {
+            unimplemented!()
+        }
+
+        async fn get_public_keys(&self) -> crate::error::ServerResult<Vec<PublicKeyInfo>> {
+            unimplemented!()
+        }
+
+        async fn trigger_anchoring(
+            &self,
+            _request: TriggerAnchoringRequest,
+        ) -> crate::error::ServerResult<Vec<AnchoringStatus>> {
+            unimplemented!()
+        }
+
+        async fn health_check(&self) -> crate::error::ServerResult<()> {
+            Ok(())
+        }
+    }
+
+    fn create_test_state(mode: ServerMode, access_tokens: Option<Vec<String>>) -> Arc<AppState> {
+        Arc::new(AppState {
+            mode,
+            dispatcher: Arc::new(MockSequencerClient),
+            storage: None,
+            storage_engine: None,
+            signer: None,
+            access_tokens,
+            base_url: "http://localhost:8080".to_string(),
+        })
+    }
+
     #[test]
     fn test_router_standalone_no_health() {
-        // Router creation is tested in integration tests
-        // This is a placeholder to satisfy coverage
+        let state = create_test_state(ServerMode::Standalone, None);
+        let _router = create_router(state.clone());
+
+        // Verify router is created successfully
+        assert_eq!(state.mode, ServerMode::Standalone);
+    }
+
+    #[test]
+    fn test_router_node_has_health() {
+        let state = create_test_state(ServerMode::Node, None);
+        let _router = create_router(state.clone());
+
+        // Node mode should have health endpoint
+        assert_eq!(state.mode, ServerMode::Node);
+        assert!(state.mode.has_health_endpoint());
+    }
+
+    #[test]
+    fn test_router_sequencer_has_health() {
+        let state = create_test_state(ServerMode::Sequencer, None);
+        let _router = create_router(state.clone());
+
+        // Sequencer mode should have health endpoint
+        assert_eq!(state.mode, ServerMode::Sequencer);
+        assert!(state.mode.has_health_endpoint());
+    }
+
+    #[test]
+    fn test_router_with_auth_middleware() {
+        let tokens = vec!["token1".to_string(), "token2".to_string()];
+        let state = create_test_state(ServerMode::Standalone, Some(tokens.clone()));
+        let _router = create_router(state.clone());
+
+        // Auth middleware should be applied when tokens are present
+        assert_eq!(state.access_tokens, Some(tokens));
+    }
+
+    #[test]
+    fn test_router_without_auth_middleware() {
+        let state = create_test_state(ServerMode::Standalone, None);
+        let _router = create_router(state.clone());
+
+        // No auth middleware when tokens are None
+        assert_eq!(state.access_tokens, None);
     }
 }

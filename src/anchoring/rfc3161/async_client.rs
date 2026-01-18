@@ -161,7 +161,11 @@ mod tests {
         let hash = [42u8; 32];
 
         let result = client
-            .timestamp("http://invalid-tsa-url-that-does-not-exist.example", &hash, 1000)
+            .timestamp(
+                "http://invalid-tsa-url-that-does-not-exist.example",
+                &hash,
+                1000,
+            )
             .await;
 
         assert!(result.is_err());
@@ -196,7 +200,7 @@ mod tests {
     #[test]
     fn test_verify_with_wrong_hash() {
         let client = AsyncRfc3161Client::new().unwrap();
-        let hash = [42u8; 32];
+        let _hash = [42u8; 32];
         let wrong_hash = [99u8; 32];
 
         // Create a minimal valid DER structure (this will still fail verification)
@@ -246,9 +250,15 @@ mod tests {
             }
         }
 
-        fn verify(&self, _response: &TsaResponse, _expected_hash: &[u8; 32]) -> Result<(), AnchorError> {
+        fn verify(
+            &self,
+            _response: &TsaResponse,
+            _expected_hash: &[u8; 32],
+        ) -> Result<(), AnchorError> {
             if self.should_fail {
-                Err(AnchorError::TokenInvalid("mock verification failure".to_string()))
+                Err(AnchorError::TokenInvalid(
+                    "mock verification failure".to_string(),
+                ))
             } else {
                 Ok(())
             }
@@ -266,7 +276,9 @@ mod tests {
         };
 
         let hash = [42u8; 32];
-        let result = mock.timestamp("http://mock.example.com/tsr", &hash, 5000).await;
+        let result = mock
+            .timestamp("http://mock.example.com/tsr", &hash, 5000)
+            .await;
 
         assert!(result.is_ok());
         let response = result.unwrap();
@@ -282,7 +294,9 @@ mod tests {
         };
 
         let hash = [42u8; 32];
-        let result = mock.timestamp("http://mock.example.com/tsr", &hash, 5000).await;
+        let result = mock
+            .timestamp("http://mock.example.com/tsr", &hash, 5000)
+            .await;
 
         assert!(result.is_err());
         match result.unwrap_err() {

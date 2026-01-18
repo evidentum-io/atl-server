@@ -310,7 +310,10 @@ mod tests {
     #[test]
     #[serial]
     fn test_ots_config_from_env_urls_with_empty_entries() {
-        std::env::set_var("ATL_OTS_CALENDAR_URLS", "https://test1.com,,https://test2.com");
+        std::env::set_var(
+            "ATL_OTS_CALENDAR_URLS",
+            "https://test1.com,,https://test2.com",
+        );
         std::env::remove_var("ATL_OTS_TIMEOUT_SECS");
         std::env::remove_var("ATL_OTS_MIN_CONFIRMATIONS");
 

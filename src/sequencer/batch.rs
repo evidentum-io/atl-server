@@ -145,7 +145,10 @@ mod tests {
 
     #[async_trait]
     impl Storage for MockStorage {
-        async fn append_batch(&self, params: Vec<AppendParams>) -> Result<crate::traits::BatchResult, StorageError> {
+        async fn append_batch(
+            &self,
+            params: Vec<AppendParams>,
+        ) -> Result<crate::traits::BatchResult, StorageError> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
 
             let should_fail = *self.should_fail.lock().expect("lock");
@@ -436,12 +439,17 @@ mod tests {
 
         #[async_trait]
         impl Storage for OneFailureMockStorage {
-            async fn append_batch(&self, params: Vec<AppendParams>) -> Result<crate::traits::BatchResult, StorageError> {
+            async fn append_batch(
+                &self,
+                params: Vec<AppendParams>,
+            ) -> Result<crate::traits::BatchResult, StorageError> {
                 let count = self.call_count.fetch_add(1, Ordering::SeqCst);
 
                 // Fail on first attempt only
                 if count == 0 {
-                    return Err(StorageError::Database("mock failure on first attempt".into()));
+                    return Err(StorageError::Database(
+                        "mock failure on first attempt".into(),
+                    ));
                 }
 
                 // Succeed on subsequent attempts
@@ -529,7 +537,10 @@ mod tests {
                 Ok([0u8; 32])
             }
 
-            fn get_super_root(&self, _super_tree_size: u64) -> crate::error::ServerResult<[u8; 32]> {
+            fn get_super_root(
+                &self,
+                _super_tree_size: u64,
+            ) -> crate::error::ServerResult<[u8; 32]> {
                 Ok([0u8; 32])
             }
 
@@ -830,7 +841,7 @@ mod tests {
         let result = rx.await.expect("should receive").expect("should be ok");
 
         // Verify AppendResult fields
-        assert!(result.id.to_string().len() > 0); // UUID is set
+        assert!(!result.id.to_string().is_empty()); // UUID is set
         assert_eq!(result.leaf_index, 0);
         assert_eq!(result.tree_head.tree_size, 1);
         assert_eq!(result.tree_head.root_hash, [2u8; 32]);
@@ -978,7 +989,10 @@ mod tests {
 
         #[async_trait]
         impl Storage for TransientFailureMockStorage {
-            async fn append_batch(&self, params: Vec<AppendParams>) -> Result<BatchResult, StorageError> {
+            async fn append_batch(
+                &self,
+                params: Vec<AppendParams>,
+            ) -> Result<BatchResult, StorageError> {
                 let count = self.call_count.fetch_add(1, Ordering::SeqCst);
 
                 // Fail first attempt, succeed on second
@@ -1070,7 +1084,10 @@ mod tests {
                 Ok([0u8; 32])
             }
 
-            fn get_super_root(&self, _super_tree_size: u64) -> crate::error::ServerResult<[u8; 32]> {
+            fn get_super_root(
+                &self,
+                _super_tree_size: u64,
+            ) -> crate::error::ServerResult<[u8; 32]> {
                 Ok([0u8; 32])
             }
 

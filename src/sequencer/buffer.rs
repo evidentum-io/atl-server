@@ -175,7 +175,7 @@ mod tests {
         let handle = SequencerHandle::new(tx);
 
         let utilization = handle.buffer_utilization();
-        assert!(utilization >= 0.0 && utilization <= 1.0);
+        assert!((0.0..=1.0).contains(&utilization));
     }
 
     #[tokio::test]
@@ -186,9 +186,7 @@ mod tests {
         let params = create_test_params();
 
         // Spawn task to simulate sequencer response
-        let append_task = tokio::spawn(async move {
-            handle.append(params).await
-        });
+        let append_task = tokio::spawn(async move { handle.append(params).await });
 
         // Receive request and send response
         if let Some(request) = rx.recv().await {
@@ -229,9 +227,7 @@ mod tests {
         let params = create_test_params();
 
         // Spawn task to simulate sequencer response
-        let append_task = tokio::spawn(async move {
-            handle.append(params).await
-        });
+        let append_task = tokio::spawn(async move { handle.append(params).await });
 
         // Receive request but drop it without responding
         if let Some(_request) = rx.recv().await {
@@ -256,13 +252,13 @@ mod tests {
         let params = create_test_params();
 
         // Spawn task to simulate sequencer response
-        let append_task = tokio::spawn(async move {
-            handle.append(params).await
-        });
+        let append_task = tokio::spawn(async move { handle.append(params).await });
 
         // Receive request and send error response
         if let Some(request) = rx.recv().await {
-            let _ = request.response_tx.send(Err(ServerError::Internal("test error".into())));
+            let _ = request
+                .response_tx
+                .send(Err(ServerError::Internal("test error".into())));
         }
 
         let result = append_task.await.expect("task should complete");
@@ -280,13 +276,15 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<AppendRequest>(10);
         let handle = SequencerHandle::new(tx);
 
-        let params_batch = vec![create_test_params(), create_test_params(), create_test_params()];
+        let params_batch = vec![
+            create_test_params(),
+            create_test_params(),
+            create_test_params(),
+        ];
         let batch_size = params_batch.len();
 
         // Spawn task to simulate sequencer responses
-        let append_task = tokio::spawn(async move {
-            handle.append_batch(params_batch).await
-        });
+        let append_task = tokio::spawn(async move { handle.append_batch(params_batch).await });
 
         // Receive all requests and send responses
         for _ in 0..batch_size {
@@ -324,9 +322,7 @@ mod tests {
         let params_batch = vec![create_test_params()];
 
         // Spawn task to simulate sequencer response
-        let append_task = tokio::spawn(async move {
-            handle.append_batch(params_batch).await
-        });
+        let append_task = tokio::spawn(async move { handle.append_batch(params_batch).await });
 
         // Receive request but drop without responding
         if let Some(_request) = rx.recv().await {
@@ -351,9 +347,7 @@ mod tests {
         let params_batch = vec![create_test_params(), create_test_params()];
 
         // Spawn task to simulate sequencer responses
-        let append_task = tokio::spawn(async move {
-            handle.append_batch(params_batch).await
-        });
+        let append_task = tokio::spawn(async move { handle.append_batch(params_batch).await });
 
         // First request succeeds
         if let Some(request) = rx.recv().await {
@@ -362,7 +356,9 @@ mod tests {
 
         // Second request fails
         if let Some(request) = rx.recv().await {
-            let _ = request.response_tx.send(Err(ServerError::Internal("batch error".into())));
+            let _ = request
+                .response_tx
+                .send(Err(ServerError::Internal("batch error".into())));
         }
 
         let result = append_task.await.expect("task should complete");
@@ -384,15 +380,19 @@ mod tests {
         let (tx1, _rx1) = oneshot::channel();
         let (tx2, _rx2) = oneshot::channel();
 
-        let _ = tx.send(AppendRequest {
-            params: create_test_params(),
-            response_tx: tx1,
-        }).await;
+        let _ = tx
+            .send(AppendRequest {
+                params: create_test_params(),
+                response_tx: tx1,
+            })
+            .await;
 
-        let _ = tx.send(AppendRequest {
-            params: create_test_params(),
-            response_tx: tx2,
-        }).await;
+        let _ = tx
+            .send(AppendRequest {
+                params: create_test_params(),
+                response_tx: tx2,
+            })
+            .await;
 
         let utilization = handle.buffer_utilization();
         assert!(utilization > 0.5); // Should be highly utilized
@@ -405,10 +405,12 @@ mod tests {
 
         // Fill buffer
         let (fill_tx, _fill_rx) = oneshot::channel();
-        let _ = tx.send(AppendRequest {
-            params: create_test_params(),
-            response_tx: fill_tx,
-        }).await;
+        let _ = tx
+            .send(AppendRequest {
+                params: create_test_params(),
+                response_tx: fill_tx,
+            })
+            .await;
 
         assert!(!handle.has_capacity());
     }

@@ -742,7 +742,10 @@ mod tests {
     #[test]
     fn test_tree_status_parse() {
         assert_eq!(TreeStatus::parse("active"), Some(TreeStatus::Active));
-        assert_eq!(TreeStatus::parse("pending_bitcoin"), Some(TreeStatus::PendingBitcoin));
+        assert_eq!(
+            TreeStatus::parse("pending_bitcoin"),
+            Some(TreeStatus::PendingBitcoin)
+        );
         assert_eq!(TreeStatus::parse("closed"), Some(TreeStatus::Closed));
         assert_eq!(TreeStatus::parse("invalid"), None);
         assert_eq!(TreeStatus::parse(""), None);
@@ -787,7 +790,9 @@ mod tests {
             .close_tree_and_create_new(&origin_id, 100, &[0x11; 32], 0)
             .unwrap();
 
-        store.set_tree_bitcoin_anchor(result.closed_tree_id, 42).unwrap();
+        store
+            .set_tree_bitcoin_anchor(result.closed_tree_id, 42)
+            .unwrap();
 
         let tree = store.get_tree(result.closed_tree_id).unwrap().unwrap();
         assert_eq!(tree.bitcoin_anchor_id, Some(42));
@@ -833,7 +838,9 @@ mod tests {
             .unwrap();
 
         // Set TSA anchor
-        store.update_tree_tsa_anchor(result.closed_tree_id, 123).unwrap();
+        store
+            .update_tree_tsa_anchor(result.closed_tree_id, 123)
+            .unwrap();
 
         let pending = store.get_trees_pending_tsa().unwrap();
         assert_eq!(pending.len(), 0); // Should be filtered out
@@ -892,7 +899,9 @@ mod tests {
             .close_tree_and_create_new(&origin_id, 100, &[0x66; 32], 0)
             .unwrap();
 
-        store.update_tree_tsa_anchor(result.closed_tree_id, 789).unwrap();
+        store
+            .update_tree_tsa_anchor(result.closed_tree_id, 789)
+            .unwrap();
 
         let tree = store.get_tree(result.closed_tree_id).unwrap().unwrap();
         assert_eq!(tree.tsa_anchor_id, Some(789));
@@ -930,7 +939,7 @@ mod tests {
 
     #[test]
     fn test_get_tree_covering_entry_excludes_active() {
-        let mut store = create_test_index_store();
+        let store = create_test_index_store();
         let origin_id = [0x12; 32];
         store.create_active_tree(&origin_id, 0).unwrap();
 
@@ -977,7 +986,9 @@ mod tests {
             .close_tree_and_create_new(&origin_id, 100, &[0x99; 32], 0)
             .unwrap();
 
-        store.set_tree_bitcoin_anchor(result.closed_tree_id, 555).unwrap();
+        store
+            .set_tree_bitcoin_anchor(result.closed_tree_id, 555)
+            .unwrap();
 
         let tree = store.get_tree_by_bitcoin_anchor_id(555).unwrap().unwrap();
         assert_eq!(tree.id, result.closed_tree_id);
@@ -1115,7 +1126,9 @@ mod tests {
             )
             .unwrap();
 
-        let index = store.get_tree_data_tree_index(result.closed_tree_id).unwrap();
+        let index = store
+            .get_tree_data_tree_index(result.closed_tree_id)
+            .unwrap();
         assert!(index.is_none(), "Should return None for negative values");
     }
 
@@ -1180,8 +1193,12 @@ mod tests {
             .close_tree_and_create_new(&origin_id, 100, &[0xcc; 32], 0)
             .unwrap();
 
-        store.update_tree_tsa_anchor(result.closed_tree_id, 111).unwrap();
-        store.set_tree_bitcoin_anchor(result.closed_tree_id, 222).unwrap();
+        store
+            .update_tree_tsa_anchor(result.closed_tree_id, 111)
+            .unwrap();
+        store
+            .set_tree_bitcoin_anchor(result.closed_tree_id, 222)
+            .unwrap();
         store.mark_tree_closed(result.closed_tree_id).unwrap();
 
         let tree = store.get_tree(result.closed_tree_id).unwrap().unwrap();

@@ -138,7 +138,10 @@ mod tests {
 
     #[async_trait]
     impl Storage for MockStorage {
-        async fn append_batch(&self, params: Vec<AppendParams>) -> Result<BatchResult, StorageError> {
+        async fn append_batch(
+            &self,
+            params: Vec<AppendParams>,
+        ) -> Result<BatchResult, StorageError> {
             Ok(BatchResult {
                 entries: params
                     .iter()

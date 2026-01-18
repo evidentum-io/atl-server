@@ -216,7 +216,11 @@ mod tests {
 
         mock.assert_async().await;
         // Should succeed and return the calendar URL
-        assert!(result.is_ok(), "timestamp_with_fallback failed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "timestamp_with_fallback failed: {:?}",
+            result
+        );
         let (calendar_url, _) = result.unwrap();
         assert_eq!(calendar_url, server.url());
     }

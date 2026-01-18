@@ -834,9 +834,18 @@ mod tests {
 
     #[test]
     fn test_chain_tree_status_parse() {
-        assert_eq!(ChainTreeStatus::parse("active"), Some(ChainTreeStatus::Active));
-        assert_eq!(ChainTreeStatus::parse("closed"), Some(ChainTreeStatus::Closed));
-        assert_eq!(ChainTreeStatus::parse("archived"), Some(ChainTreeStatus::Archived));
+        assert_eq!(
+            ChainTreeStatus::parse("active"),
+            Some(ChainTreeStatus::Active)
+        );
+        assert_eq!(
+            ChainTreeStatus::parse("closed"),
+            Some(ChainTreeStatus::Closed)
+        );
+        assert_eq!(
+            ChainTreeStatus::parse("archived"),
+            Some(ChainTreeStatus::Archived)
+        );
         assert_eq!(ChainTreeStatus::parse("invalid"), None);
         assert_eq!(ChainTreeStatus::parse(""), None);
     }

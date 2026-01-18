@@ -702,7 +702,7 @@ mod tests {
         let covering = store
             .get_anchors_covering(100, 10)
             .expect("Failed to get covering anchors");
-        assert!(covering.len() >= 1);
+        assert!(!covering.is_empty());
         // Should get the closest (minimum) tree_size first
         assert_eq!(covering[0].tree_size, 150);
     }
@@ -865,7 +865,9 @@ mod tests {
             .unwrap()
             .metadata;
         assert_eq!(
-            metadata.get("bitcoin_block_height").and_then(|v| v.as_i64()),
+            metadata
+                .get("bitcoin_block_height")
+                .and_then(|v| v.as_i64()),
             Some(block_height as i64)
         );
         assert_eq!(
@@ -1138,9 +1140,7 @@ mod tests {
         let anchors = store.get_anchors(100).expect("Failed to get anchors");
         assert_eq!(anchors.len(), 1);
         // Default metadata should be empty object or null
-        assert!(
-            anchors[0].metadata.is_null() || anchors[0].metadata == serde_json::json!({})
-        );
+        assert!(anchors[0].metadata.is_null() || anchors[0].metadata == serde_json::json!({}));
     }
 
     #[test]
@@ -1250,7 +1250,8 @@ mod tests {
         if let Err(e) = result {
             let error_string = format!("{:?}", e);
             assert!(
-                error_string.contains("InvalidColumnType") || error_string.contains("anchored_hash"),
+                error_string.contains("InvalidColumnType")
+                    || error_string.contains("anchored_hash"),
                 "Error should mention InvalidColumnType or anchored_hash, got: {}",
                 error_string
             );
@@ -1408,7 +1409,7 @@ mod tests {
 
         // get_anchors should include super_root anchors with confirmed status
         let anchors = store.get_anchors(50).expect("Failed to get anchors");
-        assert!(anchors.len() > 0);
+        assert!(!anchors.is_empty());
         assert!(anchors.iter().any(|a| a.target == "super_root"));
     }
 }

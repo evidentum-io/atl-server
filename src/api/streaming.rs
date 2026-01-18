@@ -198,10 +198,7 @@ mod tests {
     async fn test_hash_stream_error_propagation() {
         let error_stream = stream::iter(vec![
             Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data")),
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "stream error",
-            )),
+            Err(std::io::Error::other("stream error")),
         ]);
 
         let result = hash_stream(error_stream).await;
@@ -237,9 +234,6 @@ mod tests {
         let hash1 = hash_stream(stream1).await.unwrap();
         let hash2 = hash_stream(stream2).await.unwrap();
 
-        assert_eq!(
-            hash1, hash2,
-            "Different chunking should produce same hash"
-        );
+        assert_eq!(hash1, hash2, "Different chunking should produce same hash");
     }
 }

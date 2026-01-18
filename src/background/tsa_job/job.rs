@@ -329,7 +329,10 @@ mod tests {
         let index = Arc::new(Mutex::new(create_test_index_store()));
         let storage: Arc<dyn Storage> = Arc::new(MockStorage::new(0, [0u8; 32]));
         let config = TsaJobConfig {
-            tsa_urls: vec!["https://tsa1.com".to_string(), "https://tsa2.com".to_string()],
+            tsa_urls: vec![
+                "https://tsa1.com".to_string(),
+                "https://tsa2.com".to_string(),
+            ],
             timeout_ms: 5000,
             interval_secs: 60,
             max_batch_size: 100,
@@ -886,7 +889,10 @@ mod tests {
     #[test]
     fn test_job_config_cloning() {
         let config = TsaJobConfig {
-            tsa_urls: vec!["https://tsa1.com".to_string(), "https://tsa2.com".to_string()],
+            tsa_urls: vec![
+                "https://tsa1.com".to_string(),
+                "https://tsa2.com".to_string(),
+            ],
             timeout_ms: 10000,
             interval_secs: 120,
             max_batch_size: 50,
@@ -899,7 +905,10 @@ mod tests {
         assert_eq!(config.timeout_ms, cloned.timeout_ms);
         assert_eq!(config.interval_secs, cloned.interval_secs);
         assert_eq!(config.max_batch_size, cloned.max_batch_size);
-        assert_eq!(config.active_tree_interval_secs, cloned.active_tree_interval_secs);
+        assert_eq!(
+            config.active_tree_interval_secs,
+            cloned.active_tree_interval_secs
+        );
     }
 
     // Note: We don't test the run() method directly as it contains an infinite loop.

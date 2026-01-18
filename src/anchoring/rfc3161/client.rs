@@ -557,7 +557,9 @@ mod tests {
             timeout_ms: 5000,
             username: None,
             password: None,
-            ca_cert: Some("-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----".to_string()),
+            ca_cert: Some(
+                "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----".to_string(),
+            ),
         };
         let result = Rfc3161Client::new(config);
         assert!(result.is_ok());

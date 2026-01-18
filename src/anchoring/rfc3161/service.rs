@@ -165,7 +165,11 @@ mod tests {
             Ok(self.response.clone())
         }
 
-        fn verify(&self, _response: &TsaResponse, _expected_hash: &[u8; 32]) -> Result<(), AnchorError> {
+        fn verify(
+            &self,
+            _response: &TsaResponse,
+            _expected_hash: &[u8; 32],
+        ) -> Result<(), AnchorError> {
             Ok(())
         }
     }

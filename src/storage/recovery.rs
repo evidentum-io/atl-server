@@ -614,17 +614,19 @@ mod tests {
 
         // Insert closed trees first (data_tree_index 0, 1, 2)
         for i in 0..3 {
+            let origin_id = [(i + 1) as u8; 32];
+            let root_hash = [(i + 1) as u8; 32];
             conn.execute(
                 "INSERT INTO trees (origin_id, status, start_size, end_size, root_hash, created_at, closed_at, data_tree_index)
                  VALUES (?1, 'pending_bitcoin', ?2, ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params![
-                    &[(i + 1) as u8; 32],
+                    &origin_id,
                     i * 100,
                     (i + 1) * 100,
-                    &[(i + 1) as u8; 32],
+                    &root_hash,
                     now,
                     now + ((i + 1) * 100),
-                    i as i64,
+                    i,
                 ],
             )
             .unwrap();

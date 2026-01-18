@@ -109,7 +109,9 @@ mod tests {
     #[cfg(feature = "ots")]
     use crate::error::{ServerError, StorageError};
     #[cfg(feature = "ots")]
-    use crate::traits::{AppendParams, BatchResult, ConsistencyProof, Entry, InclusionProof, TreeHead, Storage};
+    use crate::traits::{
+        AppendParams, BatchResult, ConsistencyProof, Entry, InclusionProof, Storage, TreeHead,
+    };
     #[cfg(feature = "ots")]
     use async_trait::async_trait;
     #[cfg(feature = "ots")]
@@ -140,7 +142,10 @@ mod tests {
     #[cfg(feature = "ots")]
     #[async_trait]
     impl Storage for MockStorage {
-        async fn append_batch(&self, _params: Vec<AppendParams>) -> Result<BatchResult, StorageError> {
+        async fn append_batch(
+            &self,
+            _params: Vec<AppendParams>,
+        ) -> Result<BatchResult, StorageError> {
             unimplemented!()
         }
 
@@ -165,18 +170,31 @@ mod tests {
         }
 
         fn get_entry(&self, _id: &Uuid) -> crate::error::ServerResult<Entry> {
-            Err(ServerError::Storage(StorageError::Database("not found".to_string())))
+            Err(ServerError::Storage(StorageError::Database(
+                "not found".to_string(),
+            )))
         }
 
-        fn get_inclusion_proof(&self, _entry_id: &Uuid, _tree_size: Option<u64>) -> crate::error::ServerResult<InclusionProof> {
+        fn get_inclusion_proof(
+            &self,
+            _entry_id: &Uuid,
+            _tree_size: Option<u64>,
+        ) -> crate::error::ServerResult<InclusionProof> {
             unimplemented!()
         }
 
-        fn get_consistency_proof(&self, _from_size: u64, _to_size: u64) -> crate::error::ServerResult<ConsistencyProof> {
+        fn get_consistency_proof(
+            &self,
+            _from_size: u64,
+            _to_size: u64,
+        ) -> crate::error::ServerResult<ConsistencyProof> {
             unimplemented!()
         }
 
-        fn get_anchors(&self, _tree_size: u64) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>> {
+        fn get_anchors(
+            &self,
+            _tree_size: u64,
+        ) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>> {
             Ok(vec![])
         }
 
@@ -184,7 +202,11 @@ mod tests {
             Ok(None)
         }
 
-        fn get_anchors_covering(&self, _target_tree_size: u64, _limit: usize) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>> {
+        fn get_anchors_covering(
+            &self,
+            _target_tree_size: u64,
+            _limit: usize,
+        ) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>> {
             Ok(vec![])
         }
 
@@ -713,7 +735,10 @@ mod tests {
 
         #[async_trait]
         impl Storage for FailingStorage {
-            async fn append_batch(&self, _params: Vec<AppendParams>) -> Result<BatchResult, StorageError> {
+            async fn append_batch(
+                &self,
+                _params: Vec<AppendParams>,
+            ) -> Result<BatchResult, StorageError> {
                 unimplemented!()
             }
 
@@ -738,18 +763,31 @@ mod tests {
             }
 
             fn get_entry(&self, _id: &Uuid) -> crate::error::ServerResult<Entry> {
-                Err(ServerError::Storage(StorageError::Database("not found".to_string())))
+                Err(ServerError::Storage(StorageError::Database(
+                    "not found".to_string(),
+                )))
             }
 
-            fn get_inclusion_proof(&self, _entry_id: &Uuid, _tree_size: Option<u64>) -> crate::error::ServerResult<InclusionProof> {
+            fn get_inclusion_proof(
+                &self,
+                _entry_id: &Uuid,
+                _tree_size: Option<u64>,
+            ) -> crate::error::ServerResult<InclusionProof> {
                 unimplemented!()
             }
 
-            fn get_consistency_proof(&self, _from_size: u64, _to_size: u64) -> crate::error::ServerResult<ConsistencyProof> {
+            fn get_consistency_proof(
+                &self,
+                _from_size: u64,
+                _to_size: u64,
+            ) -> crate::error::ServerResult<ConsistencyProof> {
                 unimplemented!()
             }
 
-            fn get_anchors(&self, _tree_size: u64) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>> {
+            fn get_anchors(
+                &self,
+                _tree_size: u64,
+            ) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>> {
                 Ok(vec![])
             }
 
@@ -757,7 +795,11 @@ mod tests {
                 Ok(None)
             }
 
-            fn get_anchors_covering(&self, _target_tree_size: u64, _limit: usize) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>> {
+            fn get_anchors_covering(
+                &self,
+                _target_tree_size: u64,
+                _limit: usize,
+            ) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>> {
                 Ok(vec![])
             }
 
@@ -765,8 +807,13 @@ mod tests {
                 Ok([0u8; 32])
             }
 
-            fn get_super_root(&self, _super_tree_size: u64) -> crate::error::ServerResult<[u8; 32]> {
-                Err(ServerError::Storage(StorageError::Database("intentional failure".to_string())))
+            fn get_super_root(
+                &self,
+                _super_tree_size: u64,
+            ) -> crate::error::ServerResult<[u8; 32]> {
+                Err(ServerError::Storage(StorageError::Database(
+                    "intentional failure".to_string(),
+                )))
             }
 
             fn is_initialized(&self) -> bool {
@@ -903,7 +950,10 @@ mod tests {
 
         #[async_trait]
         impl Storage for FailingStorage {
-            async fn append_batch(&self, _params: Vec<AppendParams>) -> Result<BatchResult, StorageError> {
+            async fn append_batch(
+                &self,
+                _params: Vec<AppendParams>,
+            ) -> Result<BatchResult, StorageError> {
                 unimplemented!()
             }
 
@@ -928,18 +978,31 @@ mod tests {
             }
 
             fn get_entry(&self, _id: &Uuid) -> crate::error::ServerResult<Entry> {
-                Err(ServerError::Storage(StorageError::Database("not found".to_string())))
+                Err(ServerError::Storage(StorageError::Database(
+                    "not found".to_string(),
+                )))
             }
 
-            fn get_inclusion_proof(&self, _entry_id: &Uuid, _tree_size: Option<u64>) -> crate::error::ServerResult<InclusionProof> {
+            fn get_inclusion_proof(
+                &self,
+                _entry_id: &Uuid,
+                _tree_size: Option<u64>,
+            ) -> crate::error::ServerResult<InclusionProof> {
                 unimplemented!()
             }
 
-            fn get_consistency_proof(&self, _from_size: u64, _to_size: u64) -> crate::error::ServerResult<ConsistencyProof> {
+            fn get_consistency_proof(
+                &self,
+                _from_size: u64,
+                _to_size: u64,
+            ) -> crate::error::ServerResult<ConsistencyProof> {
                 unimplemented!()
             }
 
-            fn get_anchors(&self, _tree_size: u64) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>> {
+            fn get_anchors(
+                &self,
+                _tree_size: u64,
+            ) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>> {
                 Ok(vec![])
             }
 
@@ -947,7 +1010,11 @@ mod tests {
                 Ok(None)
             }
 
-            fn get_anchors_covering(&self, _target_tree_size: u64, _limit: usize) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>> {
+            fn get_anchors_covering(
+                &self,
+                _target_tree_size: u64,
+                _limit: usize,
+            ) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>> {
                 Ok(vec![])
             }
 
@@ -955,8 +1022,13 @@ mod tests {
                 Ok([0u8; 32])
             }
 
-            fn get_super_root(&self, _super_tree_size: u64) -> crate::error::ServerResult<[u8; 32]> {
-                Err(ServerError::Storage(StorageError::Database("fail".to_string())))
+            fn get_super_root(
+                &self,
+                _super_tree_size: u64,
+            ) -> crate::error::ServerResult<[u8; 32]> {
+                Err(ServerError::Storage(StorageError::Database(
+                    "fail".to_string(),
+                )))
             }
 
             fn is_initialized(&self) -> bool {
@@ -1226,7 +1298,10 @@ mod tests {
 
         #[async_trait]
         impl Storage for FailingSubmitStorage {
-            async fn append_batch(&self, _params: Vec<AppendParams>) -> Result<BatchResult, StorageError> {
+            async fn append_batch(
+                &self,
+                _params: Vec<AppendParams>,
+            ) -> Result<BatchResult, StorageError> {
                 unimplemented!()
             }
 
@@ -1251,18 +1326,31 @@ mod tests {
             }
 
             fn get_entry(&self, _id: &Uuid) -> crate::error::ServerResult<Entry> {
-                Err(ServerError::Storage(StorageError::Database("not found".to_string())))
+                Err(ServerError::Storage(StorageError::Database(
+                    "not found".to_string(),
+                )))
             }
 
-            fn get_inclusion_proof(&self, _entry_id: &Uuid, _tree_size: Option<u64>) -> crate::error::ServerResult<InclusionProof> {
+            fn get_inclusion_proof(
+                &self,
+                _entry_id: &Uuid,
+                _tree_size: Option<u64>,
+            ) -> crate::error::ServerResult<InclusionProof> {
                 unimplemented!()
             }
 
-            fn get_consistency_proof(&self, _from_size: u64, _to_size: u64) -> crate::error::ServerResult<ConsistencyProof> {
+            fn get_consistency_proof(
+                &self,
+                _from_size: u64,
+                _to_size: u64,
+            ) -> crate::error::ServerResult<ConsistencyProof> {
                 unimplemented!()
             }
 
-            fn get_anchors(&self, _tree_size: u64) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>> {
+            fn get_anchors(
+                &self,
+                _tree_size: u64,
+            ) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>> {
                 Ok(vec![])
             }
 
@@ -1270,7 +1358,11 @@ mod tests {
                 Ok(None)
             }
 
-            fn get_anchors_covering(&self, _target_tree_size: u64, _limit: usize) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>> {
+            fn get_anchors_covering(
+                &self,
+                _target_tree_size: u64,
+                _limit: usize,
+            ) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>> {
                 Ok(vec![])
             }
 
@@ -1278,8 +1370,13 @@ mod tests {
                 Ok([0u8; 32])
             }
 
-            fn get_super_root(&self, _super_tree_size: u64) -> crate::error::ServerResult<[u8; 32]> {
-                Err(ServerError::Storage(StorageError::Database("submit will fail".to_string())))
+            fn get_super_root(
+                &self,
+                _super_tree_size: u64,
+            ) -> crate::error::ServerResult<[u8; 32]> {
+                Err(ServerError::Storage(StorageError::Database(
+                    "submit will fail".to_string(),
+                )))
             }
 
             fn is_initialized(&self) -> bool {
@@ -1679,7 +1776,10 @@ mod tests {
 
         #[async_trait]
         impl Storage for BrokenSubmitStorage {
-            async fn append_batch(&self, _params: Vec<AppendParams>) -> Result<BatchResult, StorageError> {
+            async fn append_batch(
+                &self,
+                _params: Vec<AppendParams>,
+            ) -> Result<BatchResult, StorageError> {
                 unimplemented!()
             }
 
@@ -1704,18 +1804,31 @@ mod tests {
             }
 
             fn get_entry(&self, _id: &Uuid) -> crate::error::ServerResult<Entry> {
-                Err(ServerError::Storage(StorageError::Database("not found".to_string())))
+                Err(ServerError::Storage(StorageError::Database(
+                    "not found".to_string(),
+                )))
             }
 
-            fn get_inclusion_proof(&self, _entry_id: &Uuid, _tree_size: Option<u64>) -> crate::error::ServerResult<InclusionProof> {
+            fn get_inclusion_proof(
+                &self,
+                _entry_id: &Uuid,
+                _tree_size: Option<u64>,
+            ) -> crate::error::ServerResult<InclusionProof> {
                 unimplemented!()
             }
 
-            fn get_consistency_proof(&self, _from_size: u64, _to_size: u64) -> crate::error::ServerResult<ConsistencyProof> {
+            fn get_consistency_proof(
+                &self,
+                _from_size: u64,
+                _to_size: u64,
+            ) -> crate::error::ServerResult<ConsistencyProof> {
                 unimplemented!()
             }
 
-            fn get_anchors(&self, _tree_size: u64) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>> {
+            fn get_anchors(
+                &self,
+                _tree_size: u64,
+            ) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>> {
                 Ok(vec![])
             }
 
@@ -1723,7 +1836,11 @@ mod tests {
                 Ok(None)
             }
 
-            fn get_anchors_covering(&self, _target_tree_size: u64, _limit: usize) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>> {
+            fn get_anchors_covering(
+                &self,
+                _target_tree_size: u64,
+                _limit: usize,
+            ) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>> {
                 Ok(vec![])
             }
 
@@ -1731,8 +1848,13 @@ mod tests {
                 Ok([0u8; 32])
             }
 
-            fn get_super_root(&self, _super_tree_size: u64) -> crate::error::ServerResult<[u8; 32]> {
-                Err(ServerError::Storage(StorageError::Database("submit broken".to_string())))
+            fn get_super_root(
+                &self,
+                _super_tree_size: u64,
+            ) -> crate::error::ServerResult<[u8; 32]> {
+                Err(ServerError::Storage(StorageError::Database(
+                    "submit broken".to_string(),
+                )))
             }
 
             fn is_initialized(&self) -> bool {

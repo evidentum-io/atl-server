@@ -111,8 +111,8 @@ mod tests {
     use crate::anchoring::ots::{OtsClient, UpgradeResult};
     use crate::error::{ServerError, StorageError};
     use crate::traits::{
-        Anchor, AppendParams, BatchResult, ConsistencyProof, Entry, InclusionProof,
-        TreeHead, Storage,
+        Anchor, AppendParams, BatchResult, ConsistencyProof, Entry, InclusionProof, Storage,
+        TreeHead,
     };
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -215,10 +215,7 @@ mod tests {
             unimplemented!()
         }
 
-        fn get_anchors(
-            &self,
-            _tree_size: u64,
-        ) -> crate::error::ServerResult<Vec<Anchor>> {
+        fn get_anchors(&self, _tree_size: u64) -> crate::error::ServerResult<Vec<Anchor>> {
             Ok(vec![])
         }
 
@@ -324,9 +321,9 @@ mod tests {
         }
 
         let storage: Arc<dyn Storage> = Arc::new(MockStorage::new([2u8; 32]));
-        let client: Arc<dyn OtsClient> = Arc::new(MockOtsClient::new_error(
-            AnchorError::Network("timeout".to_string()),
-        ));
+        let client: Arc<dyn OtsClient> = Arc::new(MockOtsClient::new_error(AnchorError::Network(
+            "timeout".to_string(),
+        )));
 
         let result = submit_unanchored_trees(&index, &storage, &client, 100).await;
         assert!(result.is_ok()); // Should not fail, just log warning
@@ -501,10 +498,7 @@ mod tests {
                 unimplemented!()
             }
 
-            fn get_anchors(
-                &self,
-                _tree_size: u64,
-            ) -> crate::error::ServerResult<Vec<Anchor>> {
+            fn get_anchors(&self, _tree_size: u64) -> crate::error::ServerResult<Vec<Anchor>> {
                 Ok(vec![])
             }
 
@@ -699,9 +693,9 @@ mod tests {
         }
 
         let storage: Arc<dyn Storage> = Arc::new(MockStorage::new([3u8; 32]));
-        let client: Arc<dyn OtsClient> = Arc::new(MockOtsClient::new_error(
-            AnchorError::Network("connection refused".to_string()),
-        ));
+        let client: Arc<dyn OtsClient> = Arc::new(MockOtsClient::new_error(AnchorError::Network(
+            "connection refused".to_string(),
+        )));
 
         let result = submit_unanchored_trees(&index, &storage, &client, 100).await;
         assert!(result.is_ok()); // Function doesn't propagate OTS errors
@@ -816,7 +810,8 @@ mod tests {
         {
             let idx = index.lock().await;
             idx.set_super_tree_size(u64::MAX).unwrap();
-            idx.set_last_ots_submitted_super_tree_size(u64::MAX - 1).unwrap();
+            idx.set_last_ots_submitted_super_tree_size(u64::MAX - 1)
+                .unwrap();
         }
 
         let storage: Arc<dyn Storage> = Arc::new(MockStorage::new([8u8; 32]));
@@ -935,10 +930,11 @@ mod tests {
             idx.set_last_ots_submitted_super_tree_size(0).unwrap();
         }
 
-        let super_root = [0x12u8, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
-                          0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
-                          0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11,
-                          0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99];
+        let super_root = [
+            0x12u8, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+            0x77, 0x88, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
+            0x66, 0x77, 0x88, 0x99,
+        ];
         let storage: Arc<dyn Storage> = Arc::new(MockStorage::new(super_root));
         let client: Arc<dyn OtsClient> = Arc::new(MockOtsClient::new_success());
 
@@ -1269,7 +1265,8 @@ mod tests {
         {
             let idx = index.lock().await;
             idx.set_super_tree_size(u64::MAX).unwrap();
-            idx.set_last_ots_submitted_super_tree_size(u64::MAX).unwrap();
+            idx.set_last_ots_submitted_super_tree_size(u64::MAX)
+                .unwrap();
         }
 
         let storage: Arc<dyn Storage> = Arc::new(MockStorage::new([22u8; 32]));
@@ -1292,7 +1289,10 @@ mod tests {
         impl OtsClient for MockOtsClientSpecialProof {
             async fn submit(&self, _hash: &[u8; 32]) -> Result<(String, Vec<u8>), AnchorError> {
                 // Return proof with various byte patterns
-                Ok(("http://test.com".to_string(), vec![0x00, 0xFF, 0x80, 0x7F, 0x01]))
+                Ok((
+                    "http://test.com".to_string(),
+                    vec![0x00, 0xFF, 0x80, 0x7F, 0x01],
+                ))
             }
 
             async fn upgrade(&self, _proof: &[u8]) -> Result<Option<UpgradeResult>, AnchorError> {

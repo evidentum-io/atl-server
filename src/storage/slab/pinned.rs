@@ -510,7 +510,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("super_tree.slab");
 
-        let slab = PinnedSuperTreeSlab::open_or_create(&path, 1000).unwrap();
+        let _slab = PinnedSuperTreeSlab::open_or_create(&path, 1000).unwrap();
 
         // Try to get root for tree with 0 leaves but request tree_size=1
         // This would require reading leaf at index 0, which doesn't exist

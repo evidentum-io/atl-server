@@ -726,10 +726,7 @@ async fn test_get_inclusion_proof_invalid_index() {
     // Try to get proof for leaf_index >= tree_size
     let result = ProofProvider::get_inclusion_proof(&engine, 10, None).await;
     assert!(result.is_err());
-    assert!(matches!(
-        result.unwrap_err(),
-        StorageError::InvalidIndex(_)
-    ));
+    assert!(matches!(result.unwrap_err(), StorageError::InvalidIndex(_)));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1279,9 +1276,8 @@ async fn test_concurrent_reads() {
         let engine_clone = std::sync::Arc::new(engine.clone_for_test());
         let entry_id = result.entries[i].id;
 
-        let handle = tokio::spawn(async move {
-            Storage::get_entry(&*engine_clone, &entry_id).unwrap()
-        });
+        let handle =
+            tokio::spawn(async move { Storage::get_entry(&*engine_clone, &entry_id).unwrap() });
         handles.push(handle);
     }
 
@@ -1381,7 +1377,9 @@ async fn test_rotate_tree_minimum_size() {
     let head = engine.tree_head();
 
     // Rotate with minimal tree
-    let result = engine.rotate_tree(&origin_id, head.tree_size, &head.root_hash).await;
+    let result = engine
+        .rotate_tree(&origin_id, head.tree_size, &head.root_hash)
+        .await;
 
     // Should succeed
     assert!(result.is_ok());
@@ -1492,7 +1490,8 @@ async fn test_rotate_tree_trait_delegation() {
     let head = engine.tree_head();
 
     // Call via trait (tests the trait delegation)
-    let result = TreeRotator::rotate_tree(&engine, &origin_id, head.tree_size, &head.root_hash).await;
+    let result =
+        TreeRotator::rotate_tree(&engine, &origin_id, head.tree_size, &head.root_hash).await;
 
     assert!(result.is_ok());
     assert_eq!(result.unwrap().data_tree_index, 0);
@@ -1503,7 +1502,7 @@ async fn test_healthy_flag_set_on_initialization() {
     let (engine, _dir) = create_test_engine([1u8; 32]).await;
 
     assert!(engine.is_healthy());
-    assert_eq!(engine.healthy.load(Ordering::Relaxed), true);
+    assert!(engine.healthy.load(Ordering::Relaxed));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1528,7 +1527,7 @@ async fn test_append_batch_calculates_correct_slab_id_and_offset() {
 
     // Append entries that will span slab boundaries
     // Assuming slab_capacity from default config
-    let slab_capacity = engine.config.slab_capacity;
+    let _slab_capacity = engine.config.slab_capacity;
 
     let params: Vec<AppendParams> = (0..10)
         .map(|i| AppendParams {
@@ -1688,7 +1687,9 @@ async fn test_rotate_tree_propagates_database_error() {
     let head = engine.tree_head();
 
     // Normal rotation should succeed
-    let result = engine.rotate_tree(&origin_id, head.tree_size, &head.root_hash).await;
+    let result = engine
+        .rotate_tree(&origin_id, head.tree_size, &head.root_hash)
+        .await;
     assert!(result.is_ok());
 }
 

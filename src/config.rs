@@ -305,7 +305,10 @@ mod tests {
     #[test]
     #[serial]
     fn test_tsa_config_from_env_all_values() {
-        std::env::set_var("ATL_TSA_URLS", "https://tsa1.example.com,https://tsa2.example.com");
+        std::env::set_var(
+            "ATL_TSA_URLS",
+            "https://tsa1.example.com,https://tsa2.example.com",
+        );
         std::env::set_var("ATL_TSA_TIMEOUT_MS", "2000");
         std::env::set_var("ATL_STRICT_TSA", "false");
 

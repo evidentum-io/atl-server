@@ -395,8 +395,14 @@ mod tests {
 
     #[test]
     fn test_status_code_unauthorized_variants() {
-        assert_eq!(ServerError::AuthMissing.status_code(), StatusCode::UNAUTHORIZED);
-        assert_eq!(ServerError::AuthInvalid.status_code(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            ServerError::AuthMissing.status_code(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            ServerError::AuthInvalid.status_code(),
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[test]
@@ -531,7 +537,10 @@ mod tests {
             ServerError::ServiceUnavailable("x".into()).error_code(),
             "SERVICE_UNAVAILABLE"
         );
-        assert_eq!(ServerError::Internal("x".into()).error_code(), "INTERNAL_ERROR");
+        assert_eq!(
+            ServerError::Internal("x".into()).error_code(),
+            "INTERNAL_ERROR"
+        );
         assert_eq!(ServerError::Config("x".into()).error_code(), "CONFIG_ERROR");
     }
 
@@ -778,7 +787,10 @@ mod tests {
             ServerError::UnsupportedContentType("test".into()).to_string(),
             "unsupported content type: test"
         );
-        assert_eq!(ServerError::AuthMissing.to_string(), "authorization required");
+        assert_eq!(
+            ServerError::AuthMissing.to_string(),
+            "authorization required"
+        );
         assert_eq!(
             ServerError::AuthInvalid.to_string(),
             "invalid authorization token"

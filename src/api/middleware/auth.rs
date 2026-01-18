@@ -168,10 +168,7 @@ mod tests {
         let state = create_test_state(Some(vec!["valid-token".to_string()]));
         let app = create_test_router(state);
 
-        let req = Request::builder()
-            .uri("/test")
-            .body(Body::empty())
-            .unwrap();
+        let req = Request::builder().uri("/test").body(Body::empty()).unwrap();
 
         let response = app.oneshot(req).await.unwrap();
 
