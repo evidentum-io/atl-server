@@ -540,4 +540,484 @@ mod tests {
         println!("10K inserts took: {:?}", elapsed);
         assert!(elapsed.as_millis() < 100, "Batch insert took {:?}", elapsed);
     }
+
+    #[test]
+    fn test_get_entry_nonexistent() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+
+        let store = IndexStore::open(&path).unwrap();
+        store.initialize().unwrap();
+
+        let nonexistent_id = uuid::Uuid::new_v4();
+        let result = store.get_entry(&nonexistent_id).unwrap();
+
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_get_entry_by_index_nonexistent() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+
+        let store = IndexStore::open(&path).unwrap();
+        store.initialize().unwrap();
+
+        let result = store.get_entry_by_index(999999).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_get_entry_by_external_id_nonexistent() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+
+        let store = IndexStore::open(&path).unwrap();
+        store.initialize().unwrap();
+
+        let result = store.get_entry_by_external_id("nonexistent-id").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_tree_size_operations() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+
+        let store = IndexStore::open(&path).unwrap();
+        store.initialize().unwrap();
+
+        // Initial size should be 0
+        let initial_size = store.get_tree_size().unwrap();
+        assert_eq!(initial_size, 0);
+
+        // Set size
+        store.set_tree_size(42).unwrap();
+        let new_size = store.get_tree_size().unwrap();
+        assert_eq!(new_size, 42);
+
+        // Update size
+        store.set_tree_size(100).unwrap();
+        let updated_size = store.get_tree_size().unwrap();
+        assert_eq!(updated_size, 100);
+    }
+
+    #[test]
+    fn test_super_genesis_root_operations() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+
+        let store = IndexStore::open(&path).unwrap();
+        store.initialize().unwrap();
+
+        // Initially should be None
+        let initial_root = store.get_super_genesis_root().unwrap();
+        assert!(initial_root.is_none());
+
+        // Set genesis root
+        let test_root = [0xaa; 32];
+        store.set_super_genesis_root(&test_root).unwrap();
+
+        let retrieved_root = store.get_super_genesis_root().unwrap();
+        assert_eq!(retrieved_root, Some(test_root));
+
+        // Try to set again (should be idempotent with INSERT OR IGNORE)
+        let new_root = [0xbb; 32];
+        store.set_super_genesis_root(&new_root).unwrap();
+
+        let final_root = store.get_super_genesis_root().unwrap();
+        // Should still be the first root (INSERT OR IGNORE)
+        assert_eq!(final_root, Some(test_root));
+    }
+
+    #[test]
+    fn test_super_tree_size_operations() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+
+        let store = IndexStore::open(&path).unwrap();
+        store.initialize().unwrap();
+
+        // Initial size should be 0
+        let initial_size = store.get_super_tree_size().unwrap();
+        assert_eq!(initial_size, 0);
+
+        // Set size
+        store.set_super_tree_size(10).unwrap();
+        let new_size = store.get_super_tree_size().unwrap();
+        assert_eq!(new_size, 10);
+
+        // Update size
+        store.set_super_tree_size(50).unwrap();
+        let updated_size = store.get_super_tree_size().unwrap();
+        assert_eq!(updated_size, 50);
+    }
+
+    #[test]
+    fn test_last_ots_submitted_super_tree_size_operations() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+
+        let store = IndexStore::open(&path).unwrap();
+        store.initialize().unwrap();
+
+        // Initial size should be 0
+        let initial_size = store.get_last_ots_submitted_super_tree_size().unwrap();
+        assert_eq!(initial_size, 0);
+
+        // Set size
+        store.set_last_ots_submitted_super_tree_size(25).unwrap();
+        let new_size = store.get_last_ots_submitted_super_tree_size().unwrap();
+        assert_eq!(new_size, 25);
+
+        // Update size
+        store.set_last_ots_submitted_super_tree_size(75).unwrap();
+        let updated_size = store.get_last_ots_submitted_super_tree_size().unwrap();
+        assert_eq!(updated_size, 75);
+    }
+
+    #[test]
+    fn test_entry_with_json_metadata() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+
+        let mut store = IndexStore::open(&path).unwrap();
+        store.initialize().unwrap();
+
+        let tree_id = store.create_active_tree(&[0u8; 32], 0).unwrap();
+
+        let id = uuid::Uuid::new_v4();
+        let entry = BatchInsert {
+            id,
+            leaf_index: 0,
+            slab_id: 1,
+            slab_offset: 0,
+            payload_hash: [1u8; 32],
+            metadata_hash: [2u8; 32],
+            metadata_cleartext: Some(r#"{"key":"value","nested":{"array":[1,2,3]}}"#.to_string()),
+            external_id: Some("test-ext-id".to_string()),
+            tree_id,
+        };
+
+        store.insert_batch(&[entry]).unwrap();
+
+        let retrieved = store.get_entry(&id).unwrap().unwrap();
+        assert!(retrieved.metadata_cleartext.is_some());
+
+        let json = retrieved.metadata_cleartext.unwrap();
+        assert_eq!(json["key"], "value");
+        assert_eq!(json["nested"]["array"][0], 1);
+    }
+
+    #[test]
+    fn test_entry_with_invalid_json_metadata() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+
+        let mut store = IndexStore::open(&path).unwrap();
+        store.initialize().unwrap();
+
+        let tree_id = store.create_active_tree(&[0u8; 32], 0).unwrap();
+
+        let id = uuid::Uuid::new_v4();
+        let entry = BatchInsert {
+            id,
+            leaf_index: 0,
+            slab_id: 1,
+            slab_offset: 0,
+            payload_hash: [1u8; 32],
+            metadata_hash: [2u8; 32],
+            metadata_cleartext: Some("invalid json {".to_string()),
+            external_id: None,
+            tree_id,
+        };
+
+        store.insert_batch(&[entry]).unwrap();
+
+        let retrieved = store.get_entry(&id).unwrap().unwrap();
+        // Invalid JSON should result in None
+        assert!(retrieved.metadata_cleartext.is_none());
+    }
+
+    #[test]
+    fn test_batch_insert_empty() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+
+        let mut store = IndexStore::open(&path).unwrap();
+        store.initialize().unwrap();
+
+        // Empty batch should not error
+        let result = store.insert_batch(&[]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_multiple_entries_same_leaf_index_different_external_ids() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+
+        let mut store = IndexStore::open(&path).unwrap();
+        store.initialize().unwrap();
+
+        let tree_id = store.create_active_tree(&[0u8; 32], 0).unwrap();
+
+        let id1 = uuid::Uuid::new_v4();
+        let id2 = uuid::Uuid::new_v4();
+
+        let entries = vec![
+            BatchInsert {
+                id: id1,
+                leaf_index: 0,
+                slab_id: 1,
+                slab_offset: 0,
+                payload_hash: [1u8; 32],
+                metadata_hash: [2u8; 32],
+                metadata_cleartext: None,
+                external_id: Some("ext-1".to_string()),
+                tree_id,
+            },
+            BatchInsert {
+                id: id2,
+                leaf_index: 1,
+                slab_id: 1,
+                slab_offset: 32,
+                payload_hash: [3u8; 32],
+                metadata_hash: [4u8; 32],
+                metadata_cleartext: None,
+                external_id: Some("ext-2".to_string()),
+                tree_id,
+            },
+        ];
+
+        store.insert_batch(&entries).unwrap();
+
+        // Both should be retrievable
+        let entry1 = store.get_entry_by_external_id("ext-1").unwrap().unwrap();
+        let entry2 = store.get_entry_by_external_id("ext-2").unwrap().unwrap();
+
+        assert_eq!(entry1.id, id1);
+        assert_eq!(entry2.id, id2);
+    }
+
+    #[test]
+    fn test_index_entry_conversion_to_trait_entry() {
+        let index_entry = IndexEntry {
+            id: uuid::Uuid::new_v4(),
+            leaf_index: 42,
+            slab_id: 1,
+            slab_offset: 1344,
+            payload_hash: [5u8; 32],
+            metadata_hash: [6u8; 32],
+            metadata_cleartext: Some(serde_json::json!({"test": true})),
+            external_id: Some("test-ext".to_string()),
+            tree_id: Some(1),
+            created_at: 1234567890,
+        };
+
+        let trait_entry: crate::traits::storage::Entry = index_entry.clone().into();
+
+        assert_eq!(trait_entry.id, index_entry.id);
+        assert_eq!(trait_entry.payload_hash, index_entry.payload_hash);
+        assert_eq!(trait_entry.metadata_hash, index_entry.metadata_hash);
+        assert_eq!(trait_entry.leaf_index, Some(index_entry.leaf_index));
+        assert_eq!(trait_entry.external_id, index_entry.external_id);
+    }
+
+    #[test]
+    fn test_connection_access() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+
+        let store = IndexStore::open(&path).unwrap();
+        store.initialize().unwrap();
+
+        // Test read access
+        let conn_ref = store.connection();
+        let _result: i64 = conn_ref
+            .query_row("SELECT 1", [], |row| row.get(0))
+            .unwrap();
+
+        drop(conn_ref);
+
+        // Test mutable access
+        let conn_mut = store.connection_mut();
+        conn_mut
+            .execute(
+                "INSERT OR REPLACE INTO atl_config (key, value, updated_at) VALUES ('test_key', 'test_value', 0)",
+                [],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn test_migrate_nonexistent_table() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+
+        let store = IndexStore::open(&path).unwrap();
+
+        // Migrate on fresh database should not error
+        let result = store.migrate();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_batch_insert_with_large_external_ids() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+
+        let mut store = IndexStore::open(&path).unwrap();
+        store.initialize().unwrap();
+
+        let tree_id = store.create_active_tree(&[0u8; 32], 0).unwrap();
+
+        let long_external_id = "x".repeat(1000);
+        let id = uuid::Uuid::new_v4();
+
+        let entry = BatchInsert {
+            id,
+            leaf_index: 0,
+            slab_id: 1,
+            slab_offset: 0,
+            payload_hash: [7u8; 32],
+            metadata_hash: [8u8; 32],
+            metadata_cleartext: None,
+            external_id: Some(long_external_id.clone()),
+            tree_id,
+        };
+
+        store.insert_batch(&[entry]).unwrap();
+
+        let retrieved = store
+            .get_entry_by_external_id(&long_external_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retrieved.external_id, Some(long_external_id));
+    }
+
+    #[test]
+    fn test_get_tree_size_after_initialize() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+
+        let store = IndexStore::open(&path).unwrap();
+        store.initialize().unwrap();
+
+        // After initialize, default size should be 0
+        let size = store.get_tree_size().unwrap();
+        assert_eq!(size, 0);
+    }
+
+    #[test]
+    fn test_entry_with_all_fields_populated() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+
+        let mut store = IndexStore::open(&path).unwrap();
+        store.initialize().unwrap();
+
+        let tree_id = store.create_active_tree(&[0u8; 32], 0).unwrap();
+
+        let id = uuid::Uuid::new_v4();
+        let entry = BatchInsert {
+            id,
+            leaf_index: 123,
+            slab_id: 5,
+            slab_offset: 9999,
+            payload_hash: [9u8; 32],
+            metadata_hash: [10u8; 32],
+            metadata_cleartext: Some(r#"{"complete":"data"}"#.to_string()),
+            external_id: Some("full-entry".to_string()),
+            tree_id,
+        };
+
+        store.insert_batch(&[entry]).unwrap();
+
+        let retrieved = store.get_entry(&id).unwrap().unwrap();
+
+        assert_eq!(retrieved.id, id);
+        assert_eq!(retrieved.leaf_index, 123);
+        assert_eq!(retrieved.slab_id, 5);
+        assert_eq!(retrieved.slab_offset, 9999);
+        assert_eq!(retrieved.payload_hash, [9u8; 32]);
+        assert_eq!(retrieved.metadata_hash, [10u8; 32]);
+        assert!(retrieved.metadata_cleartext.is_some());
+        assert_eq!(retrieved.external_id, Some("full-entry".to_string()));
+        assert_eq!(retrieved.tree_id, Some(tree_id));
+        assert!(retrieved.created_at > 0);
+    }
+
+    #[test]
+    fn test_batch_insert_maintains_order() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+
+        let mut store = IndexStore::open(&path).unwrap();
+        store.initialize().unwrap();
+
+        let tree_id = store.create_active_tree(&[0u8; 32], 0).unwrap();
+
+        let entries: Vec<BatchInsert> = (0..10)
+            .map(|i| BatchInsert {
+                id: uuid::Uuid::new_v4(),
+                leaf_index: i,
+                slab_id: 1,
+                slab_offset: i * 32,
+                payload_hash: [i as u8; 32],
+                metadata_hash: [0u8; 32],
+                metadata_cleartext: None,
+                external_id: Some(format!("ext-{}", i)),
+                tree_id,
+            })
+            .collect();
+
+        store.insert_batch(&entries).unwrap();
+
+        // Verify entries can be retrieved in order
+        for i in 0..10 {
+            let entry = store.get_entry_by_index(i).unwrap().unwrap();
+            assert_eq!(entry.leaf_index, i);
+            assert_eq!(entry.external_id, Some(format!("ext-{}", i)));
+        }
+    }
+
+    #[test]
+    fn test_super_genesis_root_hex_encoding() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+
+        let store = IndexStore::open(&path).unwrap();
+        store.initialize().unwrap();
+
+        let test_root = [
+            0xde, 0xad, 0xbe, 0xef, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99,
+            0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+            0xfe, 0xdc, 0xba, 0x98,
+        ];
+
+        store.set_super_genesis_root(&test_root).unwrap();
+
+        let retrieved = store.get_super_genesis_root().unwrap();
+        assert_eq!(retrieved, Some(test_root));
+    }
+
+    #[test]
+    fn test_connection_mut_multiple_operations() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+
+        let store = IndexStore::open(&path).unwrap();
+        store.initialize().unwrap();
+
+        // Perform multiple operations with mutable connection
+        store.set_tree_size(10).unwrap();
+        store.set_super_tree_size(5).unwrap();
+        store.set_last_ots_submitted_super_tree_size(3).unwrap();
+
+        // Verify all operations succeeded
+        assert_eq!(store.get_tree_size().unwrap(), 10);
+        assert_eq!(store.get_super_tree_size().unwrap(), 5);
+        assert_eq!(store.get_last_ots_submitted_super_tree_size().unwrap(), 3);
+    }
 }

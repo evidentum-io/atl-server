@@ -230,4 +230,72 @@ mod tests {
             _ => panic!("Expected Rfc3161 anchor"),
         }
     }
+
+    #[test]
+    fn test_convert_bitcoin_ots_missing_metadata() {
+        let anchor = Anchor {
+            anchor_type: AnchorType::BitcoinOts,
+            target: "super_root".to_string(),
+            anchored_hash: [4u8; 32],
+            tree_size: 0,
+            super_tree_size: Some(15),
+            timestamp: 1_704_067_200_000_000_000,
+            token: vec![17, 18, 19, 20],
+            metadata: serde_json::json!({}),
+        };
+
+        let receipt_anchor = convert_anchor_to_receipt(&anchor);
+
+        match receipt_anchor {
+            ReceiptAnchor::BitcoinOts {
+                target,
+                timestamp,
+                bitcoin_block_height,
+                bitcoin_block_time,
+                ots_proof,
+                ..
+            } => {
+                assert_eq!(target, "super_root");
+                assert_eq!(bitcoin_block_height, 0);
+                assert_eq!(bitcoin_block_time, "");
+                assert!(timestamp.starts_with("2024-01-01"));
+                assert!(ots_proof.starts_with("base64:"));
+            }
+            _ => panic!("Expected BitcoinOts anchor"),
+        }
+    }
+
+    #[test]
+    fn test_convert_other_anchor_type() {
+        let anchor = Anchor {
+            anchor_type: AnchorType::Other,
+            target: "custom_target".to_string(),
+            anchored_hash: [5u8; 32],
+            tree_size: 300,
+            super_tree_size: None,
+            timestamp: 1_704_067_200_000_000_000,
+            token: vec![21, 22, 23, 24],
+            metadata: serde_json::json!({
+                "tsa_url": "https://custom.tsa.org"
+            }),
+        };
+
+        let receipt_anchor = convert_anchor_to_receipt(&anchor);
+
+        match receipt_anchor {
+            ReceiptAnchor::Rfc3161 {
+                target,
+                tsa_url,
+                timestamp,
+                token_der,
+                ..
+            } => {
+                assert_eq!(target, "custom_target");
+                assert_eq!(tsa_url, "https://custom.tsa.org");
+                assert!(timestamp.starts_with("2024-01-01"));
+                assert!(token_der.starts_with("base64:"));
+            }
+            _ => panic!("Expected Rfc3161 anchor (fallback for Other type)"),
+        }
+    }
 }

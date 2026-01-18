@@ -120,3 +120,158 @@ impl Sequencer {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    use crate::error::StorageError;
+    use crate::traits::{
+        AppendParams, BatchResult, ConsistencyProof, Entry, EntryResult, InclusionProof, TreeHead,
+    };
+
+    /// Minimal mock storage for testing Sequencer construction
+    struct MockStorage;
+
+    #[async_trait]
+    impl Storage for MockStorage {
+        async fn append_batch(
+            &self,
+            params: Vec<AppendParams>,
+        ) -> Result<BatchResult, StorageError> {
+            Ok(BatchResult {
+                entries: params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| EntryResult {
+                        id: Uuid::new_v4(),
+                        leaf_index: i as u64,
+                        leaf_hash: [0u8; 32],
+                    })
+                    .collect(),
+                tree_head: TreeHead {
+                    tree_size: params.len() as u64,
+                    root_hash: [0u8; 32],
+                    origin: [0u8; 32],
+                },
+                committed_at: Utc::now(),
+            })
+        }
+
+        async fn flush(&self) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        fn tree_head(&self) -> TreeHead {
+            TreeHead {
+                tree_size: 0,
+                root_hash: [0u8; 32],
+                origin: [0u8; 32],
+            }
+        }
+
+        fn origin_id(&self) -> [u8; 32] {
+            [0u8; 32]
+        }
+
+        fn is_healthy(&self) -> bool {
+            true
+        }
+
+        fn get_entry(&self, _id: &Uuid) -> crate::error::ServerResult<Entry> {
+            Err(crate::error::ServerError::EntryNotFound("mock".into()))
+        }
+
+        fn get_inclusion_proof(
+            &self,
+            _entry_id: &Uuid,
+            _tree_size: Option<u64>,
+        ) -> crate::error::ServerResult<InclusionProof> {
+            Err(crate::error::ServerError::EntryNotFound("mock".into()))
+        }
+
+        fn get_consistency_proof(
+            &self,
+            _from_size: u64,
+            _to_size: u64,
+        ) -> crate::error::ServerResult<ConsistencyProof> {
+            Err(crate::error::ServerError::InvalidArgument("mock".into()))
+        }
+
+        fn get_anchors(
+            &self,
+            _tree_size: u64,
+        ) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>> {
+            Ok(vec![])
+        }
+
+        fn get_latest_anchored_size(&self) -> crate::error::ServerResult<Option<u64>> {
+            Ok(None)
+        }
+
+        fn get_anchors_covering(
+            &self,
+            _target_tree_size: u64,
+            _limit: usize,
+        ) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>> {
+            Ok(vec![])
+        }
+
+        fn get_root_at_size(&self, _tree_size: u64) -> crate::error::ServerResult<[u8; 32]> {
+            Ok([0u8; 32])
+        }
+
+        fn get_super_root(&self, _super_tree_size: u64) -> crate::error::ServerResult<[u8; 32]> {
+            Ok([0u8; 32])
+        }
+
+        fn is_initialized(&self) -> bool {
+            true
+        }
+    }
+
+    fn create_mock_storage() -> Arc<dyn Storage> {
+        Arc::new(MockStorage)
+    }
+
+    #[test]
+    fn test_sequencer_new_creates_valid_instance() {
+        let storage = create_mock_storage();
+        let config = SequencerConfig::default();
+
+        let (sequencer, _handle) = Sequencer::new(storage, config.clone());
+
+        assert_eq!(sequencer.config.batch_size, config.batch_size);
+        assert_eq!(sequencer.config.batch_timeout_ms, config.batch_timeout_ms);
+        assert_eq!(sequencer.config.buffer_size, config.buffer_size);
+    }
+
+    #[test]
+    fn test_sequencer_handle_is_cloneable() {
+        let storage = create_mock_storage();
+        let config = SequencerConfig::default();
+
+        let (_sequencer, handle) = Sequencer::new(storage, config);
+        let _handle2 = handle.clone();
+    }
+
+    #[test]
+    fn test_sequencer_with_custom_config() {
+        let storage = create_mock_storage();
+        let config = SequencerConfig {
+            batch_size: 50,
+            batch_timeout_ms: 200,
+            buffer_size: 500,
+            ..Default::default()
+        };
+
+        let (sequencer, _handle) = Sequencer::new(storage, config);
+
+        assert_eq!(sequencer.config.batch_size, 50);
+        assert_eq!(sequencer.config.batch_timeout_ms, 200);
+        assert_eq!(sequencer.config.buffer_size, 500);
+    }
+}

@@ -148,3 +148,234 @@ impl ChainIndex {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::store::ChainTreeStatus;
+    use super::*;
+    use rusqlite::Connection;
+
+    fn create_test_chain_index() -> ChainIndex {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE trees (
+                tree_id INTEGER PRIMARY KEY,
+                origin_id BLOB NOT NULL,
+                root_hash BLOB,
+                tree_size INTEGER,
+                data_tree_index INTEGER,
+                status TEXT,
+                bitcoin_txid TEXT,
+                archive_location TEXT,
+                created_at TEXT,
+                closed_at TEXT,
+                archived_at TEXT
+            )",
+            [],
+        )
+        .unwrap();
+        ChainIndex { conn }
+    }
+
+    fn insert_tree(index: &ChainIndex, tree_id: i64, data_tree_index: u64) -> rusqlite::Result<()> {
+        index.conn.execute(
+            "INSERT INTO trees (tree_id, origin_id, root_hash, tree_size, data_tree_index, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                tree_id,
+                &[0u8; 32],
+                &[0u8; 32],
+                100i64,
+                data_tree_index as i64,
+                "archived",
+                "2024-01-01T00:00:00Z"
+            ],
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_verify_chain_link_valid() {
+        let _index = create_test_chain_index();
+        let tree_prev = ChainTreeRecord {
+            tree_id: 1,
+            origin_id: [0u8; 32],
+            root_hash: [0u8; 32],
+            tree_size: 100,
+            data_tree_index: 0,
+            status: ChainTreeStatus::Archived,
+            bitcoin_txid: None,
+            archive_location: None,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            closed_at: Some("2024-01-01T00:00:00Z".to_string()),
+            archived_at: Some("2024-01-01T00:00:00Z".to_string()),
+        };
+
+        let tree_next = ChainTreeRecord {
+            tree_id: 2,
+            origin_id: [0u8; 32],
+            root_hash: [0u8; 32],
+            tree_size: 200,
+            data_tree_index: 1,
+            status: ChainTreeStatus::Archived,
+            bitcoin_txid: None,
+            archive_location: None,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            closed_at: Some("2024-01-01T00:00:00Z".to_string()),
+            archived_at: Some("2024-01-01T00:00:00Z".to_string()),
+        };
+
+        let result = ChainIndex::verify_chain_link(&_index, &tree_prev, &tree_next);
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+    }
+
+    #[test]
+    fn test_verify_chain_link_invalid_sequence() {
+        let _index = create_test_chain_index();
+        let tree_prev = ChainTreeRecord {
+            tree_id: 1,
+            origin_id: [0u8; 32],
+            root_hash: [0u8; 32],
+            tree_size: 100,
+            data_tree_index: 0,
+            status: ChainTreeStatus::Archived,
+            bitcoin_txid: None,
+            archive_location: None,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            closed_at: Some("2024-01-01T00:00:00Z".to_string()),
+            archived_at: Some("2024-01-01T00:00:00Z".to_string()),
+        };
+
+        let tree_next = ChainTreeRecord {
+            tree_id: 2,
+            origin_id: [0u8; 32],
+            root_hash: [0u8; 32],
+            tree_size: 200,
+            data_tree_index: 5, // Gap in sequence
+            status: ChainTreeStatus::Archived,
+            bitcoin_txid: None,
+            archive_location: None,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            closed_at: Some("2024-01-01T00:00:00Z".to_string()),
+            archived_at: Some("2024-01-01T00:00:00Z".to_string()),
+        };
+
+        let result = ChainIndex::verify_chain_link(&_index, &tree_prev, &tree_next);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Data tree index mismatch"));
+    }
+
+    #[test]
+    fn test_verify_full_chain_empty() {
+        let index = create_test_chain_index();
+        let result = index.verify_full_chain().unwrap();
+        assert!(result.valid);
+        assert_eq!(result.verified_trees, 0);
+        assert!(result.first_invalid_tree.is_none());
+    }
+
+    #[test]
+    fn test_verify_full_chain_valid() {
+        let index = create_test_chain_index();
+        insert_tree(&index, 1, 0).unwrap();
+        insert_tree(&index, 2, 1).unwrap();
+        insert_tree(&index, 3, 2).unwrap();
+
+        let result = index.verify_full_chain().unwrap();
+        assert!(result.valid);
+        assert_eq!(result.verified_trees, 3);
+        assert!(result.first_invalid_tree.is_none());
+    }
+
+    #[test]
+    fn test_verify_full_chain_first_not_zero() {
+        let index = create_test_chain_index();
+        insert_tree(&index, 1, 5).unwrap(); // First tree not at index 0
+
+        let result = index.verify_full_chain().unwrap();
+        assert!(!result.valid);
+        assert_eq!(result.verified_trees, 0);
+        assert_eq!(result.first_invalid_tree, Some(1));
+        assert!(result
+            .error_message
+            .unwrap()
+            .contains("First tree should have data_tree_index = 0"));
+    }
+
+    #[test]
+    fn test_verify_full_chain_broken_link() {
+        let index = create_test_chain_index();
+        insert_tree(&index, 1, 0).unwrap();
+        insert_tree(&index, 2, 1).unwrap();
+        insert_tree(&index, 3, 5).unwrap(); // Gap
+
+        let result = index.verify_full_chain().unwrap();
+        assert!(!result.valid);
+        assert_eq!(result.verified_trees, 2);
+        assert_eq!(result.first_invalid_tree, Some(3));
+        assert!(result.error_message.is_some());
+    }
+
+    #[test]
+    fn test_verify_chain_up_to_tree_not_found() {
+        let index = create_test_chain_index();
+        let result = index.verify_chain_up_to(999).unwrap();
+        assert!(!result.valid);
+        assert_eq!(result.verified_trees, 0);
+        assert_eq!(result.first_invalid_tree, Some(999));
+        assert!(result.error_message.unwrap().contains("Tree not found"));
+    }
+
+    #[test]
+    fn test_verify_chain_up_to_valid() {
+        let index = create_test_chain_index();
+        insert_tree(&index, 1, 0).unwrap();
+        insert_tree(&index, 2, 1).unwrap();
+        insert_tree(&index, 3, 2).unwrap();
+
+        let result = index.verify_chain_up_to(2).unwrap();
+        assert!(result.valid);
+        assert_eq!(result.verified_trees, 2);
+        assert!(result.first_invalid_tree.is_none());
+    }
+
+    #[test]
+    fn test_verify_chain_up_to_broken() {
+        let index = create_test_chain_index();
+        insert_tree(&index, 1, 0).unwrap();
+        insert_tree(&index, 2, 5).unwrap(); // Gap
+
+        let result = index.verify_chain_up_to(2).unwrap();
+        assert!(!result.valid);
+        assert_eq!(result.verified_trees, 1);
+        assert_eq!(result.first_invalid_tree, Some(2));
+    }
+
+    #[test]
+    fn test_verification_result_clone() {
+        let result = ChainVerificationResult {
+            valid: true,
+            verified_trees: 5,
+            first_invalid_tree: None,
+            error_message: None,
+        };
+        let cloned = result.clone();
+        assert_eq!(cloned.valid, result.valid);
+        assert_eq!(cloned.verified_trees, result.verified_trees);
+    }
+
+    #[test]
+    fn test_verification_result_debug() {
+        let result = ChainVerificationResult {
+            valid: false,
+            verified_trees: 2,
+            first_invalid_tree: Some(3),
+            error_message: Some("test error".to_string()),
+        };
+        let debug_str = format!("{:?}", result);
+        assert!(debug_str.contains("ChainVerificationResult"));
+        assert!(debug_str.contains("valid"));
+        assert!(debug_str.contains("false"));
+    }
+}

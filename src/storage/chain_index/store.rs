@@ -537,4 +537,531 @@ mod tests {
             "Should fail due to unique constraint on data_tree_index"
         );
     }
+
+    #[test]
+    fn test_get_tree_nonexistent() {
+        let dir = tempdir().unwrap();
+        let ci = ChainIndex::open(&dir.path().join("ci.db")).unwrap();
+
+        let tree = ci.get_tree(999).unwrap();
+        assert!(tree.is_none());
+    }
+
+    #[test]
+    fn test_get_tree_by_index_nonexistent() {
+        let dir = tempdir().unwrap();
+        let ci = ChainIndex::open(&dir.path().join("ci.db")).unwrap();
+
+        let tree = ci.get_tree_by_index(999).unwrap();
+        assert!(tree.is_none());
+    }
+
+    #[test]
+    fn test_get_first_tree_empty_db() {
+        let dir = tempdir().unwrap();
+        let ci = ChainIndex::open(&dir.path().join("ci.db")).unwrap();
+
+        let tree = ci.get_first_tree().unwrap();
+        assert!(tree.is_none());
+    }
+
+    #[test]
+    fn test_get_first_tree_multiple_trees() {
+        let dir = tempdir().unwrap();
+        let ci = ChainIndex::open(&dir.path().join("ci.db")).unwrap();
+
+        let m1 = ClosedTreeMetadata {
+            tree_id: 1,
+            origin_id: [0xaa; 32],
+            root_hash: [0x11; 32],
+            tree_size: 100,
+            closed_at: 1_000_000_000_000,
+            data_tree_index: 0,
+        };
+        ci.record_closed_tree(&m1).unwrap();
+
+        let m2 = ClosedTreeMetadata {
+            tree_id: 2,
+            origin_id: [0xbb; 32],
+            root_hash: [0x22; 32],
+            tree_size: 200,
+            closed_at: 2_000_000_000_000,
+            data_tree_index: 1,
+        };
+        ci.record_closed_tree(&m2).unwrap();
+
+        let first = ci.get_first_tree().unwrap().unwrap();
+        assert_eq!(first.data_tree_index, 0);
+        assert_eq!(first.tree_id, 1);
+    }
+
+    #[test]
+    fn test_get_latest_tree_empty_db() {
+        let dir = tempdir().unwrap();
+        let ci = ChainIndex::open(&dir.path().join("ci.db")).unwrap();
+
+        let tree = ci.get_latest_tree().unwrap();
+        assert!(tree.is_none());
+    }
+
+    #[test]
+    fn test_get_latest_tree_multiple_trees() {
+        let dir = tempdir().unwrap();
+        let ci = ChainIndex::open(&dir.path().join("ci.db")).unwrap();
+
+        for i in 0..5 {
+            let metadata = ClosedTreeMetadata {
+                tree_id: (i + 1) as i64,
+                origin_id: [0xaa; 32],
+                root_hash: [i as u8; 32],
+                tree_size: (i + 1) * 100,
+                closed_at: ((i + 1) * 1_000_000_000_000) as i64,
+                data_tree_index: i,
+            };
+            ci.record_closed_tree(&metadata).unwrap();
+        }
+
+        let latest = ci.get_latest_tree().unwrap().unwrap();
+        assert_eq!(latest.data_tree_index, 4);
+        assert_eq!(latest.tree_id, 5);
+    }
+
+    #[test]
+    fn test_count_trees_empty() {
+        let dir = tempdir().unwrap();
+        let ci = ChainIndex::open(&dir.path().join("ci.db")).unwrap();
+
+        assert_eq!(ci.count_trees().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_count_trees_multiple() {
+        let dir = tempdir().unwrap();
+        let ci = ChainIndex::open(&dir.path().join("ci.db")).unwrap();
+
+        for i in 0..7 {
+            let metadata = ClosedTreeMetadata {
+                tree_id: (i + 1) as i64,
+                origin_id: [0xaa; 32],
+                root_hash: [i as u8; 32],
+                tree_size: (i + 1) * 50,
+                closed_at: ((i + 1) * 1_000_000_000_000) as i64,
+                data_tree_index: i,
+            };
+            ci.record_closed_tree(&metadata).unwrap();
+        }
+
+        assert_eq!(ci.count_trees().unwrap(), 7);
+    }
+
+    #[test]
+    fn test_get_all_trees_empty() {
+        let dir = tempdir().unwrap();
+        let ci = ChainIndex::open(&dir.path().join("ci.db")).unwrap();
+
+        let trees = ci.get_all_trees().unwrap();
+        assert_eq!(trees.len(), 0);
+    }
+
+    #[test]
+    fn test_get_all_trees_ordered_by_tree_id() {
+        let dir = tempdir().unwrap();
+        let ci = ChainIndex::open(&dir.path().join("ci.db")).unwrap();
+
+        // Insert in reverse order
+        for i in (0..4).rev() {
+            let metadata = ClosedTreeMetadata {
+                tree_id: (i + 1) as i64,
+                origin_id: [0xaa; 32],
+                root_hash: [i as u8; 32],
+                tree_size: (i + 1) * 100,
+                closed_at: ((i + 1) * 1_000_000_000_000) as i64,
+                data_tree_index: i,
+            };
+            ci.record_closed_tree(&metadata).unwrap();
+        }
+
+        let trees = ci.get_all_trees().unwrap();
+        assert_eq!(trees.len(), 4);
+
+        // Should be ordered by tree_id ASC
+        for (i, tree) in trees.iter().enumerate() {
+            assert_eq!(tree.tree_id, (i + 1) as i64);
+        }
+    }
+
+    #[test]
+    fn test_get_trees_by_status_empty() {
+        let dir = tempdir().unwrap();
+        let ci = ChainIndex::open(&dir.path().join("ci.db")).unwrap();
+
+        let trees = ci.get_trees_by_status(ChainTreeStatus::Closed).unwrap();
+        assert_eq!(trees.len(), 0);
+    }
+
+    #[test]
+    fn test_get_trees_by_status_filters_correctly() {
+        let dir = tempdir().unwrap();
+        let ci = ChainIndex::open(&dir.path().join("ci.db")).unwrap();
+
+        // Record trees with different statuses
+        let m1 = ClosedTreeMetadata {
+            tree_id: 1,
+            origin_id: [0xaa; 32],
+            root_hash: [0x11; 32],
+            tree_size: 100,
+            closed_at: 1_000_000_000_000,
+            data_tree_index: 0,
+        };
+        ci.record_closed_tree(&m1).unwrap();
+
+        // Manually update status to test filtering
+        ci.conn
+            .execute("UPDATE trees SET status = 'archived' WHERE tree_id = 1", [])
+            .unwrap();
+
+        let m2 = ClosedTreeMetadata {
+            tree_id: 2,
+            origin_id: [0xbb; 32],
+            root_hash: [0x22; 32],
+            tree_size: 200,
+            closed_at: 2_000_000_000_000,
+            data_tree_index: 1,
+        };
+        ci.record_closed_tree(&m2).unwrap();
+
+        let closed = ci.get_trees_by_status(ChainTreeStatus::Closed).unwrap();
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].tree_id, 2);
+
+        let archived = ci.get_trees_by_status(ChainTreeStatus::Archived).unwrap();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].tree_id, 1);
+    }
+
+    #[test]
+    fn test_set_bitcoin_txid() {
+        let dir = tempdir().unwrap();
+        let ci = ChainIndex::open(&dir.path().join("ci.db")).unwrap();
+
+        let metadata = ClosedTreeMetadata {
+            tree_id: 1,
+            origin_id: [0xaa; 32],
+            root_hash: [0x11; 32],
+            tree_size: 100,
+            closed_at: 1_000_000_000_000,
+            data_tree_index: 0,
+        };
+        ci.record_closed_tree(&metadata).unwrap();
+
+        let txid = "abcd1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab";
+        ci.set_bitcoin_txid(1, txid).unwrap();
+
+        let tree = ci.get_tree(1).unwrap().unwrap();
+        assert_eq!(tree.bitcoin_txid, Some(txid.to_string()));
+    }
+
+    #[test]
+    fn test_set_bitcoin_txid_nonexistent_tree() {
+        let dir = tempdir().unwrap();
+        let ci = ChainIndex::open(&dir.path().join("ci.db")).unwrap();
+
+        // Should not error, just no-op
+        let result = ci.set_bitcoin_txid(999, "txid123");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_record_closed_tree_updates_on_conflict() {
+        let dir = tempdir().unwrap();
+        let ci = ChainIndex::open(&dir.path().join("ci.db")).unwrap();
+
+        let m1 = ClosedTreeMetadata {
+            tree_id: 1,
+            origin_id: [0xaa; 32],
+            root_hash: [0x11; 32],
+            tree_size: 100,
+            closed_at: 1_000_000_000_000,
+            data_tree_index: 0,
+        };
+        ci.record_closed_tree(&m1).unwrap();
+
+        // Record again with updated values
+        let m2 = ClosedTreeMetadata {
+            tree_id: 1,
+            origin_id: [0xbb; 32],
+            root_hash: [0x22; 32],
+            tree_size: 200,
+            closed_at: 2_000_000_000_000,
+            data_tree_index: 5, // Different index should work with ON CONFLICT
+        };
+        ci.record_closed_tree(&m2).unwrap();
+
+        let tree = ci.get_tree(1).unwrap().unwrap();
+        assert_eq!(tree.root_hash, [0x22; 32]);
+        assert_eq!(tree.tree_size, 200);
+        assert_eq!(tree.data_tree_index, 5);
+    }
+
+    #[test]
+    fn test_record_closed_tree_with_timestamp_overflow() {
+        let dir = tempdir().unwrap();
+        let ci = ChainIndex::open(&dir.path().join("ci.db")).unwrap();
+
+        // Use i64::MAX which would overflow timestamp conversion
+        let metadata = ClosedTreeMetadata {
+            tree_id: 1,
+            origin_id: [0xaa; 32],
+            root_hash: [0x11; 32],
+            tree_size: 100,
+            closed_at: i64::MAX,
+            data_tree_index: 0,
+        };
+
+        // Should fallback to current time
+        ci.record_closed_tree(&metadata).unwrap();
+
+        let tree = ci.get_tree(1).unwrap().unwrap();
+        assert!(tree.closed_at.is_some());
+    }
+
+    #[test]
+    fn test_chain_tree_status_as_str() {
+        assert_eq!(ChainTreeStatus::Active.as_str(), "active");
+        assert_eq!(ChainTreeStatus::Closed.as_str(), "closed");
+        assert_eq!(ChainTreeStatus::Archived.as_str(), "archived");
+    }
+
+    #[test]
+    fn test_chain_tree_status_parse() {
+        assert_eq!(
+            ChainTreeStatus::parse("active"),
+            Some(ChainTreeStatus::Active)
+        );
+        assert_eq!(
+            ChainTreeStatus::parse("closed"),
+            Some(ChainTreeStatus::Closed)
+        );
+        assert_eq!(
+            ChainTreeStatus::parse("archived"),
+            Some(ChainTreeStatus::Archived)
+        );
+        assert_eq!(ChainTreeStatus::parse("invalid"), None);
+        assert_eq!(ChainTreeStatus::parse(""), None);
+    }
+
+    #[test]
+    fn test_row_to_chain_tree_invalid_origin_id_size() {
+        let dir = tempdir().unwrap();
+        let ci = ChainIndex::open(&dir.path().join("ci.db")).unwrap();
+
+        // Manually insert invalid data
+        ci.conn
+            .execute(
+                "INSERT INTO trees (tree_id, origin_id, root_hash, tree_size, data_tree_index, status, created_at, closed_at)
+                 VALUES (1, X'AA', X'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB', 100, 0, 'closed', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+
+        let result = ci.get_tree(1);
+        assert!(result.is_err(), "Should fail with invalid origin_id size");
+    }
+
+    #[test]
+    fn test_row_to_chain_tree_invalid_root_hash_size() {
+        let dir = tempdir().unwrap();
+        let ci = ChainIndex::open(&dir.path().join("ci.db")).unwrap();
+
+        // Manually insert invalid data
+        ci.conn
+            .execute(
+                "INSERT INTO trees (tree_id, origin_id, root_hash, tree_size, data_tree_index, status, created_at, closed_at)
+                 VALUES (1, X'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', X'BB', 100, 0, 'closed', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+
+        let result = ci.get_tree(1);
+        assert!(result.is_err(), "Should fail with invalid root_hash size");
+    }
+
+    #[test]
+    fn test_row_to_chain_tree_invalid_status() {
+        let dir = tempdir().unwrap();
+        let ci = ChainIndex::open(&dir.path().join("ci.db")).unwrap();
+
+        // Manually insert invalid status
+        ci.conn
+            .execute(
+                "INSERT INTO trees (tree_id, origin_id, root_hash, tree_size, data_tree_index, status, created_at, closed_at)
+                 VALUES (1, X'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', X'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB', 100, 0, 'invalid_status', '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+
+        let tree = ci.get_tree(1).unwrap().unwrap();
+        // Should fallback to Closed
+        assert_eq!(tree.status, ChainTreeStatus::Closed);
+    }
+
+    #[test]
+    fn test_sync_with_main_db_empty() {
+        let dir = tempdir().unwrap();
+        let ci = ChainIndex::open(&dir.path().join("ci.db")).unwrap();
+
+        // Create empty index store
+        use rusqlite::Connection;
+        let conn = Connection::open_in_memory().unwrap();
+        let index_store = crate::storage::index::IndexStore::from_connection(conn);
+        index_store.initialize().unwrap();
+
+        let synced = ci.sync_with_main_db(&index_store).unwrap();
+        assert_eq!(synced, 0);
+    }
+
+    #[test]
+    fn test_sync_with_main_db_derives_data_tree_index() {
+        let dir = tempdir().unwrap();
+        let ci = ChainIndex::open(&dir.path().join("ci.db")).unwrap();
+
+        // Create index store with closed trees
+        use rusqlite::Connection;
+        let conn = Connection::open_in_memory().unwrap();
+        let mut index_store = crate::storage::index::IndexStore::from_connection(conn);
+        index_store.initialize().unwrap();
+
+        // Create and close trees
+        let origin_id = [0xaa; 32];
+        index_store.create_active_tree(&origin_id, 0).unwrap();
+        let result1 = index_store
+            .close_tree_and_create_new(&origin_id, 100, &[0x11; 32], 0)
+            .unwrap();
+
+        let result2 = index_store
+            .close_tree_and_create_new(&origin_id, 200, &[0x22; 32], 1)
+            .unwrap();
+
+        let synced = ci.sync_with_main_db(&index_store).unwrap();
+        assert_eq!(synced, 2);
+
+        // Verify synced trees
+        let tree1 = ci.get_tree(result1.closed_tree_id).unwrap().unwrap();
+        assert_eq!(tree1.data_tree_index, 0);
+
+        let tree2 = ci.get_tree(result2.closed_tree_id).unwrap().unwrap();
+        assert_eq!(tree2.data_tree_index, 1);
+    }
+
+    #[test]
+    fn test_sync_with_main_db_skips_existing() {
+        let dir = tempdir().unwrap();
+        let ci = ChainIndex::open(&dir.path().join("ci.db")).unwrap();
+
+        // Create index store with closed tree
+        use rusqlite::Connection;
+        let conn = Connection::open_in_memory().unwrap();
+        let mut index_store = crate::storage::index::IndexStore::from_connection(conn);
+        index_store.initialize().unwrap();
+
+        let origin_id = [0xaa; 32];
+        index_store.create_active_tree(&origin_id, 0).unwrap();
+        let result = index_store
+            .close_tree_and_create_new(&origin_id, 100, &[0x11; 32], 0)
+            .unwrap();
+
+        // First sync
+        let synced1 = ci.sync_with_main_db(&index_store).unwrap();
+        assert_eq!(synced1, 1);
+
+        // Second sync should skip existing
+        let synced2 = ci.sync_with_main_db(&index_store).unwrap();
+        assert_eq!(synced2, 0);
+
+        // Verify tree still exists
+        let tree = ci.get_tree(result.closed_tree_id).unwrap();
+        assert!(tree.is_some());
+    }
+
+    #[test]
+    fn test_open_existing_database_with_v1_schema() {
+        use rusqlite::Connection;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("ci.db");
+
+        // Create v1 schema manually
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE trees (
+                    tree_id INTEGER PRIMARY KEY,
+                    origin_id BLOB NOT NULL,
+                    root_hash BLOB NOT NULL,
+                    tree_size INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'closed',
+                    bitcoin_txid TEXT,
+                    archive_location TEXT,
+                    created_at TEXT NOT NULL,
+                    closed_at TEXT,
+                    archived_at TEXT
+                );
+                CREATE TABLE chain_config (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                INSERT INTO chain_config (key, value, updated_at) VALUES ('schema_version', '1', 0);",
+            )
+            .unwrap();
+        }
+
+        // Open should trigger migration
+        let ci = ChainIndex::open(&path).unwrap();
+
+        // Check schema version is now 2
+        let version: String = ci
+            .conn
+            .query_row(
+                "SELECT value FROM chain_config WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "2");
+
+        // Check data_tree_index column exists
+        let column_exists = ci
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('trees') WHERE name = 'data_tree_index'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(column_exists, 1);
+    }
+
+    #[test]
+    fn test_open_existing_database_with_v2_schema() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("ci.db");
+
+        // Create first instance (v2)
+        {
+            let _ci = ChainIndex::open(&path).unwrap();
+        }
+
+        // Reopen should not migrate
+        let ci = ChainIndex::open(&path).unwrap();
+
+        let version: String = ci
+            .conn
+            .query_row(
+                "SELECT value FROM chain_config WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "2");
+    }
 }

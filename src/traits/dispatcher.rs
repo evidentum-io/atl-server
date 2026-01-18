@@ -372,3 +372,182 @@ impl SequencerClient for LocalDispatcher {
 pub struct GrpcDispatcher {
     // Implementation details will be added in GRPC-1
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dispatch_result_creation() {
+        let result = crate::traits::AppendResult {
+            id: uuid::Uuid::new_v4(),
+            leaf_index: 0,
+            tree_head: TreeHead {
+                tree_size: 1,
+                root_hash: [1u8; 32],
+                origin: [2u8; 32],
+            },
+            inclusion_proof: vec![],
+            timestamp: chrono::Utc::now(),
+        };
+
+        let checkpoint = atl_core::Checkpoint {
+            origin: [2u8; 32],
+            tree_size: 1,
+            timestamp: 1234567890,
+            root_hash: [1u8; 32],
+            key_id: [3u8; 32],
+            signature: [0u8; 64],
+        };
+
+        let dispatch_result = DispatchResult {
+            result: result.clone(),
+            checkpoint: checkpoint.clone(),
+        };
+
+        assert_eq!(dispatch_result.result.leaf_index, 0);
+        assert_eq!(dispatch_result.checkpoint.tree_size, 1);
+    }
+
+    #[test]
+    fn test_batch_dispatch_result_creation() {
+        let results = vec![crate::traits::AppendResult {
+            id: uuid::Uuid::new_v4(),
+            leaf_index: 0,
+            tree_head: TreeHead {
+                tree_size: 1,
+                root_hash: [1u8; 32],
+                origin: [2u8; 32],
+            },
+            inclusion_proof: vec![],
+            timestamp: chrono::Utc::now(),
+        }];
+
+        let checkpoint = atl_core::Checkpoint {
+            origin: [2u8; 32],
+            tree_size: 1,
+            timestamp: 1234567890,
+            root_hash: [1u8; 32],
+            key_id: [3u8; 32],
+            signature: [0u8; 64],
+        };
+
+        let batch_result = BatchDispatchResult {
+            results,
+            checkpoint: checkpoint.clone(),
+        };
+
+        assert_eq!(batch_result.results.len(), 1);
+        assert_eq!(batch_result.checkpoint.tree_size, 1);
+    }
+
+    #[test]
+    fn test_get_receipt_request_creation() {
+        let entry_id = uuid::Uuid::new_v4();
+        let request = GetReceiptRequest {
+            entry_id,
+            include_anchors: true,
+        };
+
+        assert_eq!(request.entry_id, entry_id);
+        assert!(request.include_anchors);
+    }
+
+    #[test]
+    fn test_consistency_proof_info_creation() {
+        let info = ConsistencyProofInfo {
+            from_tree_size: 10,
+            path: vec![[1u8; 32], [2u8; 32]],
+        };
+
+        assert_eq!(info.from_tree_size, 10);
+        assert_eq!(info.path.len(), 2);
+    }
+
+    #[test]
+    fn test_consistency_proof_response_creation() {
+        let response = ConsistencyProofResponse {
+            from_size: 10,
+            to_size: 20,
+            path: vec![[1u8; 32]],
+            from_root: [3u8; 32],
+            to_root: [4u8; 32],
+        };
+
+        assert_eq!(response.from_size, 10);
+        assert_eq!(response.to_size, 20);
+        assert_eq!(response.path.len(), 1);
+    }
+
+    #[test]
+    fn test_public_key_info_creation() {
+        let key_info = PublicKeyInfo {
+            key_id: [1u8; 32],
+            public_key: [2u8; 32],
+            algorithm: "Ed25519".to_string(),
+            created_at: 1234567890,
+        };
+
+        assert_eq!(key_info.algorithm, "Ed25519");
+        assert_eq!(key_info.created_at, 1234567890);
+    }
+
+    #[test]
+    fn test_trigger_anchoring_request_creation() {
+        let request = TriggerAnchoringRequest {
+            anchor_types: vec!["ots".to_string(), "tsa".to_string()],
+        };
+
+        assert_eq!(request.anchor_types.len(), 2);
+        assert!(request.anchor_types.contains(&"ots".to_string()));
+    }
+
+    #[test]
+    fn test_anchoring_status_creation() {
+        let status = AnchoringStatus {
+            anchor_type: "ots".to_string(),
+            status: "completed".to_string(),
+            timestamp: Some(1234567890),
+            estimated_finality_secs: Some(600),
+        };
+
+        assert_eq!(status.anchor_type, "ots");
+        assert_eq!(status.status, "completed");
+        assert_eq!(status.timestamp, Some(1234567890));
+        assert_eq!(status.estimated_finality_secs, Some(600));
+    }
+
+    #[test]
+    fn test_receipt_response_creation() {
+        let entry = Entry {
+            id: uuid::Uuid::new_v4(),
+            leaf_index: Some(0),
+            payload_hash: [0u8; 32],
+            metadata_hash: [1u8; 32],
+            metadata_cleartext: None,
+            external_id: None,
+            created_at: chrono::Utc::now(),
+        };
+
+        let checkpoint = atl_core::Checkpoint {
+            origin: [2u8; 32],
+            tree_size: 1,
+            timestamp: 1234567890,
+            root_hash: [1u8; 32],
+            key_id: [3u8; 32],
+            signature: [0u8; 64],
+        };
+
+        let response = ReceiptResponse {
+            entry,
+            inclusion_proof: vec![[4u8; 32]],
+            checkpoint: checkpoint.clone(),
+            consistency_proof: None,
+            anchors: vec![],
+        };
+
+        assert_eq!(response.inclusion_proof.len(), 1);
+        assert!(response.consistency_proof.is_none());
+        assert_eq!(response.anchors.len(), 0);
+    }
+}
