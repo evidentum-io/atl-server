@@ -29,9 +29,27 @@ where
     Ok(hasher.finalize().into())
 }
 
+/// Hash payload as raw bytes
+///
+/// - String values: hash the raw UTF-8 bytes (no JSON quotes)
+/// - Other JSON values: hash JCS-canonicalized representation (for determinism)
+///
+/// According to ATL Protocol, `PayloadHash` is the hash of the original data,
+/// not its JSON representation.
+pub fn hash_payload(value: &serde_json::Value) -> [u8; 32] {
+    match value {
+        serde_json::Value::String(s) => {
+            use sha2::{Digest, Sha256};
+            Sha256::digest(s.as_bytes()).into()
+        }
+        _ => atl_core::canonicalize_and_hash(value),
+    }
+}
+
 /// Hash JSON payload using JCS canonicalization
 ///
 /// Uses RFC 8785 JSON Canonicalization Scheme for deterministic hashing.
+/// This is kept for backward compatibility with metadata hashing.
 pub fn hash_json_payload(value: &serde_json::Value) -> [u8; 32] {
     atl_core::canonicalize_and_hash(value)
 }
@@ -53,6 +71,38 @@ pub fn hash_metadata(metadata: Option<&serde_json::Value>) -> [u8; 32] {
 mod tests {
     use super::*;
     use futures::stream;
+
+    #[test]
+    fn test_hash_payload_string() {
+        // String payload should be hashed as raw bytes, not JSON
+        let payload = serde_json::json!("TEST");
+        let hash = hash_payload(&payload);
+        assert_eq!(hash.len(), 32);
+
+        // Verify against expected hash: echo -n 'TEST' | sha256sum
+        // Expected: 94ee059335e587e501cc4bf90613e0814f00a7b08bc7c648fd865a2af6a22cc2
+        let expected: [u8; 32] = [
+            0x94, 0xee, 0x05, 0x93, 0x35, 0xe5, 0x87, 0xe5, 0x01, 0xcc, 0x4b, 0xf9, 0x06, 0x13,
+            0xe0, 0x81, 0x4f, 0x00, 0xa7, 0xb0, 0x8b, 0xc7, 0xc6, 0x48, 0xfd, 0x86, 0x5a, 0x2a,
+            0xf6, 0xa2, 0x2c, 0xc2,
+        ];
+        assert_eq!(
+            hash, expected,
+            "Hash of string 'TEST' should match raw byte hash"
+        );
+    }
+
+    #[test]
+    fn test_hash_payload_object() {
+        // Object payload should use JCS canonicalization
+        let payload = serde_json::json!({"test": "data"});
+        let hash = hash_payload(&payload);
+        assert_eq!(hash.len(), 32);
+
+        // Should be same as hash_json_payload for objects
+        let expected = hash_json_payload(&payload);
+        assert_eq!(hash, expected);
+    }
 
     #[test]
     fn test_hash_json_payload() {
