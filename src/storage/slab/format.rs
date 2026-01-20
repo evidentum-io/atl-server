@@ -153,22 +153,6 @@ impl SlabHeader {
         offset
     }
 
-    /// Calculate maximum tree height for given capacity
-    ///
-    /// Height = ceil(log2(max_leaves))
-    ///
-    /// # Arguments
-    /// * `max_leaves` - Maximum leaves in tree
-    ///
-    /// # Returns
-    /// Tree height (root level)
-    pub fn tree_height(max_leaves: u32) -> u32 {
-        if max_leaves <= 1 {
-            return 0;
-        }
-        32 - (max_leaves - 1).leading_zeros()
-    }
-
     /// Compute CRC32 of header (excluding the CRC field itself)
     fn compute_crc_without_field(&self) -> u32 {
         let mut bytes = Vec::with_capacity(Self::SIZE - 4);
@@ -268,15 +252,6 @@ mod tests {
         // 1M leaves = 1,999,999 nodes = exactly 64 MB
         let size = SlabHeader::file_size(1_000_000);
         assert_eq!(size, 64_000_000);
-    }
-
-    #[test]
-    fn test_tree_height() {
-        assert_eq!(SlabHeader::tree_height(1), 0);
-        assert_eq!(SlabHeader::tree_height(2), 1);
-        assert_eq!(SlabHeader::tree_height(4), 2);
-        assert_eq!(SlabHeader::tree_height(8), 3);
-        assert_eq!(SlabHeader::tree_height(1_000_000), 20);
     }
 
     #[test]

@@ -123,9 +123,6 @@ impl SlabManager {
             // Push to in-memory cache
             self.active_slab_leaves.push(*leaf_hash);
 
-            // Update parents bottom-up (dead code, will be removed by RPS-5)
-            self.update_tree_after_append(slab_id, local_index)?;
-
             self.tree_size += 1;
         }
 
@@ -282,32 +279,6 @@ impl SlabManager {
 
         // Now update the cache
         self.active_slab_leaves = leaves;
-
-        Ok(())
-    }
-
-    /// Update tree after appending a leaf
-    ///
-    /// Recomputes all affected parent nodes bottom-up.
-    fn update_tree_after_append(&mut self, slab_id: u32, local_index: u64) -> io::Result<()> {
-        let slab = self.slabs.get_mut(&slab_id).expect("slab missing");
-        let max_height = SlabHeader::tree_height(self.config.max_leaves);
-
-        let mut current_index = local_index;
-        for level in 0..max_height {
-            let parent_index = current_index / 2;
-
-            // Compute parent hash
-            let left_child = slab.get_node(level, parent_index * 2).unwrap_or([0u8; 32]);
-            let right_child = slab
-                .get_node(level, parent_index * 2 + 1)
-                .unwrap_or(left_child); // RFC 6962: duplicate if odd
-
-            let parent_hash = Self::hash_internal_node(&left_child, &right_child);
-            slab.set_node(level + 1, parent_index, &parent_hash)?;
-
-            current_index = parent_index;
-        }
 
         Ok(())
     }
