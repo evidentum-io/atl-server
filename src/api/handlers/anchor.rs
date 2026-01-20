@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::api::dto::AnchorJsonRequest;
 use crate::api::state::AppState;
-use crate::api::streaming::{hash_json_payload, hash_metadata};
+use crate::api::streaming::{hash_metadata, hash_payload};
 use crate::config::ServerMode;
 use crate::error::ServerError;
 use crate::traits::AppendParams;
@@ -76,7 +76,7 @@ async fn anchor_json(
         .map_err(|e| ServerError::InvalidArgument(format!("Invalid JSON: {}", e)))?;
 
     // Compute hashes
-    let payload_hash = hash_json_payload(&req.payload);
+    let payload_hash = hash_payload(&req.payload);
     let metadata_hash = hash_metadata(req.metadata.as_ref());
 
     // Generate and return receipt
