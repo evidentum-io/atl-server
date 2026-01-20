@@ -50,6 +50,13 @@ pub struct SlabManager {
 
     /// Total tree size across all slabs
     tree_size: u64,
+
+    /// In-memory cache of active slab leaves for O(1) root computation
+    ///
+    /// Contains all leaves of the currently active slab.
+    /// At 5000 RPS for 10 minutes = max 3M entries = ~96 MB.
+    /// Cleared on slab rotation.
+    active_slab_leaves: Vec<[u8; 32]>,
 }
 
 impl SlabManager {
@@ -71,6 +78,7 @@ impl SlabManager {
             active_slab: None,
             config,
             tree_size: 0,
+            active_slab_leaves: Vec::new(),
         })
     }
 
@@ -112,7 +120,10 @@ impl SlabManager {
             let local_index = slab.leaf_count() as u64;
             slab.set_node(0, local_index, leaf_hash)?;
 
-            // Update parents bottom-up
+            // Push to in-memory cache
+            self.active_slab_leaves.push(*leaf_hash);
+
+            // Update parents bottom-up (dead code, will be removed by RPS-5)
             self.update_tree_after_append(slab_id, local_index)?;
 
             self.tree_size += 1;
@@ -215,6 +226,66 @@ impl SlabManager {
         self.tree_size
     }
 
+    /// Initialize the in-memory leaf cache for the active slab
+    ///
+    /// Should be called after crash recovery if an active slab exists.
+    /// Loads all existing leaves from the slab file into memory.
+    ///
+    /// # Arguments
+    /// * `tree_size` - Total tree size (to calculate leaves in active slab)
+    ///
+    /// # Errors
+    /// Returns IO error if slab cannot be read
+    #[allow(dead_code)]
+    pub fn initialize_leaf_cache(&mut self, tree_size: u64) -> io::Result<()> {
+        // Calculate which slab should be active and how many leaves it has
+        if tree_size == 0 {
+            self.active_slab_leaves.clear();
+            return Ok(());
+        }
+
+        let max_leaves = self.config.max_leaves as u64;
+        let slab_id = ((tree_size - 1) / max_leaves) as u32 + 1;
+
+        // Ensure slab is open and active
+        self.get_or_open_slab(slab_id)?;
+        self.active_slab = Some(slab_id);
+
+        // Load leaves into cache
+        self.load_active_slab_leaves(slab_id)?;
+
+        // Update tree_size
+        self.tree_size = tree_size;
+
+        Ok(())
+    }
+
+    /// Load leaves from a slab file into the in-memory cache
+    ///
+    /// Called during recovery when an active slab already has data.
+    fn load_active_slab_leaves(&mut self, slab_id: u32) -> io::Result<()> {
+        let slab = self.get_or_open_slab(slab_id)?;
+        let leaf_count = slab.leaf_count();
+
+        // Collect all leaves first to avoid borrowing conflicts
+        let mut leaves = Vec::with_capacity(leaf_count as usize);
+        for i in 0..leaf_count {
+            if let Some(hash) = slab.get_node(0, u64::from(i)) {
+                leaves.push(hash);
+            } else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("missing leaf {i} in slab {slab_id}"),
+                ));
+            }
+        }
+
+        // Now update the cache
+        self.active_slab_leaves = leaves;
+
+        Ok(())
+    }
+
     /// Update tree after appending a leaf
     ///
     /// Recomputes all affected parent nodes bottom-up.
@@ -280,6 +351,11 @@ impl SlabManager {
         self.touch_slab(new_id);
         self.evict_lru();
 
+        // Clear leaf cache for new slab
+        self.active_slab_leaves.clear();
+        // Pre-allocate for expected capacity
+        self.active_slab_leaves.reserve(self.config.max_leaves as usize);
+
         Ok(new_id)
     }
 
@@ -315,13 +391,38 @@ impl SlabManager {
     }
 
     /// Get root hash for a slab by ID
+    ///
+    /// Uses in-memory cache for active slab, reads from disk for closed slabs.
+    ///
+    /// # Arguments
+    /// * `slab_id` - Slab identifier
+    /// * `leaf_count` - Number of leaves to consider (may be less than slab capacity)
+    ///
+    /// # Returns
+    /// Root hash for the specified leaf count
     fn get_slab_root_by_id(&mut self, slab_id: u32, leaf_count: u32) -> io::Result<[u8; 32]> {
         if leaf_count == 0 {
             return Ok([0u8; 32]);
         }
 
-        let slab = self.get_or_open_slab(slab_id)?;
+        if leaf_count == 1 {
+            // Single leaf case: check cache first, then slab
+            if self.active_slab == Some(slab_id) && !self.active_slab_leaves.is_empty() {
+                return Ok(self.active_slab_leaves[0]);
+            }
+            let slab = self.get_or_open_slab(slab_id)?;
+            return Ok(slab.get_node(0, 0).unwrap_or([0u8; 32]));
+        }
 
+        // Fast path: Use in-memory cache for active slab
+        if self.active_slab == Some(slab_id)
+            && self.active_slab_leaves.len() == leaf_count as usize
+        {
+            return Ok(atl_core::core::merkle::compute_root(&self.active_slab_leaves));
+        }
+
+        // Fallback: read leaves from slab file (closed slabs or cache miss)
+        let slab = self.get_or_open_slab(slab_id)?;
         let leaves: Vec<[u8; 32]> = (0..leaf_count)
             .map(|i| slab.get_node(0, u64::from(i)).unwrap_or([0u8; 32]))
             .collect();
