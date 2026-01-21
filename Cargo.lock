@@ -157,7 +157,7 @@ dependencies = [
 
 [[package]]
 name = "atl-server"
-version = "0.22.5"
+version = "0.22.6"
 dependencies = [
  "anyhow",
  "async-trait",

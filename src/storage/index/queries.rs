@@ -53,8 +53,8 @@ impl IndexStore {
         // Apply performance optimizations (safe because WAL handles durability)
         conn.execute_batch(
             r#"
-            PRAGMA journal_mode = OFF;
-            PRAGMA synchronous = OFF;
+            PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
             PRAGMA cache_size = -16000;
             PRAGMA mmap_size = 268435456;
             PRAGMA foreign_keys = OFF;

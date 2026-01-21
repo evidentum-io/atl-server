@@ -450,11 +450,20 @@ impl SlabManager {
             ));
         }
 
-        // Collect all leaves from the slab into a Vec for the callback
-        let slab = self.get_or_open_slab(slab_id)?;
-        let leaves: Vec<[u8; 32]> = (0..local_tree_size)
-            .map(|i| slab.get_node(0, i).unwrap_or([0u8; 32]))
-            .collect();
+        // OPTIMIZATION: Use active_slab_leaves cache for active slab
+        // This avoids mmap reads which may see stale data without flush
+        let leaves: Vec<[u8; 32]> = if self.active_slab == Some(slab_id)
+            && self.active_slab_leaves.len() >= local_tree_size as usize
+        {
+            // Fast path: read from in-memory cache
+            self.active_slab_leaves[..local_tree_size as usize].to_vec()
+        } else {
+            // Slow path: read from mmap (closed slabs or cache miss)
+            let slab = self.get_or_open_slab(slab_id)?;
+            (0..local_tree_size)
+                .map(|i| slab.get_node(0, i).unwrap_or([0u8; 32]))
+                .collect()
+        };
 
         // Create callback for atl-core to fetch leaf nodes
         let get_node = |level: u32, index: u64| -> Option<[u8; 32]> {
