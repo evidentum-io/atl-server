@@ -233,7 +233,6 @@ impl SlabManager {
     ///
     /// # Errors
     /// Returns IO error if slab cannot be read
-    #[allow(dead_code)]
     pub fn initialize_leaf_cache(&mut self, tree_size: u64) -> io::Result<()> {
         // Calculate which slab should be active and how many leaves it has
         if tree_size == 0 {

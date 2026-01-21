@@ -117,6 +117,10 @@ impl StorageEngine {
         // Get tree size from index
         let tree_size = index.get_tree_size()?;
 
+        // Initialize in-memory leaf cache for active slab
+        // This enables O(1) root computation instead of O(N) disk reads
+        slabs.initialize_leaf_cache(tree_size)?;
+
         // Get root hash from slab (or compute if tree is empty)
         let root_hash = if tree_size > 0 {
             slabs.get_root(tree_size)?
