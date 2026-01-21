@@ -7,7 +7,7 @@
 //! Orchestrates WAL, Slab, and SQLite components to implement the Storage trait.
 //! This is the ONLY concrete implementation - no fallback storage.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
@@ -57,6 +57,11 @@ pub struct StorageEngine {
 
     /// Cached tree state (sync RwLock for fast access from sync trait methods)
     tree_state: StdRwLock<TreeState>,
+
+    /// Cached ID of the currently active tree
+    /// Updated only during tree rotation
+    /// Eliminates per-request SQL query in append_batch()
+    active_tree_id: AtomicI64,
 
     /// Health status
     healthy: AtomicBool,
@@ -128,6 +133,18 @@ impl StorageEngine {
             [0u8; 32]
         };
 
+        // After recovery, load active tree ID from SQLite
+        // If no active tree exists yet (fresh database or first run), create one
+        // This is normally done by tree_closer, but we need it for initialization
+        let active_tree_id = match index.get_active_tree()? {
+            Some(tree) => tree.id,
+            None => {
+                // No active tree exists - create one (first run or recovery)
+                tracing::info!("No active tree found, creating initial tree");
+                index.create_active_tree(&origin, tree_size)?
+            }
+        };
+
         let tree_state = TreeState {
             tree_size,
             root_hash,
@@ -141,6 +158,7 @@ impl StorageEngine {
             super_slab: Arc::new(RwLock::new(super_slab)),
             index: Arc::new(Mutex::new(index)),
             tree_state: StdRwLock::new(tree_state),
+            active_tree_id: AtomicI64::new(active_tree_id),
             healthy: AtomicBool::new(true),
         })
     }
@@ -226,6 +244,10 @@ impl StorageEngine {
                 .close_tree_and_create_new(origin_id, end_size, root_hash, data_tree_index)
                 .map_err(|e| StorageError::Database(e.to_string()))?
         };
+
+        // After successful rotation, update cached active_tree_id
+        self.active_tree_id
+            .store(close_result.new_tree_id, Ordering::Relaxed);
 
         // 3. Update tree_state cache (SIMPLIFIED - no genesis)
         let new_tree_size = end_size; // NO +1 for genesis!
@@ -338,16 +360,8 @@ impl Storage for StorageEngine {
         };
 
         // 4. Update SQLite
-        // Get active tree ID first (required for tree_id field)
-        let active_tree_id = {
-            let index = self.index.lock().await;
-            index
-                .get_active_tree()?
-                .ok_or_else(|| {
-                    crate::error::StorageError::QueryFailed("No active tree found".into())
-                })?
-                .id
-        };
+        // Use cached active tree ID (no SQL query)
+        let active_tree_id = self.active_tree_id.load(Ordering::Relaxed);
 
         let batch_inserts: Vec<BatchInsert> = entries
             .iter()

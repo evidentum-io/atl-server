@@ -1,7 +1,7 @@
 //! Tests for StorageEngine
 
 use super::*;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicI64, Ordering};
 use tempfile::{tempdir, TempDir};
 
 /// Returns (engine, _tempdir) - tempdir must be kept alive for engine to work
@@ -12,14 +12,8 @@ async fn create_test_engine(origin: [u8; 32]) -> (StorageEngine, TempDir) {
         ..Default::default()
     };
 
+    // StorageEngine::new() will create initial active tree if it doesn't exist
     let engine = StorageEngine::new(config, origin).await.unwrap();
-
-    // Create initial active tree (normally done by tree_closer)
-    {
-        let index = engine.index_store();
-        let index_lock = index.lock().await;
-        index_lock.create_active_tree(&origin, 0).unwrap();
-    }
 
     (engine, dir)
 }
@@ -64,12 +58,7 @@ async fn test_crash_recovery() {
         };
         let engine = StorageEngine::new(config, origin).await.unwrap();
 
-        // Create initial active tree (normally done by tree_closer)
-        {
-            let index = engine.index_store();
-            let index_lock = index.lock().await;
-            index_lock.create_active_tree(&origin, 0).unwrap();
-        }
+        // Active tree is automatically created by StorageEngine::new()
 
         let params = vec![AppendParams {
             payload_hash: [42u8; 32],
@@ -1309,6 +1298,7 @@ impl CloneForTest for StorageEngine {
                     .unwrap_or_else(|p| p.into_inner())
                     .clone(),
             ),
+            active_tree_id: AtomicI64::new(self.active_tree_id.load(Ordering::Relaxed)),
             healthy: AtomicBool::new(self.healthy.load(Ordering::Relaxed)),
         }
     }

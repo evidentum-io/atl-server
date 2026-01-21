@@ -25,12 +25,7 @@ async fn test_genesis_leaf_in_both_slab_and_sqlite() {
     let (engine, _dir) = create_test_engine().await;
     let origin_id = engine.origin_id();
 
-    // Create initial active tree
-    {
-        let index = engine.index_store();
-        let idx = index.lock().await;
-        idx.create_active_tree(&origin_id, 0).unwrap();
-    }
+    // Active tree is automatically created by StorageEngine::new()
 
     // Append 10 entries to first tree
     let entries: Vec<AppendParams> = (0..10)
@@ -81,12 +76,7 @@ async fn test_merkle_tree_integrity_after_rotation() {
     let (engine, _dir) = create_test_engine().await;
     let origin_id = engine.origin_id();
 
-    // Create initial active tree
-    {
-        let index = engine.index_store();
-        let idx = index.lock().await;
-        idx.create_active_tree(&origin_id, 0).unwrap();
-    }
+    // Active tree is automatically created by StorageEngine::new()
 
     // Append entries and rotate twice
     for round in 0..2 {
@@ -136,12 +126,7 @@ async fn test_super_tree_stores_data_tree_root() {
     let (engine, _dir) = create_test_engine().await;
     let origin_id = engine.origin_id();
 
-    // Create initial active tree
-    {
-        let index = engine.index_store();
-        let idx = index.lock().await;
-        idx.create_active_tree(&origin_id, 0).unwrap();
-    }
+    // Active tree is automatically created by StorageEngine::new()
 
     // Append entries
     let entries: Vec<AppendParams> = (0..10)
@@ -190,12 +175,7 @@ async fn test_chain_link_integrity() {
     let (engine, _dir) = create_test_engine().await;
     let origin_id = engine.origin_id();
 
-    // Create initial active tree
-    {
-        let index = engine.index_store();
-        let idx = index.lock().await;
-        idx.create_active_tree(&origin_id, 0).unwrap();
-    }
+    // Active tree is automatically created by StorageEngine::new()
 
     // Create chain of 3 trees
     let mut tree_ids = vec![];
@@ -258,12 +238,7 @@ async fn test_consistency_proof_across_rotation() {
     let (engine, _dir) = create_test_engine().await;
     let origin_id = engine.origin_id();
 
-    // Create initial active tree
-    {
-        let index = engine.index_store();
-        let idx = index.lock().await;
-        idx.create_active_tree(&origin_id, 0).unwrap();
-    }
+    // Active tree is automatically created by StorageEngine::new()
 
     // Append entries
     let entries: Vec<AppendParams> = (0..10)
@@ -326,12 +301,7 @@ async fn test_tree_closer_uses_rotate_tree() {
     let rotator: Arc<dyn TreeRotator> = storage.clone();
     let index = storage.index_store();
 
-    // Create active tree
-    {
-        let idx = index.lock().await;
-        idx.create_active_tree(&storage_trait.origin_id(), 0)
-            .unwrap();
-    }
+    // Active tree is automatically created by StorageEngine::new()
 
     // Append entries and set first_entry_at
     let entries: Vec<AppendParams> = (0..10)
