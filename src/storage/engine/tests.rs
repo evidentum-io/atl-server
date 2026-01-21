@@ -867,44 +867,6 @@ async fn test_tree_head_after_rotation() {
     assert_eq!(head_after.tree_size, head_before.tree_size);
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_params_to_wal_entry_no_metadata() {
-    let params = AppendParams {
-        payload_hash: [1u8; 32],
-        metadata_hash: [2u8; 32],
-        metadata_cleartext: None,
-        external_id: None,
-    };
-
-    let id = Uuid::new_v4();
-    let wal_entry = StorageEngine::params_to_wal_entry(id, &params);
-
-    assert_eq!(wal_entry.id, *id.as_bytes());
-    assert_eq!(wal_entry.payload_hash, [1u8; 32]);
-    assert_eq!(wal_entry.metadata_hash, [2u8; 32]);
-    assert!(wal_entry.metadata.is_empty());
-    assert!(wal_entry.external_id.is_empty());
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_params_to_wal_entry_with_metadata() {
-    let metadata = serde_json::json!({"key": "value"});
-    let params = AppendParams {
-        payload_hash: [1u8; 32],
-        metadata_hash: [2u8; 32],
-        metadata_cleartext: Some(metadata.clone()),
-        external_id: Some("ext-id".to_string()),
-    };
-
-    let id = Uuid::new_v4();
-    let wal_entry = StorageEngine::params_to_wal_entry(id, &params);
-
-    assert_eq!(wal_entry.id, *id.as_bytes());
-    assert_eq!(wal_entry.payload_hash, [1u8; 32]);
-    assert_eq!(wal_entry.metadata_hash, [2u8; 32]);
-    assert!(!wal_entry.metadata.is_empty());
-    assert_eq!(wal_entry.external_id, b"ext-id");
-}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_large_batch() {
@@ -1133,44 +1095,6 @@ async fn test_tree_state_cache_consistency() {
     assert_ne!(head2.root_hash, head3.root_hash);
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_params_to_wal_entry_empty_external_id() {
-    let params = AppendParams {
-        payload_hash: [5u8; 32],
-        metadata_hash: [6u8; 32],
-        metadata_cleartext: None,
-        external_id: Some("".to_string()), // Empty string
-    };
-
-    let id = Uuid::new_v4();
-    let wal_entry = StorageEngine::params_to_wal_entry(id, &params);
-
-    assert_eq!(wal_entry.external_id, b"");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_params_to_wal_entry_complex_metadata() {
-    let metadata = serde_json::json!({
-        "nested": {
-            "key": "value",
-            "array": [1, 2, 3]
-        },
-        "unicode": "Привет мир 🌍"
-    });
-
-    let params = AppendParams {
-        payload_hash: [7u8; 32],
-        metadata_hash: [8u8; 32],
-        metadata_cleartext: Some(metadata.clone()),
-        external_id: Some("unicode-test".to_string()),
-    };
-
-    let id = Uuid::new_v4();
-    let wal_entry = StorageEngine::params_to_wal_entry(id, &params);
-
-    assert!(!wal_entry.metadata.is_empty());
-    assert_eq!(wal_entry.external_id, b"unicode-test");
-}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_slab_flush_idempotency() {
@@ -1288,7 +1212,6 @@ impl CloneForTest for StorageEngine {
         // NOT a real deep clone - just for testing concurrent access
         Self {
             config: self.config.clone(),
-            wal: Arc::clone(&self.wal),
             slabs: Arc::clone(&self.slabs),
             super_slab: Arc::clone(&self.super_slab),
             index: Arc::clone(&self.index),

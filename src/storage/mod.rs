@@ -1,6 +1,6 @@
 //! Storage module
 //!
-//! Provides the unified storage engine coordinating WAL, Slab, and SQLite components.
+//! Provides the unified storage engine coordinating Slab and SQLite components.
 
 #![allow(unused_imports)]
 
@@ -11,7 +11,6 @@ pub mod engine;
 pub mod index;
 pub mod recovery;
 pub mod slab;
-pub mod wal;
 
 // Re-export Storage trait from traits module
 pub use crate::traits::Storage;

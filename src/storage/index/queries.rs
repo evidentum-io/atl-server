@@ -25,6 +25,14 @@ pub struct IndexEntry {
     pub created_at: i64,
 }
 
+/// Minimal struct for Slab rebuild (avoids loading full entry data)
+#[derive(Debug, Clone)]
+pub struct EntryForRebuild {
+    pub leaf_index: u64,
+    pub payload_hash: [u8; 32],
+    pub metadata_hash: [u8; 32],
+}
+
 /// Batch insert data
 #[derive(Debug, Clone)]
 pub struct BatchInsert {
@@ -223,6 +231,56 @@ impl IndexStore {
     /// Get a mutable reference to the underlying database connection
     pub fn connection_mut(&self) -> std::cell::RefMut<'_, rusqlite::Connection> {
         self.conn.borrow_mut()
+    }
+
+    /// Fetches entries in order by leaf_index for Slab rebuild.
+    /// Returns entries where start_index <= leaf_index < end_index.
+    ///
+    /// # Errors
+    ///
+    /// Returns rusqlite error if database query fails
+    pub fn get_entries_ordered(
+        &self,
+        start_index: u64,
+        end_index: u64,
+    ) -> rusqlite::Result<Vec<EntryForRebuild>> {
+        let conn = self.connection();
+        let mut stmt = conn.prepare(
+            "SELECT leaf_index, payload_hash, metadata_hash
+             FROM entries
+             WHERE leaf_index >= ?1 AND leaf_index < ?2
+             ORDER BY leaf_index ASC",
+        )?;
+
+        let rows = stmt.query_map([start_index as i64, end_index as i64], |row| {
+            let leaf_index: i64 = row.get(0)?;
+            let payload_hash_vec: Vec<u8> = row.get(1)?;
+            let metadata_hash_vec: Vec<u8> = row.get(2)?;
+
+            let payload_hash: [u8; 32] = payload_hash_vec.try_into().map_err(|_| {
+                rusqlite::Error::InvalidColumnType(
+                    1,
+                    "payload_hash".to_string(),
+                    rusqlite::types::Type::Blob,
+                )
+            })?;
+
+            let metadata_hash: [u8; 32] = metadata_hash_vec.try_into().map_err(|_| {
+                rusqlite::Error::InvalidColumnType(
+                    2,
+                    "metadata_hash".to_string(),
+                    rusqlite::types::Type::Blob,
+                )
+            })?;
+
+            Ok(EntryForRebuild {
+                leaf_index: leaf_index as u64,
+                payload_hash,
+                metadata_hash,
+            })
+        })?;
+
+        rows.collect()
     }
 
     /// Get Super-Tree genesis root (None if no trees closed yet)
