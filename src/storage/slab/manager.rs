@@ -165,10 +165,15 @@ impl SlabManager {
         }
     }
 
-    /// Get inclusion proof path using only in-memory cache (no mutation)
+    /// Get inclusion proof path (immutable, optimized for single-slab)
     ///
-    /// This method takes `&self` instead of `&mut self`, allowing use with READ lock.
-    /// Returns `None` if data is not available in cache (caller should fallback to mutable path).
+    /// Returns RFC 6962 compliant inclusion proof without requiring `&mut self`.
+    /// Uses cached leaves for level 0 and reads intermediate nodes from slab.
+    ///
+    /// # Performance
+    /// - Leaves: O(1) read from in-memory cache (zero-copy reference)
+    /// - Intermediate nodes: O(1) read from mmap'd slab
+    /// - Total: O(log n) operations
     ///
     /// # Arguments
     /// * `leaf_index` - Global leaf index to prove
@@ -181,6 +186,7 @@ impl SlabManager {
     /// # Requirements
     /// * Only works for single-slab trees where leaf is in active slab
     /// * Requires `active_slab_leaves` to be populated
+    /// * Requires active slab to be open in `self.slabs`
     pub fn get_inclusion_path_readonly(
         &self,
         leaf_index: u64,
@@ -202,19 +208,25 @@ impl SlabManager {
             return None; // Cache miss - need mutable path
         }
 
-        // OPTIMIZED: Reference the cache directly - NO ALLOCATION
+        // Get active slab for reading intermediate nodes
+        let slab_id = self.active_slab?;
+        let slab = self.slabs.get(&slab_id)?;
+
+        // Reference leaves cache directly - NO ALLOCATION
         let leaves: &[[u8; 32]] = &self.active_slab_leaves[..tree_size as usize];
 
-        // Closure borrows the slice (zero-copy)
+        // Closure reads leaves from cache, intermediate nodes from slab
         let get_node = |level: u32, index: u64| -> Option<[u8; 32]> {
-            if level == 0 && (index as usize) < leaves.len() {
-                Some(leaves[index as usize])
+            if level == 0 {
+                // Leaves: read from in-memory cache (zero-copy)
+                leaves.get(index as usize).copied()
             } else {
-                None
+                // Intermediate nodes: read from mmap'd slab (O(1))
+                slab.get_node(level, index)
             }
         };
 
-        // Generate proof - only allocates the result path (small: log2(tree_size) hashes)
+        // Generate proof - O(log n) node reads + O(log n) path size allocation
         atl_core::core::merkle::generate_inclusion_proof(leaf_index, tree_size, get_node)
             .ok()
             .map(|p| p.path)
