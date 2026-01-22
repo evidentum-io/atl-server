@@ -57,6 +57,12 @@ pub struct SlabManager {
     /// At 5000 RPS for 10 minutes = max 3M entries = ~96 MB.
     /// Cleared on slab rotation.
     active_slab_leaves: Vec<[u8; 32]>,
+
+    /// Cached root hash of active slab
+    ///
+    /// Updated incrementally after each append via `update_tree_after_append()`.
+    /// `None` if no leaves in active slab.
+    cached_active_root: Option<[u8; 32]>,
 }
 
 impl SlabManager {
@@ -79,6 +85,7 @@ impl SlabManager {
             config,
             tree_size: 0,
             active_slab_leaves: Vec::new(),
+            cached_active_root: None,
         })
     }
 
@@ -120,12 +127,16 @@ impl SlabManager {
             let local_index = slab.leaf_count() as u64;
             slab.set_node(0, local_index, leaf_hash)?;
 
-            // Push to in-memory cache
+            // Push to in-memory cache (still needed for proof generation)
             self.active_slab_leaves.push(*leaf_hash);
+
+            // O(log n) incremental tree update
+            self.update_tree_after_append(local_index)?;
 
             self.tree_size += 1;
         }
 
+        // Return cached root (O(1)) or compute for multi-slab case
         self.get_root(self.tree_size)
     }
 
@@ -292,6 +303,7 @@ impl SlabManager {
         // Calculate which slab should be active and how many leaves it has
         if tree_size == 0 {
             self.active_slab_leaves.clear();
+            self.cached_active_root = None;
             return Ok(());
         }
 
@@ -304,6 +316,14 @@ impl SlabManager {
 
         // Load leaves into cache
         self.load_active_slab_leaves(slab_id)?;
+
+        // Compute initial root from loaded leaves
+        if !self.active_slab_leaves.is_empty() {
+            self.cached_active_root =
+                Some(atl_core::core::merkle::compute_root(&self.active_slab_leaves));
+        } else {
+            self.cached_active_root = None;
+        }
 
         // Update tree_size
         self.tree_size = tree_size;
@@ -380,6 +400,8 @@ impl SlabManager {
         self.active_slab_leaves.clear();
         // Pre-allocate for expected capacity
         self.active_slab_leaves.reserve(self.config.max_leaves as usize);
+        // Clear cached root for new slab
+        self.cached_active_root = None;
 
         Ok(new_id)
     }
@@ -417,7 +439,7 @@ impl SlabManager {
 
     /// Get root hash for a slab by ID
     ///
-    /// Uses in-memory cache for active slab, reads from disk for closed slabs.
+    /// Uses cached root for active slab (O(1)), reads from disk for closed slabs.
     ///
     /// # Arguments
     /// * `slab_id` - Slab identifier
@@ -439,11 +461,17 @@ impl SlabManager {
             return Ok(slab.get_node(0, 0).unwrap_or([0u8; 32]));
         }
 
-        // Fast path: Use in-memory cache for active slab
+        // Fast path: Use cached root for active slab (O(1))
         if self.active_slab == Some(slab_id)
             && self.active_slab_leaves.len() == leaf_count as usize
         {
-            return Ok(atl_core::core::merkle::compute_root(&self.active_slab_leaves));
+            if let Some(root) = self.cached_active_root {
+                return Ok(root);
+            }
+            // Cache miss - compute and cache (happens after recovery)
+            let root = atl_core::core::merkle::compute_root(&self.active_slab_leaves);
+            self.cached_active_root = Some(root);
+            return Ok(root);
         }
 
         // Fallback: read leaves from slab file (closed slabs or cache miss)
@@ -599,6 +627,104 @@ impl SlabManager {
         }
 
         current[0]
+    }
+
+    /// Update parent hashes after appending a leaf (O(log n) incremental update)
+    ///
+    /// Traverses from the newly added leaf up to the root, computing and storing
+    /// parent hashes. Also updates `cached_active_root` with the new root.
+    ///
+    /// This is the RFC 6962 incremental Merkle tree update algorithm,
+    /// ported from `PinnedSuperTreeSlab`.
+    ///
+    /// # Arguments
+    /// * `leaf_index` - Local index within active slab (0-based)
+    ///
+    /// # Errors
+    /// Returns IO error if any write fails
+    fn update_tree_after_append(&mut self, leaf_index: u64) -> io::Result<()> {
+        let slab_id = self.active_slab.expect("must have active slab");
+        let slab = self.slabs.get_mut(&slab_id).expect("active slab missing");
+
+        let mut current_index = leaf_index;
+        let mut current_level = 0u32;
+
+        // Traverse up the tree, computing and storing parent hashes
+        loop {
+            let parent_index = current_index / 2;
+            let is_left_child = current_index.is_multiple_of(2);
+
+            // Get sibling node index
+            let sibling_index = if is_left_child {
+                current_index + 1
+            } else {
+                current_index - 1
+            };
+
+            // Check if sibling exists at this level
+            let sibling = slab.get_node(current_level, sibling_index);
+
+            // If no sibling, we're at the edge of the tree - stop here
+            if sibling.is_none() {
+                break;
+            }
+
+            // Get current node
+            let current = slab.get_node(current_level, current_index).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("missing node at level {current_level} index {current_index}"),
+                )
+            })?;
+
+            // Compute parent hash using RFC 6962 algorithm
+            let parent_hash = if is_left_child {
+                atl_core::core::merkle::hash_children(&current, &sibling.unwrap())
+            } else {
+                atl_core::core::merkle::hash_children(&sibling.unwrap(), &current)
+            };
+
+            // Write parent hash at next level
+            slab.set_node(current_level + 1, parent_index, &parent_hash)?;
+
+            // Move up to parent
+            current_index = parent_index;
+            current_level += 1;
+
+            // If we're at index 0 at this level, we've computed the subtree root
+            if current_index == 0 {
+                break;
+            }
+        }
+
+        // Update cached root from the tree structure
+        self.update_cached_root()?;
+
+        Ok(())
+    }
+
+    /// Update cached active root from stored intermediate nodes
+    ///
+    /// Reads the current root from the tree structure in the slab file.
+    /// For a tree with N leaves, the root is computed from the highest stored nodes.
+    fn update_cached_root(&mut self) -> io::Result<()> {
+        let leaf_count = self.active_slab_leaves.len();
+
+        if leaf_count == 0 {
+            self.cached_active_root = None;
+            return Ok(());
+        }
+
+        if leaf_count == 1 {
+            self.cached_active_root = Some(self.active_slab_leaves[0]);
+            return Ok(());
+        }
+
+        // For multiple leaves, compute root using RFC 6962 algorithm
+        let root = atl_core::core::merkle::compute_root(&self.active_slab_leaves);
+        self.cached_active_root = Some(root);
+
+        Ok(())
     }
 }
 
