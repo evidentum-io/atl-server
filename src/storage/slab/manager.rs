@@ -526,6 +526,22 @@ impl SlabManager {
     ///
     /// # Errors
     /// Returns IO error if tree_size is 0, index out of bounds, or proof generation fails
+    /// Generate inclusion proof for a single slab
+    ///
+    /// Returns RFC 6962 compliant proof by delegating to atl-core.
+    ///
+    /// # Performance
+    /// - Leaves: O(n) allocation (required due to lifetime constraints)
+    /// - Intermediate nodes: O(1) read from mmap'd slab
+    /// - Total proof generation: O(log n) operations
+    ///
+    /// # Arguments
+    /// * `slab_id` - Slab ID to generate proof from
+    /// * `local_index` - Leaf index within the slab
+    /// * `local_tree_size` - Tree size for proof (limited to this slab)
+    ///
+    /// # Errors
+    /// Returns IO error if tree_size is 0, index out of bounds, or proof generation fails
     fn get_local_inclusion_path(
         &mut self,
         slab_id: u32,
@@ -545,32 +561,36 @@ impl SlabManager {
             ));
         }
 
-        // OPTIMIZATION: Use active_slab_leaves cache for active slab
-        // This avoids mmap reads which may see stale data without flush
+        // Load leaves into Vec (required due to lifetime constraints with closure)
+        // Note: to_vec() allocation is O(n) but MUCH cheaper than O(n) hashing
         let leaves: Vec<[u8; 32]> = if self.active_slab == Some(slab_id)
             && self.active_slab_leaves.len() >= local_tree_size as usize
         {
-            // Fast path: read from in-memory cache
+            // Active slab: read from in-memory cache (avoids stale mmap data)
             self.active_slab_leaves[..local_tree_size as usize].to_vec()
         } else {
-            // Slow path: read from mmap (closed slabs or cache miss)
+            // Closed slab or cache miss: read from mmap
             let slab = self.get_or_open_slab(slab_id)?;
             (0..local_tree_size)
                 .map(|i| slab.get_node(0, i).unwrap_or([0u8; 32]))
                 .collect()
         };
 
-        // Create callback for atl-core to fetch leaf nodes
+        // Get slab reference - needed for reading intermediate nodes
+        let slab = self.get_or_open_slab(slab_id)?;
+
+        // Create callback that reads leaves from Vec, intermediate nodes from slab
         let get_node = |level: u32, index: u64| -> Option<[u8; 32]> {
-            // atl-core's compute_subtree_root only requests level 0 (leaves)
-            if level == 0 && (index as usize) < leaves.len() {
-                Some(leaves[index as usize])
+            if level == 0 {
+                // Leaves: read from collected Vec
+                leaves.get(index as usize).copied()
             } else {
-                None
+                // Intermediate nodes: read from mmap'd slab - O(1)!
+                slab.get_node(level, index)
             }
         };
 
-        // Generate RFC 6962 compliant proof
+        // Generate RFC 6962 compliant proof - now O(log n) operations
         let proof = atl_core::core::merkle::generate_inclusion_proof(
             local_index,
             local_tree_size,
