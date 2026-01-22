@@ -84,7 +84,7 @@ mod tests {
     use crate::storage::index::lifecycle::ClosedTreeMetadata;
     use crate::storage::index::lifecycle::TreeRotationResult;
     use crate::storage::index::queries::IndexStore;
-    use crate::traits::{Storage, TreeHead, TreeRotator};
+    use crate::traits::{InclusionProof, Storage, TreeHead, TreeRotator};
     use std::path::Path;
     use tempfile::tempdir;
 
@@ -146,6 +146,14 @@ mod tests {
             _tree_size: Option<u64>,
         ) -> crate::error::ServerResult<crate::traits::InclusionProof> {
             unimplemented!("Not needed for tree closer tests")
+        }
+
+        fn get_inclusion_proof_by_leaf_index(
+            &self,
+            _leaf_index: u64,
+            _tree_size: Option<u64>,
+        ) -> crate::error::ServerResult<InclusionProof> {
+            unimplemented!()
         }
 
         fn get_consistency_proof(

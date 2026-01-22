@@ -426,6 +426,21 @@ impl Storage for StorageEngine {
         })
     }
 
+    fn get_inclusion_proof_by_leaf_index(
+        &self,
+        leaf_index: u64,
+        tree_size: Option<u64>,
+    ) -> crate::error::ServerResult<InclusionProof> {
+        // Direct call to ProofProvider - no SQLite query needed
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                ProofProvider::get_inclusion_proof(self, leaf_index, tree_size)
+                    .await
+                    .map_err(Into::into)
+            })
+        })
+    }
+
     fn get_consistency_proof(
         &self,
         from_size: u64,
