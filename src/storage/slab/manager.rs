@@ -191,9 +191,10 @@ impl SlabManager {
             return None; // Cache miss - need mutable path
         }
 
-        // Generate proof from cache (read-only)
-        let leaves = &self.active_slab_leaves[..tree_size as usize];
+        // OPTIMIZED: Reference the cache directly - NO ALLOCATION
+        let leaves: &[[u8; 32]] = &self.active_slab_leaves[..tree_size as usize];
 
+        // Closure borrows the slice (zero-copy)
         let get_node = |level: u32, index: u64| -> Option<[u8; 32]> {
             if level == 0 && (index as usize) < leaves.len() {
                 Some(leaves[index as usize])
@@ -202,6 +203,7 @@ impl SlabManager {
             }
         };
 
+        // Generate proof - only allocates the result path (small: log2(tree_size) hashes)
         atl_core::core::merkle::generate_inclusion_proof(leaf_index, tree_size, get_node)
             .ok()
             .map(|p| p.path)
