@@ -154,6 +154,59 @@ impl SlabManager {
         }
     }
 
+    /// Get inclusion proof path using only in-memory cache (no mutation)
+    ///
+    /// This method takes `&self` instead of `&mut self`, allowing use with READ lock.
+    /// Returns `None` if data is not available in cache (caller should fallback to mutable path).
+    ///
+    /// # Arguments
+    /// * `leaf_index` - Global leaf index to prove
+    /// * `tree_size` - Tree size for proof
+    ///
+    /// # Returns
+    /// * `Some(path)` - Proof path if data available in cache
+    /// * `None` - Data not in cache (e.g., multi-slab or cache miss)
+    ///
+    /// # Requirements
+    /// * Only works for single-slab trees where leaf is in active slab
+    /// * Requires `active_slab_leaves` to be populated
+    pub fn get_inclusion_path_readonly(
+        &self,
+        leaf_index: u64,
+        tree_size: u64,
+    ) -> Option<Vec<[u8; 32]>> {
+        // Validate inputs
+        if tree_size == 0 || leaf_index >= tree_size {
+            return None;
+        }
+
+        // Check if single-slab tree (most common case)
+        let num_slabs = self.num_slabs_for_size(tree_size);
+        if num_slabs != 1 {
+            return None; // Multi-slab requires mutable path for LRU
+        }
+
+        // Check if we have data in cache
+        if self.active_slab_leaves.len() < tree_size as usize {
+            return None; // Cache miss - need mutable path
+        }
+
+        // Generate proof from cache (read-only)
+        let leaves = &self.active_slab_leaves[..tree_size as usize];
+
+        let get_node = |level: u32, index: u64| -> Option<[u8; 32]> {
+            if level == 0 && (index as usize) < leaves.len() {
+                Some(leaves[index as usize])
+            } else {
+                None
+            }
+        };
+
+        atl_core::core::merkle::generate_inclusion_proof(leaf_index, tree_size, get_node)
+            .ok()
+            .map(|p| p.path)
+    }
+
     /// Get inclusion proof path
     ///
     /// Generates RFC 6962 compliant inclusion proof.

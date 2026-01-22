@@ -580,6 +580,20 @@ impl ProofProvider for StorageEngine {
             return Err(StorageError::InvalidIndex("invalid leaf index".into()));
         }
 
+        // Fast path: try READ lock for active slab (no contention)
+        {
+            let slabs = self.slabs.read().await;
+            if let Some(path) = slabs.get_inclusion_path_readonly(leaf_index, tree_size) {
+                return Ok(InclusionProof {
+                    leaf_index,
+                    tree_size,
+                    path,
+                });
+            }
+        }
+        // READ lock released here
+
+        // Slow path: WRITE lock for closed slabs or cache miss
         let path = {
             let mut slabs = self.slabs.write().await;
             slabs.get_inclusion_path(leaf_index, tree_size)?
