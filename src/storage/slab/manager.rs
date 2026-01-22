@@ -662,7 +662,12 @@ impl SlabManager {
             };
 
             // Check if sibling exists at this level
-            let sibling = slab.get_node(current_level, sibling_index);
+            // For level 0 (leaves), read from in-memory cache to handle zero-hash edge case
+            let sibling = if current_level == 0 {
+                self.active_slab_leaves.get(sibling_index as usize).copied()
+            } else {
+                slab.get_node(current_level, sibling_index)
+            };
 
             // If no sibling, we're at the edge of the tree - stop here
             if sibling.is_none() {
@@ -670,12 +675,25 @@ impl SlabManager {
             }
 
             // Get current node
-            let current = slab.get_node(current_level, current_index).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("missing node at level {current_level} index {current_index}"),
-                )
-            })?;
+            // For level 0 (leaves), read from in-memory cache
+            let current = if current_level == 0 {
+                self.active_slab_leaves
+                    .get(current_index as usize)
+                    .copied()
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("missing leaf at index {} in cache", current_index),
+                        )
+                    })?
+            } else {
+                slab.get_node(current_level, current_index).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("missing node at level {current_level} index {current_index}"),
+                    )
+                })?
+            };
 
             // Compute parent hash using RFC 6962 algorithm
             let parent_hash = if is_left_child {
@@ -703,12 +721,16 @@ impl SlabManager {
         Ok(())
     }
 
-    /// Update cached active root from stored intermediate nodes
+    /// Update cached active root by reading from stored intermediate nodes
     ///
-    /// Reads the current root from the tree structure in the slab file.
-    /// For a tree with N leaves, the root is computed from the highest stored nodes.
+    /// Uses RFC 6962 subtree decomposition:
+    /// 1. Decompose leaf_count into sum of powers of 2
+    /// 2. Read subtree root for each power-of-2 chunk from slab
+    /// 3. Combine subtree roots right-to-left
+    ///
+    /// Complexity: O(log n) node reads + O(log n) hash operations
     fn update_cached_root(&mut self) -> io::Result<()> {
-        let leaf_count = self.active_slab_leaves.len();
+        let leaf_count = self.active_slab_leaves.len() as u64;
 
         if leaf_count == 0 {
             self.cached_active_root = None;
@@ -720,9 +742,68 @@ impl SlabManager {
             return Ok(());
         }
 
-        // For multiple leaves, compute root using RFC 6962 algorithm
-        let root = atl_core::core::merkle::compute_root(&self.active_slab_leaves);
-        self.cached_active_root = Some(root);
+        let slab_id = self.active_slab.expect("must have active slab");
+
+        // Collect subtree roots by decomposing leaf_count into powers of 2
+        let mut subtree_roots: Vec<[u8; 32]> = Vec::new();
+        let mut remaining = leaf_count;
+        let mut start_leaf = 0u64;
+
+        while remaining > 0 {
+            // Find largest power of 2 <= remaining
+            // floor(log2(remaining)) = 63 - leading_zeros for u64
+            let level = 63 - remaining.leading_zeros();
+            let subtree_size = 1u64 << level;
+
+            // Calculate index at this level for subtree starting at start_leaf
+            let index_at_level = start_leaf >> level;
+
+            // Read subtree root
+            // For level 0 (leaves), read from in-memory cache to avoid zero-hash issue in mmap
+            // For higher levels (intermediate nodes), read from slab file
+            let node = if level == 0 {
+                // Single leaf - read from cache
+                self.active_slab_leaves
+                    .get(index_at_level as usize)
+                    .copied()
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "missing leaf at index {} in cache (cache size {})",
+                                index_at_level,
+                                self.active_slab_leaves.len()
+                            ),
+                        )
+                    })?
+            } else {
+                // Intermediate node - read from slab
+                let slab = self.slabs.get(&slab_id).expect("active slab missing");
+                slab.get_node(level, index_at_level).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "missing subtree root at level {} index {} for {} leaves",
+                            level, index_at_level, leaf_count
+                        ),
+                    )
+                })?
+            };
+
+            subtree_roots.push(node);
+
+            start_leaf += subtree_size;
+            remaining -= subtree_size;
+        }
+
+        // Combine subtree roots right-to-left (RFC 6962)
+        // For [A, B, C], result = hash(hash(A, B), C)
+        let mut result = subtree_roots.pop().expect("at least one subtree");
+        while let Some(left) = subtree_roots.pop() {
+            result = atl_core::core::merkle::hash_children(&left, &result);
+        }
+
+        self.cached_active_root = Some(result);
 
         Ok(())
     }
