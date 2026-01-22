@@ -229,7 +229,7 @@ pub async fn generate_receipt(
 
     // 8. Get all anchors
     let all_anchors = if options.include_anchors {
-        storage.get_anchors(tree_size)?
+        storage.get_anchors_covering(leaf_index + 1, 10)?
     } else {
         Vec::new()
     };
