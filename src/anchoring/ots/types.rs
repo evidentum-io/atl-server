@@ -29,7 +29,6 @@ impl Default for OtsConfig {
     fn default() -> Self {
         Self {
             calendar_urls: vec![
-                "https://alice.btc.calendar.opentimestamps.org".to_string(),
                 "https://bob.btc.calendar.opentimestamps.org".to_string(),
                 "https://finney.calendar.eternitywall.com".to_string(),
                 "https://ots.btc.catallaxy.com".to_string(),
@@ -75,7 +74,6 @@ impl OtsConfig {
             })
             .unwrap_or_else(|_| {
                 vec![
-                    "https://alice.btc.calendar.opentimestamps.org".to_string(),
                     "https://bob.btc.calendar.opentimestamps.org".to_string(),
                     "https://finney.calendar.eternitywall.com".to_string(),
                     "https://ots.btc.catallaxy.com".to_string(),
