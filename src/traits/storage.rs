@@ -197,6 +197,23 @@ pub trait Storage: Send + Sync + 'static {
         tree_size: Option<u64>,
     ) -> crate::error::ServerResult<InclusionProof>;
 
+    /// Generate inclusion proof directly from leaf index
+    ///
+    /// Use this method when `leaf_index` is already known (e.g., from append result).
+    /// This avoids a redundant database query compared to `get_inclusion_proof(entry_id)`.
+    ///
+    /// # Arguments
+    /// * `leaf_index` - Index of the leaf to prove
+    /// * `tree_size` - Tree size for proof (None = current tree size)
+    ///
+    /// # Errors
+    /// * `ServerError::Storage` if proof generation fails
+    fn get_inclusion_proof_by_leaf_index(
+        &self,
+        leaf_index: u64,
+        tree_size: Option<u64>,
+    ) -> crate::error::ServerResult<InclusionProof>;
+
     /// Get consistency proof between tree sizes
     fn get_consistency_proof(
         &self,

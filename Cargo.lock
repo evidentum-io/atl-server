@@ -139,7 +139,7 @@ dependencies = [
 
 [[package]]
 name = "atl-core"
-version = "0.23.0"
+version = "0.23.1"
 dependencies = [
  "base64",
  "bcder",
@@ -157,7 +157,7 @@ dependencies = [
 
 [[package]]
 name = "atl-server"
-version = "0.22.1"
+version = "0.22.16"
 dependencies = [
  "anyhow",
  "async-trait",

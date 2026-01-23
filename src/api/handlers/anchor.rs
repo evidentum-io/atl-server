@@ -331,11 +331,7 @@ mod tests {
 
         let storage_engine = Arc::new(StorageEngine::new(config, origin).await.unwrap());
 
-        {
-            let index = storage_engine.index_store();
-            let index_lock = index.lock().await;
-            index_lock.create_active_tree(&origin, 0).unwrap();
-        }
+        // Active tree is automatically created by StorageEngine::new()
 
         let dispatcher = Arc::new(MockSequencerClient::new_success(storage_engine.clone()));
         let signer = CheckpointSigner::from_bytes(&[42u8; 32]);
@@ -487,11 +483,8 @@ mod tests {
         };
 
         let storage_engine = Arc::new(StorageEngine::new(config, origin).await.unwrap());
-        {
-            let index = storage_engine.index_store();
-            let index_lock = index.lock().await;
-            index_lock.create_active_tree(&origin, 0).unwrap();
-        }
+
+        // Active tree is automatically created by StorageEngine::new()
 
         let dispatcher = Arc::new(MockSequencerClient::new_failure(
             storage_engine.clone(),
@@ -530,11 +523,9 @@ mod tests {
             ..Default::default()
         };
         let storage_engine = Arc::new(StorageEngine::new(config, origin).await.unwrap());
-        {
-            let index = storage_engine.index_store();
-            let index_lock = index.lock().await;
-            index_lock.create_active_tree(&origin, 0).unwrap();
-        }
+
+        // Active tree is automatically created by StorageEngine::new()
+
         let dispatcher = Arc::new(MockSequencerClient::new_success(storage_engine));
         let state = create_test_state(ServerMode::Standalone, dispatcher, None, None, None);
 
@@ -553,11 +544,9 @@ mod tests {
         };
 
         let storage_engine = Arc::new(StorageEngine::new(config, origin).await.unwrap());
-        {
-            let index = storage_engine.index_store();
-            let index_lock = index.lock().await;
-            index_lock.create_active_tree(&origin, 0).unwrap();
-        }
+
+        // Active tree is automatically created by StorageEngine::new()
+
         let dispatcher = Arc::new(MockSequencerClient::new_success(storage_engine.clone()));
 
         let state = create_test_state(
@@ -583,11 +572,8 @@ mod tests {
         };
 
         let storage_engine = Arc::new(StorageEngine::new(config, origin).await.unwrap());
-        {
-            let index = storage_engine.index_store();
-            let index_lock = index.lock().await;
-            index_lock.create_active_tree(&origin, 0).unwrap();
-        }
+
+        // Active tree is automatically created by StorageEngine::new()
 
         let batch_result = storage_engine
             .append_batch(vec![AppendParams {

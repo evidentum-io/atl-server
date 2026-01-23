@@ -181,9 +181,9 @@ impl SlabFile {
         if level == 0 && index >= self.leaf_count as u64 {
             self.leaf_count = (index + 1) as u32;
             self.update_header();
-            // CRITICAL: Sync header to disk immediately to prevent stale reads on reopen
-            // This ensures any concurrent/subsequent opens see the updated leaf_count
-            self.mmap.flush_range(0, SlabHeader::SIZE)?;
+            // Header is updated in memory; durability provided by:
+            // 1. WAL for crash recovery
+            // 2. Explicit flush() calls at batch boundaries
         }
 
         Ok(())

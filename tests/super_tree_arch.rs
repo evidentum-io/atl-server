@@ -33,14 +33,7 @@ async fn create_test_engine() -> (Arc<StorageEngine>, TempDir) {
         .await
         .expect("failed to create engine");
 
-    // Create initial active tree (normally done by tree_closer)
-    {
-        let index = engine.index_store();
-        let index_lock = index.lock().await;
-        index_lock
-            .create_active_tree(&origin, 0)
-            .expect("failed to create active tree");
-    }
+    // Active tree is automatically created by StorageEngine::new()
 
     (Arc::new(engine), dir)
 }
@@ -126,14 +119,7 @@ async fn should_recover_after_crash_during_rotation() {
             .await
             .expect("failed to create engine");
 
-        // Create initial active tree
-        {
-            let index = engine.index_store();
-            let index_lock = index.lock().await;
-            index_lock
-                .create_active_tree(&origin, 0)
-                .expect("failed to create active tree");
-        }
+        // Active tree is automatically created by StorageEngine::new()
 
         for i in 0..3 {
             rotate_tree_helper(&engine, i).await;

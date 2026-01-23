@@ -7,7 +7,7 @@
 //! Orchestrates WAL, Slab, and SQLite components to implement the Storage trait.
 //! This is the ONLY concrete implementation - no fallback storage.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
@@ -18,7 +18,6 @@ use crate::storage::index::lifecycle::TreeRotationResult;
 use crate::storage::index::{BatchInsert, IndexStore};
 use crate::storage::recovery;
 use crate::storage::slab::{PinnedSuperTreeSlab, SlabConfig, SlabManager};
-use crate::storage::wal::{WalEntry, WalWriter};
 use crate::traits::{
     AppendParams, BatchResult, ConsistencyProof, Entry, EntryResult, InclusionProof, ProofProvider,
     Storage, TreeHead, TreeRotator,
@@ -38,13 +37,10 @@ struct TreeState {
 
 /// Storage engine (THE storage implementation)
 ///
-/// Coordinates WAL, Slab, and SQLite for high-throughput append operations.
+/// Coordinates Slab and SQLite for high-throughput append operations.
 pub struct StorageEngine {
     /// Configuration
     config: StorageConfig,
-
-    /// WAL writer
-    wal: Arc<RwLock<WalWriter>>,
 
     /// Slab manager (Data Tree slabs)
     slabs: Arc<RwLock<SlabManager>>,
@@ -57,6 +53,11 @@ pub struct StorageEngine {
 
     /// Cached tree state (sync RwLock for fast access from sync trait methods)
     tree_state: StdRwLock<TreeState>,
+
+    /// Cached ID of the currently active tree
+    /// Updated only during tree rotation
+    /// Eliminates per-request SQL query in append_batch()
+    active_tree_id: AtomicI64,
 
     /// Health status
     healthy: AtomicBool,
@@ -73,7 +74,6 @@ impl StorageEngine {
     /// - Recovery fails
     pub async fn new(config: StorageConfig, origin: [u8; 32]) -> Result<Self, StorageError> {
         // Create directories if needed
-        std::fs::create_dir_all(config.wal_dir())?;
         std::fs::create_dir_all(config.slab_dir())?;
         std::fs::create_dir_all(&config.data_dir)?;
 
@@ -82,7 +82,6 @@ impl StorageEngine {
         std::fs::create_dir_all(&super_slab_dir)?;
 
         // Initialize components
-        let mut wal = WalWriter::new(config.wal_dir())?;
         let mut slabs = SlabManager::new(
             config.slab_dir(),
             SlabConfig {
@@ -105,23 +104,32 @@ impl StorageEngine {
         index.initialize()?;
 
         // Run crash recovery
-        recovery::recover(
-            &mut wal,
-            &mut slabs,
-            &mut index,
-            &mut super_slab,
-            u64::from(config.slab_capacity),
-        )
-        .await?;
+        recovery::recover(&mut slabs, &mut index, &mut super_slab).await?;
 
         // Get tree size from index
         let tree_size = index.get_tree_size()?;
+
+        // Initialize in-memory leaf cache for active slab
+        // This enables O(1) root computation instead of O(N) disk reads
+        slabs.initialize_leaf_cache(tree_size)?;
 
         // Get root hash from slab (or compute if tree is empty)
         let root_hash = if tree_size > 0 {
             slabs.get_root(tree_size)?
         } else {
             [0u8; 32]
+        };
+
+        // After recovery, load active tree ID from SQLite
+        // If no active tree exists yet (fresh database or first run), create one
+        // This is normally done by tree_closer, but we need it for initialization
+        let active_tree_id = match index.get_active_tree()? {
+            Some(tree) => tree.id,
+            None => {
+                // No active tree exists - create one (first run or recovery)
+                tracing::info!("No active tree found, creating initial tree");
+                index.create_active_tree(&origin, tree_size)?
+            }
         };
 
         let tree_state = TreeState {
@@ -132,11 +140,11 @@ impl StorageEngine {
 
         Ok(Self {
             config,
-            wal: Arc::new(RwLock::new(wal)),
             slabs: Arc::new(RwLock::new(slabs)),
             super_slab: Arc::new(RwLock::new(super_slab)),
             index: Arc::new(Mutex::new(index)),
             tree_state: StdRwLock::new(tree_state),
+            active_tree_id: AtomicI64::new(active_tree_id),
             healthy: AtomicBool::new(true),
         })
     }
@@ -223,6 +231,10 @@ impl StorageEngine {
                 .map_err(|e| StorageError::Database(e.to_string()))?
         };
 
+        // After successful rotation, update cached active_tree_id
+        self.active_tree_id
+            .store(close_result.new_tree_id, Ordering::Relaxed);
+
         // 3. Update tree_state cache (SIMPLIFIED - no genesis)
         let new_tree_size = end_size; // NO +1 for genesis!
         let new_root_hash = if new_tree_size > 0 {
@@ -257,29 +269,6 @@ impl StorageEngine {
             new_tree_head,
         })
     }
-
-    /// Convert AppendParams to WalEntry
-    fn params_to_wal_entry(id: Uuid, params: &AppendParams) -> WalEntry {
-        let metadata_bytes = params
-            .metadata_cleartext
-            .as_ref()
-            .map(|v| v.to_string().into_bytes())
-            .unwrap_or_default();
-
-        let external_id_bytes = params
-            .external_id
-            .as_ref()
-            .map(|s| s.as_bytes().to_vec())
-            .unwrap_or_default();
-
-        WalEntry {
-            id: *id.as_bytes(),
-            payload_hash: params.payload_hash,
-            metadata_hash: params.metadata_hash,
-            metadata: metadata_bytes,
-            external_id: external_id_bytes,
-        }
-    }
 }
 
 #[async_trait::async_trait]
@@ -310,40 +299,18 @@ impl Storage for StorageEngine {
             })
             .collect();
 
-        // 2. Write to WAL
-        let wal_entries: Vec<WalEntry> = entries
-            .iter()
-            .map(|(id, _, _, p)| Self::params_to_wal_entry(*id, p))
-            .collect();
-
-        let batch_id = {
-            let mut wal = self.wal.write().await;
-            wal.write_batch(&wal_entries, tree_size)?
-        };
-
-        // 3. Update Slab
+        // 2. Update Slab (mmap, no flush)
         let leaf_hashes: Vec<[u8; 32]> = entries.iter().map(|(_, _, h, _)| *h).collect();
         let new_root = {
             let mut slabs = self.slabs.write().await;
-            let root = slabs.append_leaves(&leaf_hashes)?;
-            // CRITICAL: Flush to disk before updating tree_state.
-            // Without this, proof generation may fail with "missing node" error
-            // if client requests proof immediately after append returns.
-            slabs.flush()?;
-            root
+            slabs.append_leaves(&leaf_hashes)?
+            // NOTE: No flush needed - proof generation uses active_slab_leaves cache
+            // for active slab, which is always up-to-date after append_leaves()
         };
 
-        // 4. Update SQLite
-        // Get active tree ID first (required for tree_id field)
-        let active_tree_id = {
-            let index = self.index.lock().await;
-            index
-                .get_active_tree()?
-                .ok_or_else(|| {
-                    crate::error::StorageError::QueryFailed("No active tree found".into())
-                })?
-                .id
-        };
+        // 3. Update SQLite (single fsync via SQLite WAL)
+        // Use cached active tree ID (no SQL query)
+        let active_tree_id = self.active_tree_id.load(Ordering::Relaxed);
 
         let batch_inserts: Vec<BatchInsert> = entries
             .iter()
@@ -373,14 +340,7 @@ impl Storage for StorageEngine {
             index.update_first_entry_at_for_active_tree()?;
         }
 
-        // 5. Finalize
-        {
-            let wal = self.wal.read().await;
-            wal.mark_committed(batch_id)?;
-            wal.cleanup(self.config.wal_keep_count)?;
-        }
-
-        // 6. Update cached state
+        // 4. Update cached state
         {
             let mut state = self
                 .tree_state
@@ -390,7 +350,7 @@ impl Storage for StorageEngine {
             state.root_hash = new_root;
         }
 
-        // 7. Build result
+        // 5. Build result
         let entry_results: Vec<EntryResult> = entries
             .iter()
             .map(|(id, leaf_index, leaf_hash, _)| EntryResult {
@@ -456,6 +416,21 @@ impl Storage for StorageEngine {
             .ok_or_else(|| crate::error::ServerError::EntryNotInTree(entry_id.to_string()))?;
 
         // Delegate to ProofProvider async method via blocking
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                ProofProvider::get_inclusion_proof(self, leaf_index, tree_size)
+                    .await
+                    .map_err(Into::into)
+            })
+        })
+    }
+
+    fn get_inclusion_proof_by_leaf_index(
+        &self,
+        leaf_index: u64,
+        tree_size: Option<u64>,
+    ) -> crate::error::ServerResult<InclusionProof> {
+        // Direct call to ProofProvider - no SQLite query needed
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 ProofProvider::get_inclusion_proof(self, leaf_index, tree_size)
@@ -604,6 +579,20 @@ impl ProofProvider for StorageEngine {
             return Err(StorageError::InvalidIndex("invalid leaf index".into()));
         }
 
+        // Fast path: try READ lock for active slab (no contention)
+        {
+            let slabs = self.slabs.read().await;
+            if let Some(path) = slabs.get_inclusion_path_readonly(leaf_index, tree_size) {
+                return Ok(InclusionProof {
+                    leaf_index,
+                    tree_size,
+                    path,
+                });
+            }
+        }
+        // READ lock released here
+
+        // Slow path: WRITE lock for closed slabs or cache miss
         let path = {
             let mut slabs = self.slabs.write().await;
             slabs.get_inclusion_path(leaf_index, tree_size)?

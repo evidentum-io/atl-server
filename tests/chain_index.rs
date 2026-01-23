@@ -30,11 +30,7 @@ async fn test_chain_index_lifecycle() {
     let chain_index_path = data_dir.join("chain_index.db");
     let chain_index = ChainIndex::open(&chain_index_path).unwrap();
 
-    {
-        let index = engine.index_store();
-        let idx = index.lock().await;
-        idx.create_active_tree(&origin_id, 0).unwrap();
-    }
+    // Active tree is automatically created by StorageEngine::new()
 
     let entries: Vec<AppendParams> = (0..10)
         .map(|i| AppendParams {
@@ -91,11 +87,7 @@ async fn test_chain_index_sync() {
     let engine = StorageEngine::new(storage_config, origin_id).await.unwrap();
     let engine = Arc::new(engine);
 
-    {
-        let index = engine.index_store();
-        let idx = index.lock().await;
-        idx.create_active_tree(&origin_id, 0).unwrap();
-    }
+    // Active tree is automatically created by StorageEngine::new()
 
     let entries: Vec<AppendParams> = (0..5)
         .map(|i| AppendParams {
@@ -152,11 +144,7 @@ async fn test_multiple_tree_rotations() {
     let chain_index_path = data_dir.join("chain_index.db");
     let chain_index = ChainIndex::open(&chain_index_path).unwrap();
 
-    {
-        let index = engine.index_store();
-        let idx = index.lock().await;
-        idx.create_active_tree(&origin_id, 0).unwrap();
-    }
+    // Active tree is automatically created by StorageEngine::new()
 
     let storage_trait: Arc<dyn Storage> = engine.clone();
 

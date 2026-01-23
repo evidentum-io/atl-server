@@ -229,7 +229,7 @@ pub async fn generate_receipt(
 
     // 8. Get all anchors
     let all_anchors = if options.include_anchors {
-        storage.get_anchors(tree_size)?
+        storage.get_anchors_covering(leaf_index + 1, 10)?
     } else {
         Vec::new()
     };
@@ -538,9 +538,8 @@ pub fn build_immediate_receipt(
         key_id: format_hash(&checkpoint.key_id),
     };
 
-    // Generate inclusion proof from dispatch result
-    // The sequencer already indexed the entry synchronously
-    let inclusion_proof = storage.get_inclusion_proof(&entry_id, Some(tree_size))?;
+    // Generate inclusion proof directly from leaf_index (no SQLite query needed)
+    let inclusion_proof = storage.get_inclusion_proof_by_leaf_index(leaf_index, Some(tree_size))?;
 
     // Generate upgrade URL (REQUIRED for immediate receipts)
     let upgrade_url = Some(format!("{}/v1/anchor/{}", base_url, entry_id));

@@ -183,6 +183,14 @@ mod tests {
             unimplemented!()
         }
 
+        fn get_inclusion_proof_by_leaf_index(
+            &self,
+            _leaf_index: u64,
+            _tree_size: Option<u64>,
+        ) -> crate::error::ServerResult<InclusionProof> {
+            unimplemented!()
+        }
+
         fn get_consistency_proof(
             &self,
             _from_size: u64,
@@ -776,6 +784,14 @@ mod tests {
                 unimplemented!()
             }
 
+            fn get_inclusion_proof_by_leaf_index(
+                &self,
+                _leaf_index: u64,
+                _tree_size: Option<u64>,
+            ) -> crate::error::ServerResult<InclusionProof> {
+                unimplemented!()
+            }
+
             fn get_consistency_proof(
                 &self,
                 _from_size: u64,
@@ -986,6 +1002,14 @@ mod tests {
             fn get_inclusion_proof(
                 &self,
                 _entry_id: &Uuid,
+                _tree_size: Option<u64>,
+            ) -> crate::error::ServerResult<InclusionProof> {
+                unimplemented!()
+            }
+
+            fn get_inclusion_proof_by_leaf_index(
+                &self,
+                _leaf_index: u64,
                 _tree_size: Option<u64>,
             ) -> crate::error::ServerResult<InclusionProof> {
                 unimplemented!()
@@ -1334,6 +1358,14 @@ mod tests {
             fn get_inclusion_proof(
                 &self,
                 _entry_id: &Uuid,
+                _tree_size: Option<u64>,
+            ) -> crate::error::ServerResult<InclusionProof> {
+                unimplemented!()
+            }
+
+            fn get_inclusion_proof_by_leaf_index(
+                &self,
+                _leaf_index: u64,
                 _tree_size: Option<u64>,
             ) -> crate::error::ServerResult<InclusionProof> {
                 unimplemented!()
@@ -1812,6 +1844,14 @@ mod tests {
             fn get_inclusion_proof(
                 &self,
                 _entry_id: &Uuid,
+                _tree_size: Option<u64>,
+            ) -> crate::error::ServerResult<InclusionProof> {
+                unimplemented!()
+            }
+
+            fn get_inclusion_proof_by_leaf_index(
+                &self,
+                _leaf_index: u64,
                 _tree_size: Option<u64>,
             ) -> crate::error::ServerResult<InclusionProof> {
                 unimplemented!()

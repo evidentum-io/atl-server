@@ -85,7 +85,7 @@ async fn check_sequencer_health(
 mod tests {
     use super::*;
     use crate::error::{ServerError, ServerResult};
-    use crate::traits::Storage;
+    use crate::traits::{InclusionProof, Storage};
     use async_trait::async_trait;
     use axum::extract::State;
 
@@ -236,6 +236,14 @@ mod tests {
             unimplemented!()
         }
 
+        fn get_inclusion_proof_by_leaf_index(
+            &self,
+            _leaf_index: u64,
+            _tree_size: Option<u64>,
+        ) -> crate::error::ServerResult<InclusionProof> {
+            unimplemented!()
+        }
+
         fn get_consistency_proof(
             &self,
             _from_size: u64,
@@ -309,6 +317,14 @@ mod tests {
             _entry_id: &uuid::Uuid,
             _tree_size: Option<u64>,
         ) -> ServerResult<crate::traits::InclusionProof> {
+            unimplemented!()
+        }
+
+        fn get_inclusion_proof_by_leaf_index(
+            &self,
+            _leaf_index: u64,
+            _tree_size: Option<u64>,
+        ) -> crate::error::ServerResult<InclusionProof> {
             unimplemented!()
         }
 
@@ -655,6 +671,14 @@ mod tests {
                 unimplemented!()
             }
 
+            fn get_inclusion_proof_by_leaf_index(
+                &self,
+                _leaf_index: u64,
+                _tree_size: Option<u64>,
+            ) -> crate::error::ServerResult<InclusionProof> {
+                unimplemented!()
+            }
+
             fn get_consistency_proof(
                 &self,
                 _from_size: u64,
@@ -963,6 +987,14 @@ mod tests {
                 unimplemented!()
             }
 
+            fn get_inclusion_proof_by_leaf_index(
+                &self,
+                _leaf_index: u64,
+                _tree_size: Option<u64>,
+            ) -> crate::error::ServerResult<InclusionProof> {
+                unimplemented!()
+            }
+
             fn get_consistency_proof(
                 &self,
                 _from_size: u64,
@@ -1158,6 +1190,14 @@ mod tests {
                 _entry_id: &uuid::Uuid,
                 _tree_size: Option<u64>,
             ) -> ServerResult<crate::traits::InclusionProof> {
+                unimplemented!()
+            }
+
+            fn get_inclusion_proof_by_leaf_index(
+                &self,
+                _leaf_index: u64,
+                _tree_size: Option<u64>,
+            ) -> crate::error::ServerResult<InclusionProof> {
                 unimplemented!()
             }
 

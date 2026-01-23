@@ -284,6 +284,15 @@ mod tests {
             unimplemented!()
         }
 
+        #[cfg(not(tarpaulin_include))]
+        fn get_inclusion_proof_by_leaf_index(
+            &self,
+            _leaf_index: u64,
+            _tree_size: Option<u64>,
+        ) -> crate::error::ServerResult<InclusionProof> {
+            unimplemented!()
+        }
+
         fn get_consistency_proof(
             &self,
             _from_size: u64,

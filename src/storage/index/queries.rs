@@ -25,6 +25,14 @@ pub struct IndexEntry {
     pub created_at: i64,
 }
 
+/// Minimal struct for Slab rebuild (avoids loading full entry data)
+#[derive(Debug, Clone)]
+pub struct EntryForRebuild {
+    pub leaf_index: u64,
+    pub payload_hash: [u8; 32],
+    pub metadata_hash: [u8; 32],
+}
+
 /// Batch insert data
 #[derive(Debug, Clone)]
 pub struct BatchInsert {
@@ -53,8 +61,8 @@ impl IndexStore {
         // Apply performance optimizations (safe because WAL handles durability)
         conn.execute_batch(
             r#"
-            PRAGMA journal_mode = OFF;
-            PRAGMA synchronous = OFF;
+            PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
             PRAGMA cache_size = -16000;
             PRAGMA mmap_size = 268435456;
             PRAGMA foreign_keys = OFF;
@@ -223,6 +231,56 @@ impl IndexStore {
     /// Get a mutable reference to the underlying database connection
     pub fn connection_mut(&self) -> std::cell::RefMut<'_, rusqlite::Connection> {
         self.conn.borrow_mut()
+    }
+
+    /// Fetches entries in order by leaf_index for Slab rebuild.
+    /// Returns entries where start_index <= leaf_index < end_index.
+    ///
+    /// # Errors
+    ///
+    /// Returns rusqlite error if database query fails
+    pub fn get_entries_ordered(
+        &self,
+        start_index: u64,
+        end_index: u64,
+    ) -> rusqlite::Result<Vec<EntryForRebuild>> {
+        let conn = self.connection();
+        let mut stmt = conn.prepare(
+            "SELECT leaf_index, payload_hash, metadata_hash
+             FROM entries
+             WHERE leaf_index >= ?1 AND leaf_index < ?2
+             ORDER BY leaf_index ASC",
+        )?;
+
+        let rows = stmt.query_map([start_index as i64, end_index as i64], |row| {
+            let leaf_index: i64 = row.get(0)?;
+            let payload_hash_vec: Vec<u8> = row.get(1)?;
+            let metadata_hash_vec: Vec<u8> = row.get(2)?;
+
+            let payload_hash: [u8; 32] = payload_hash_vec.try_into().map_err(|_| {
+                rusqlite::Error::InvalidColumnType(
+                    1,
+                    "payload_hash".to_string(),
+                    rusqlite::types::Type::Blob,
+                )
+            })?;
+
+            let metadata_hash: [u8; 32] = metadata_hash_vec.try_into().map_err(|_| {
+                rusqlite::Error::InvalidColumnType(
+                    2,
+                    "metadata_hash".to_string(),
+                    rusqlite::types::Type::Blob,
+                )
+            })?;
+
+            Ok(EntryForRebuild {
+                leaf_index: leaf_index as u64,
+                payload_hash,
+                metadata_hash,
+            })
+        })?;
+
+        rows.collect()
     }
 
     /// Get Super-Tree genesis root (None if no trees closed yet)
@@ -1019,5 +1077,83 @@ mod tests {
         assert_eq!(store.get_tree_size().unwrap(), 10);
         assert_eq!(store.get_super_tree_size().unwrap(), 5);
         assert_eq!(store.get_last_ots_submitted_super_tree_size().unwrap(), 3);
+    }
+
+    #[test]
+    fn test_get_entries_ordered_with_hash_conversion_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+
+        let mut store = IndexStore::open(&path).unwrap();
+        store.initialize().unwrap();
+
+        let tree_id = store.create_active_tree(&[0u8; 32], 0).unwrap();
+
+        // Insert entry with valid data
+        let entry = BatchInsert {
+            id: uuid::Uuid::new_v4(),
+            leaf_index: 0,
+            slab_id: 1,
+            slab_offset: 0,
+            payload_hash: [1u8; 32],
+            metadata_hash: [2u8; 32],
+            metadata_cleartext: None,
+            external_id: None,
+            tree_id,
+        };
+        store.insert_batch(&[entry]).unwrap();
+
+        // Now corrupt the data by manually inserting invalid hash size
+        {
+            let conn = store.connection_mut();
+            conn.execute(
+                "UPDATE entries SET payload_hash = ?1 WHERE leaf_index = 0",
+                rusqlite::params![&[1u8, 2u8, 3u8]], // Invalid size - only 3 bytes
+            )
+            .unwrap();
+        }
+
+        // This should trigger the error path in get_entries_ordered
+        let result = store.get_entries_ordered(0, 1);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_get_entries_ordered_with_metadata_hash_conversion_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+
+        let mut store = IndexStore::open(&path).unwrap();
+        store.initialize().unwrap();
+
+        let tree_id = store.create_active_tree(&[0u8; 32], 0).unwrap();
+
+        // Insert entry with valid data
+        let entry = BatchInsert {
+            id: uuid::Uuid::new_v4(),
+            leaf_index: 0,
+            slab_id: 1,
+            slab_offset: 0,
+            payload_hash: [1u8; 32],
+            metadata_hash: [2u8; 32],
+            metadata_cleartext: None,
+            external_id: None,
+            tree_id,
+        };
+        store.insert_batch(&[entry]).unwrap();
+
+        // Now corrupt metadata_hash by manually inserting invalid hash size
+        {
+            let conn = store.connection_mut();
+            conn.execute(
+                "UPDATE entries SET metadata_hash = ?1 WHERE leaf_index = 0",
+                rusqlite::params![&[1u8, 2u8]], // Invalid size - only 2 bytes
+            )
+            .unwrap();
+        }
+
+        // This should trigger the metadata_hash error path in get_entries_ordered
+        let result = store.get_entries_ordered(0, 1);
+        assert!(result.is_err());
     }
 }
