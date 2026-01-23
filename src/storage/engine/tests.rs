@@ -867,7 +867,6 @@ async fn test_tree_head_after_rotation() {
     assert_eq!(head_after.tree_size, head_before.tree_size);
 }
 
-
 #[tokio::test(flavor = "multi_thread")]
 async fn test_large_batch() {
     let (engine, _dir) = create_test_engine([1u8; 32]).await;
@@ -1094,7 +1093,6 @@ async fn test_tree_state_cache_consistency() {
     assert_ne!(head1.root_hash, head2.root_hash);
     assert_ne!(head2.root_hash, head3.root_hash);
 }
-
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_slab_flush_idempotency() {

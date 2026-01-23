@@ -193,6 +193,7 @@ mod tests {
             Err(crate::error::ServerError::EntryNotFound("mock".into()))
         }
 
+        #[cfg(not(tarpaulin_include))]
         fn get_inclusion_proof_by_leaf_index(
             &self,
             _leaf_index: u64,

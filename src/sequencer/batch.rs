@@ -210,6 +210,7 @@ mod tests {
             Err(crate::error::ServerError::EntryNotFound("mock".into()))
         }
 
+        #[cfg(not(tarpaulin_include))]
         fn get_inclusion_proof_by_leaf_index(
             &self,
             _leaf_index: u64,
@@ -513,14 +514,14 @@ mod tests {
             ) -> crate::error::ServerResult<InclusionProof> {
                 Err(crate::error::ServerError::EntryNotFound("mock".into()))
             }
-
-        fn get_inclusion_proof_by_leaf_index(
-            &self,
-            _leaf_index: u64,
-            _tree_size: Option<u64>,
-        ) -> crate::error::ServerResult<InclusionProof> {
-            unimplemented!()
-        }
+            #[cfg(not(tarpaulin_include))]
+            fn get_inclusion_proof_by_leaf_index(
+                &self,
+                _leaf_index: u64,
+                _tree_size: Option<u64>,
+            ) -> crate::error::ServerResult<InclusionProof> {
+                unimplemented!()
+            }
 
             fn get_consistency_proof(
                 &self,
@@ -1068,14 +1069,14 @@ mod tests {
             ) -> crate::error::ServerResult<InclusionProof> {
                 Err(crate::error::ServerError::EntryNotFound("mock".into()))
             }
-
-        fn get_inclusion_proof_by_leaf_index(
-            &self,
-            _leaf_index: u64,
-            _tree_size: Option<u64>,
-        ) -> crate::error::ServerResult<InclusionProof> {
-            unimplemented!()
-        }
+            #[cfg(not(tarpaulin_include))]
+            fn get_inclusion_proof_by_leaf_index(
+                &self,
+                _leaf_index: u64,
+                _tree_size: Option<u64>,
+            ) -> crate::error::ServerResult<InclusionProof> {
+                unimplemented!()
+            }
 
             fn get_consistency_proof(
                 &self,

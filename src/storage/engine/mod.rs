@@ -269,7 +269,6 @@ impl StorageEngine {
             new_tree_head,
         })
     }
-
 }
 
 #[async_trait::async_trait]

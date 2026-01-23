@@ -107,17 +107,17 @@ mod tests {
     #[test]
     fn test_ots_config_default() {
         let config = OtsConfig::default();
-        assert_eq!(config.calendar_urls.len(), 5);
+        assert_eq!(config.calendar_urls.len(), 4);
         assert_eq!(config.timeout_secs, 30);
         assert_eq!(config.min_confirmations, 6);
-        assert!(config.calendar_urls[0].contains("alice.btc"));
-        assert!(config.calendar_urls[1].contains("bob.btc"));
+        assert!(config.calendar_urls[0].contains("bob.btc"));
+        assert!(config.calendar_urls[1].contains("finney"));
     }
 
     #[test]
     fn test_ots_config_default_calendars() {
         let config = OtsConfig::default_calendars();
-        assert_eq!(config.calendar_urls.len(), 5);
+        assert_eq!(config.calendar_urls.len(), 4);
         assert_eq!(config.timeout_secs, 30);
         assert_eq!(config.min_confirmations, 6);
         assert_eq!(config.calendar_urls, OtsConfig::default().calendar_urls);
@@ -163,8 +163,8 @@ mod tests {
 
         let config = OtsConfig::from_env();
 
-        assert_eq!(config.calendar_urls.len(), 5);
-        assert!(config.calendar_urls[0].contains("alice.btc"));
+        assert_eq!(config.calendar_urls.len(), 4);
+        assert!(config.calendar_urls[0].contains("bob.btc"));
         assert_eq!(config.timeout_secs, 30);
         assert_eq!(config.min_confirmations, 6);
     }
@@ -201,7 +201,7 @@ mod tests {
         let config = OtsConfig::from_env();
 
         assert_eq!(config.timeout_secs, 60);
-        assert_eq!(config.calendar_urls.len(), 5);
+        assert_eq!(config.calendar_urls.len(), 4);
         assert_eq!(config.min_confirmations, 6);
 
         std::env::remove_var("ATL_OTS_TIMEOUT_SECS");
@@ -217,7 +217,7 @@ mod tests {
         let config = OtsConfig::from_env();
 
         assert_eq!(config.min_confirmations, 12);
-        assert_eq!(config.calendar_urls.len(), 5);
+        assert_eq!(config.calendar_urls.len(), 4);
         assert_eq!(config.timeout_secs, 30);
 
         std::env::remove_var("ATL_OTS_MIN_CONFIRMATIONS");

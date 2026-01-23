@@ -151,6 +151,7 @@ mod tests {
             unimplemented!("not needed for tests")
         }
 
+        #[cfg(not(tarpaulin_include))]
         fn get_inclusion_proof_by_leaf_index(
             &self,
             _leaf_index: u64,

@@ -1078,4 +1078,82 @@ mod tests {
         assert_eq!(store.get_super_tree_size().unwrap(), 5);
         assert_eq!(store.get_last_ots_submitted_super_tree_size().unwrap(), 3);
     }
+
+    #[test]
+    fn test_get_entries_ordered_with_hash_conversion_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+
+        let mut store = IndexStore::open(&path).unwrap();
+        store.initialize().unwrap();
+
+        let tree_id = store.create_active_tree(&[0u8; 32], 0).unwrap();
+
+        // Insert entry with valid data
+        let entry = BatchInsert {
+            id: uuid::Uuid::new_v4(),
+            leaf_index: 0,
+            slab_id: 1,
+            slab_offset: 0,
+            payload_hash: [1u8; 32],
+            metadata_hash: [2u8; 32],
+            metadata_cleartext: None,
+            external_id: None,
+            tree_id,
+        };
+        store.insert_batch(&[entry]).unwrap();
+
+        // Now corrupt the data by manually inserting invalid hash size
+        {
+            let conn = store.connection_mut();
+            conn.execute(
+                "UPDATE entries SET payload_hash = ?1 WHERE leaf_index = 0",
+                rusqlite::params![&[1u8, 2u8, 3u8]], // Invalid size - only 3 bytes
+            )
+            .unwrap();
+        }
+
+        // This should trigger the error path in get_entries_ordered
+        let result = store.get_entries_ordered(0, 1);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_get_entries_ordered_with_metadata_hash_conversion_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.db");
+
+        let mut store = IndexStore::open(&path).unwrap();
+        store.initialize().unwrap();
+
+        let tree_id = store.create_active_tree(&[0u8; 32], 0).unwrap();
+
+        // Insert entry with valid data
+        let entry = BatchInsert {
+            id: uuid::Uuid::new_v4(),
+            leaf_index: 0,
+            slab_id: 1,
+            slab_offset: 0,
+            payload_hash: [1u8; 32],
+            metadata_hash: [2u8; 32],
+            metadata_cleartext: None,
+            external_id: None,
+            tree_id,
+        };
+        store.insert_batch(&[entry]).unwrap();
+
+        // Now corrupt metadata_hash by manually inserting invalid hash size
+        {
+            let conn = store.connection_mut();
+            conn.execute(
+                "UPDATE entries SET metadata_hash = ?1 WHERE leaf_index = 0",
+                rusqlite::params![&[1u8, 2u8]], // Invalid size - only 2 bytes
+            )
+            .unwrap();
+        }
+
+        // This should trigger the metadata_hash error path in get_entries_ordered
+        let result = store.get_entries_ordered(0, 1);
+        assert!(result.is_err());
+    }
 }
