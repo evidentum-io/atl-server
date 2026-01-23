@@ -239,9 +239,9 @@ impl IndexStore {
              INNER JOIN (
                  SELECT anchor_type, MIN(tree_size) as min_tree_size
                  FROM anchors
-                 WHERE tree_size >= ?1 AND status = 'confirmed'
+                 WHERE (tree_size >= ?1 OR target = 'super_root') AND status = 'confirmed'
                  GROUP BY anchor_type
-             ) AS best ON a.anchor_type = best.anchor_type AND a.tree_size = best.min_tree_size
+             ) AS best ON a.anchor_type = best.anchor_type AND (a.tree_size = best.min_tree_size OR (a.tree_size IS NULL AND best.min_tree_size IS NULL))
              WHERE a.status = 'confirmed'
              ORDER BY a.tree_size ASC
              LIMIT ?2",
