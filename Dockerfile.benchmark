@@ -1,0 +1,26 @@
+FROM rustlang/rust:nightly-bullseye
+
+RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /usr/src/app
+
+COPY atl-core ./atl-core
+COPY atl-server ./atl-server
+
+WORKDIR /usr/src/app/atl-server
+RUN cargo build --release
+
+RUN mkdir -p /app && \
+    cp target/release/atl-server /usr/local/bin/atl-server && \
+    cp signing.key /app/signing.key
+
+WORKDIR /app
+ENV RUST_LOG=error
+ENV ATL_SERVER_PORT=3388
+ENV ATL_DB_PATH=/tmp/atl.db
+ENV ATL_SIGNING_KEY_PATH=/app/signing.key
+ENV ATL_SERVER_HOST=0.0.0.0 
+
+EXPOSE 3388
+
+CMD ["atl-server"]
