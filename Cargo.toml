@@ -1,6 +1,6 @@
 [package]
 name = "atl-server"
-version = "0.22.16"
+version = "0.22.17"
 edition = "2021"
 rust-version = "1.92.0"
 authors = ["Dmitrii Zatona <dmitrii@zatona.dev>"]
@@ -38,7 +38,10 @@ rasn-cms = { version = "0.28", optional = true }
 reqwest = { version = "0.12", features = ["blocking", "json"], optional = true }
 
 # Monitoring (optional - disabled by default)
-betteruptime-heartbeat = { git = "https://github.com/thunderwind-io/rust-betteruptime-heartbeat", optional = true }
+betteruptime-heartbeat = { git = "https://github.com/thunderwind-io/rust-betteruptime-heartbeat", rev = "6ecdaa94ca0e859633b3b7a08c42eff6eba5a155", optional = true }
+
+# Constant-time comparisons (timing attack prevention)
+subtle = "2"
 
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }

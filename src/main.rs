@@ -345,13 +345,16 @@ async fn run_sequencer(args: Args) -> anyhow::Result<()> {
     let grpc_service = grpc_server.into_service();
 
     // Start gRPC server
-    let grpc_addr = format!("0.0.0.0:{}", args.grpc_port);
+    let grpc_addr_str = format!("0.0.0.0:{}", args.grpc_port);
+    let grpc_addr: std::net::SocketAddr = grpc_addr_str
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid gRPC address '{}': {}", grpc_addr_str, e))?;
     tracing::info!("Starting gRPC server on {}", grpc_addr);
 
     let grpc_handle = tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(grpc_service)
-            .serve(grpc_addr.parse().unwrap())
+            .serve(grpc_addr)
             .await
     });
 

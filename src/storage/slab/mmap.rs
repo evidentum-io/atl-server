@@ -61,10 +61,14 @@ impl SlabFile {
         file.set_len(file_size as u64)?;
 
         // Memory-map the file
+        // SAFETY: File was just created/truncated to the correct size via set_len above.
+        // The mapping is valid for the file's lifetime and the mmap struct owns the mapping.
         let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
 
         // Write header
         let header = SlabHeader::new(slab_id, start_index, max_leaves);
+        // SAFETY: SlabHeader is repr(C) with a statically known size (SlabHeader::SIZE).
+        // The pointer is valid and correctly aligned because it comes from a local stack variable.
         let header_bytes = unsafe {
             std::slice::from_raw_parts(&header as *const SlabHeader as *const u8, SlabHeader::SIZE)
         };
@@ -98,6 +102,8 @@ impl SlabFile {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
 
         // Memory-map the file
+        // SAFETY: File exists and was opened with both read and write permissions.
+        // The mapping lifetime is tied to the MmapMut struct which is stored in Self.
         let mmap = unsafe { MmapOptions::new().map_mut(&file)? };
 
         // Read header
@@ -254,6 +260,9 @@ impl SlabFile {
             ));
         }
 
+        // SAFETY: read_unaligned is used to handle potentially unaligned data read from the mmap
+        // buffer. The length check above guarantees the slice is at least SlabHeader::SIZE bytes,
+        // so the pointer arithmetic is in bounds and no out-of-bounds read can occur.
         let header = unsafe { std::ptr::read_unaligned(mmap.as_ptr() as *const SlabHeader) };
 
         if header.magic != SLAB_MAGIC {
@@ -291,6 +300,8 @@ impl SlabFile {
         let mut header = SlabHeader::new(self.slab_id, self.start_index, self.max_leaves);
         header.update_leaf_count(self.leaf_count);
 
+        // SAFETY: SlabHeader is repr(C) with a statically known size (SlabHeader::SIZE).
+        // The pointer is valid and correctly aligned because it comes from a local stack variable.
         let header_bytes = unsafe {
             std::slice::from_raw_parts(&header as *const SlabHeader as *const u8, SlabHeader::SIZE)
         };

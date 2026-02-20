@@ -10,6 +10,8 @@ use axum::{
     response::Response,
 };
 
+use subtle::ConstantTimeEq;
+
 use crate::api::state::AppState;
 use crate::error::ServerError;
 
@@ -23,10 +25,12 @@ pub async fn auth_middleware(
     req: Request<Body>,
     next: Next,
 ) -> Result<Response, (StatusCode, String)> {
-    let tokens = state
-        .access_tokens
-        .as_ref()
-        .expect("middleware only applied when tokens configured");
+    let tokens = state.access_tokens.as_ref().ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "auth middleware misconfigured: no tokens".to_string(),
+        )
+    })?;
 
     // Get Authorization header
     let auth_header = req.headers().get(AUTHORIZATION).ok_or_else(|| {
@@ -52,9 +56,14 @@ pub async fn auth_middleware(
         ));
     }
 
-    // Extract and validate token
+    // Extract and validate token using constant-time comparison to prevent timing attacks.
+    // The length check leaks token length, but the token value itself is protected.
     let token = &auth_str[7..];
-    if !tokens.iter().any(|t| t == token) {
+    if !tokens.iter().any(|t| {
+        let t_bytes = t.as_bytes();
+        let token_bytes = token.as_bytes();
+        t_bytes.len() == token_bytes.len() && t_bytes.ct_eq(token_bytes).into()
+    }) {
         return Err((
             StatusCode::UNAUTHORIZED,
             ServerError::AuthInvalid.to_string(),
@@ -384,8 +393,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "middleware only applied when tokens configured")]
-    async fn test_auth_middleware_panic_when_no_tokens_configured() {
+    async fn test_auth_middleware_returns_500_when_no_tokens_configured() {
         let state = create_test_state(None);
         let app = create_test_router(state);
 
@@ -395,7 +403,7 @@ mod tests {
             .body(Body::empty())
             .unwrap();
 
-        // This should panic because access_tokens is None
-        let _ = app.oneshot(req).await;
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }
