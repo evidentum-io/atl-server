@@ -16,4 +16,11 @@ pub struct AnchorJsonRequest {
     /// Optional client-provided correlation ID
     #[serde(default)]
     pub external_id: Option<String>,
+
+    /// When `true`, the `payload` field is treated as a pre-computed SHA-256 hash
+    /// (format: `"sha256:<64 hex chars>"`). The server will use it directly as
+    /// `payload_hash` instead of hashing the payload again. This is used by the
+    /// billing proxy for file uploads where the hash is already computed.
+    #[serde(default)]
+    pub file: Option<bool>,
 }

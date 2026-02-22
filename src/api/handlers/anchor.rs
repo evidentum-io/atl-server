@@ -76,7 +76,11 @@ async fn anchor_json(
         .map_err(|e| ServerError::InvalidArgument(format!("Invalid JSON: {}", e)))?;
 
     // Compute hashes
-    let payload_hash = hash_payload(&req.payload);
+    let payload_hash = if req.file.unwrap_or(false) {
+        parse_precomputed_hash(&req.payload)?
+    } else {
+        hash_payload(&req.payload)
+    };
     let metadata_hash = hash_metadata(req.metadata.as_ref());
 
     // Generate and return receipt
@@ -171,6 +175,35 @@ pub async fn get_anchor(
         .map_err(|e| ServerError::InvalidArgument(format!("Failed to serialize receipt: {}", e)))?;
 
     Ok(Json(receipt))
+}
+
+/// Parse a pre-computed SHA-256 hash from a JSON string value.
+///
+/// Expects format `"sha256:<64 hex chars>"`. Returns the 32-byte hash.
+fn parse_precomputed_hash(value: &serde_json::Value) -> Result<[u8; 32], ServerError> {
+    let s = value.as_str().ok_or_else(|| {
+        ServerError::InvalidArgument("file=true requires payload to be a string".into())
+    })?;
+
+    let hex_str = s.strip_prefix("sha256:").ok_or_else(|| {
+        ServerError::InvalidArgument(
+            "file=true requires payload format \"sha256:<64 hex chars>\"".into(),
+        )
+    })?;
+
+    if hex_str.len() != 64 {
+        return Err(ServerError::InvalidArgument(format!(
+            "invalid hash length: expected 64 hex chars, got {}",
+            hex_str.len()
+        )));
+    }
+
+    let bytes = hex::decode(hex_str)
+        .map_err(|e| ServerError::InvalidArgument(format!("invalid hex in payload hash: {e}")))?;
+
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&bytes);
+    Ok(hash)
 }
 
 #[cfg(test)]
@@ -355,6 +388,7 @@ mod tests {
             payload: serde_json::json!({"data": "test"}),
             metadata: Some(serde_json::json!({"source": "test"})),
             external_id: Some("ext-123".to_string()),
+            file: None,
         };
 
         let body_bytes = serde_json::to_vec(&request).unwrap();
@@ -431,6 +465,7 @@ mod tests {
             payload: serde_json::json!({"data": "test"}),
             metadata: None,
             external_id: None,
+            file: None,
         };
 
         let body_bytes = serde_json::to_vec(&request).unwrap();
@@ -463,6 +498,7 @@ mod tests {
             payload: serde_json::json!({"minimal": true}),
             metadata: None,
             external_id: None,
+            file: None,
         };
 
         let body_bytes = serde_json::to_vec(&request).unwrap();
@@ -504,6 +540,7 @@ mod tests {
             payload: serde_json::json!({"data": "test"}),
             metadata: None,
             external_id: None,
+            file: None,
         };
 
         let body_bytes = serde_json::to_vec(&request).unwrap();
@@ -656,6 +693,7 @@ mod tests {
             payload: serde_json::json!({"data": "test"}),
             metadata: Some(serde_json::json!({"source": "api", "version": "1.0"})),
             external_id: Some("test-ext-id".to_string()),
+            file: None,
         };
 
         let body_bytes = serde_json::to_vec(&request).unwrap();
@@ -676,6 +714,7 @@ mod tests {
             payload: serde_json::json!({"data": "test"}),
             metadata: Some(serde_json::json!({})),
             external_id: None,
+            file: None,
         };
 
         let body_bytes = serde_json::to_vec(&request).unwrap();
@@ -702,6 +741,7 @@ mod tests {
             }),
             metadata: None,
             external_id: None,
+            file: None,
         };
 
         let body_bytes = serde_json::to_vec(&request).unwrap();
@@ -720,6 +760,7 @@ mod tests {
             payload: serde_json::json!({"data": "test"}),
             metadata: None,
             external_id: None,
+            file: None,
         };
 
         let body_bytes = serde_json::to_vec(&request).unwrap();
@@ -756,6 +797,7 @@ mod tests {
             payload: serde_json::json!({"a": 1, "b": 2}),
             metadata: None,
             external_id: None,
+            file: None,
         };
 
         let body1_bytes = serde_json::to_vec(&request).unwrap();
@@ -768,6 +810,7 @@ mod tests {
             payload: serde_json::json!({"b": 2, "a": 1}),
             metadata: None,
             external_id: None,
+            file: None,
         };
 
         let body2_bytes = serde_json::to_vec(&request2).unwrap();
@@ -775,5 +818,108 @@ mod tests {
 
         let result2 = anchor_json(state.clone(), body2).await;
         assert!(result2.is_ok());
+    }
+
+    #[test]
+    fn test_parse_precomputed_hash_valid() {
+        let value = serde_json::json!(
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        let result = parse_precomputed_hash(&value);
+        assert!(result.is_ok());
+        let hash = result.unwrap();
+        assert_eq!(
+            hex::encode(hash),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn test_parse_precomputed_hash_not_string() {
+        let value = serde_json::json!(42);
+        let result = parse_precomputed_hash(&value);
+        assert!(matches!(result, Err(ServerError::InvalidArgument(_))));
+    }
+
+    #[test]
+    fn test_parse_precomputed_hash_missing_prefix() {
+        let value =
+            serde_json::json!("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        let result = parse_precomputed_hash(&value);
+        assert!(matches!(result, Err(ServerError::InvalidArgument(_))));
+    }
+
+    #[test]
+    fn test_parse_precomputed_hash_wrong_length() {
+        let value = serde_json::json!("sha256:abcdef");
+        let result = parse_precomputed_hash(&value);
+        assert!(matches!(result, Err(ServerError::InvalidArgument(_))));
+    }
+
+    #[test]
+    fn test_parse_precomputed_hash_invalid_hex() {
+        let value = serde_json::json!(
+            "sha256:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+        );
+        let result = parse_precomputed_hash(&value);
+        assert!(matches!(result, Err(ServerError::InvalidArgument(_))));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_anchor_json_file_flag_uses_precomputed_hash() {
+        let (state, _dir) = create_standalone_state().await;
+
+        let request = AnchorJsonRequest {
+            payload: serde_json::json!(
+                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            ),
+            metadata: Some(serde_json::json!({"type": "file-upload", "filename": "test.pdf"})),
+            external_id: Some("ext-file-001".to_string()),
+            file: Some(true),
+        };
+
+        let body_bytes = serde_json::to_vec(&request).unwrap();
+        let body = Body::from(body_bytes);
+
+        let result = anchor_json(state, body).await;
+        assert!(result.is_ok());
+
+        let (status, json) = result.unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+
+        // payload_hash in receipt must equal the pre-computed hash
+        let payload_hash = json.0["entry"]["payload_hash"].as_str().unwrap();
+        assert_eq!(
+            payload_hash,
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_anchor_json_file_flag_false_hashes_normally() {
+        let (state, _dir) = create_standalone_state().await;
+
+        let request = AnchorJsonRequest {
+            payload: serde_json::json!(
+                "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            ),
+            metadata: None,
+            external_id: None,
+            file: Some(false),
+        };
+
+        let body_bytes = serde_json::to_vec(&request).unwrap();
+        let body = Body::from(body_bytes);
+
+        let result = anchor_json(state, body).await;
+        assert!(result.is_ok());
+
+        let (_, json) = result.unwrap();
+        let payload_hash = json.0["entry"]["payload_hash"].as_str().unwrap();
+        // Without file flag, payload is hashed — so payload_hash != the string itself
+        assert_ne!(
+            payload_hash,
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 }
