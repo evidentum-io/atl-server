@@ -237,11 +237,12 @@ impl IndexStore {
             "SELECT a.id, a.tree_size, a.anchor_type, a.target, a.anchored_hash, a.super_tree_size, a.timestamp, a.token, a.metadata
              FROM anchors a
              INNER JOIN (
-                 SELECT anchor_type, MIN(tree_size) as min_tree_size
+                 SELECT anchor_type, MIN(tree_size) as min_tree_size, MIN(id) as min_id
                  FROM anchors
                  WHERE (tree_size >= ?1 OR target = 'super_root') AND status = 'confirmed'
                  GROUP BY anchor_type
-             ) AS best ON a.anchor_type = best.anchor_type AND (a.tree_size = best.min_tree_size OR (a.tree_size IS NULL AND best.min_tree_size IS NULL))
+             ) AS best ON a.anchor_type = best.anchor_type
+                 AND (a.tree_size = best.min_tree_size OR (a.tree_size IS NULL AND best.min_tree_size IS NULL AND a.id = best.min_id))
              WHERE a.status = 'confirmed'
              ORDER BY a.tree_size ASC
              LIMIT ?2",
@@ -1385,6 +1386,57 @@ mod tests {
         // Try to update metadata on non-existent anchor
         let result = store.update_anchor_metadata(99999, serde_json::json!({"test": true}));
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_get_anchors_covering_many_null_ots_does_not_evict_tsa() {
+        let store = create_test_store();
+
+        // Insert many confirmed OTS super_root anchors with NULL tree_size
+        for i in 0..15u8 {
+            store
+                .connection()
+                .execute(
+                    "INSERT INTO anchors (tree_size, anchor_type, target, anchored_hash, super_tree_size, timestamp, token, status, created_at)
+                     VALUES (NULL, 'bitcoin_ots', 'super_root', ?1, ?2, ?3, ?4, 'confirmed', ?5)",
+                    rusqlite::params![
+                        [i; 32].as_slice(),
+                        (i as i64 + 1) * 10,
+                        1_234_567_890_000_000_000i64 + i64::from(i),
+                        vec![i],
+                        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+                    ],
+                )
+                .expect("Failed to insert OTS anchor");
+        }
+
+        // Insert one TSA anchor at tree_size=32
+        let tsa = create_test_anchor_rfc3161();
+        store
+            .store_anchor_returning_id(32, &tsa, "confirmed")
+            .expect("Failed to store TSA anchor");
+
+        // get_anchors_covering(32, 10) must return the TSA anchor
+        let covering = store
+            .get_anchors_covering(32, 10)
+            .expect("Failed to get covering anchors");
+
+        let has_tsa = covering
+            .iter()
+            .any(|a| a.anchor_type == AnchorType::Rfc3161);
+        assert!(
+            has_tsa,
+            "TSA anchor must not be evicted by multiple OTS anchors with NULL tree_size"
+        );
+
+        let ots_count = covering
+            .iter()
+            .filter(|a| a.anchor_type == AnchorType::BitcoinOts)
+            .count();
+        assert_eq!(
+            ots_count, 1,
+            "Only one OTS anchor should be returned per anchor_type"
+        );
     }
 
     #[test]
