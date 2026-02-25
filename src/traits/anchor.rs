@@ -39,7 +39,7 @@ impl std::fmt::Display for AnchorType {
 
 /// An external timestamp anchor
 #[allow(dead_code)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Anchor {
     /// Type of anchor
     pub anchor_type: AnchorType,

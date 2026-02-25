@@ -140,7 +140,7 @@ pub async fn handle_upgrade_receipt(
 
     let receipt_tree_size = leaf_index + 1;
 
-    let bitcoin_anchor = find_bitcoin_anchor_covering(&**server.storage(), receipt_tree_size)
+    let bitcoin_anchor = find_bitcoin_anchor_covering(server, &entry_id)
         .map_err(|e| Status::internal(e.to_string()))?;
 
     match bitcoin_anchor {
@@ -209,22 +209,36 @@ pub async fn handle_upgrade_receipt(
 }
 
 fn find_bitcoin_anchor_covering(
-    storage: &dyn crate::traits::Storage,
-    target_tree_size: u64,
+    server: &SequencerGrpcServer,
+    entry_id: &uuid::Uuid,
 ) -> crate::error::ServerResult<Option<crate::traits::anchor::Anchor>> {
-    let tree_head = storage.tree_head();
+    // Get entry's tree info to find data_tree_index
+    let index_store = server.storage().index_store();
+    let index = tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(async { index_store.lock().await })
+    });
 
-    for size in target_tree_size..=tree_head.tree_size {
-        let anchors = storage.get_anchors(size)?;
-        for anchor in anchors {
-            if anchor.anchor_type == crate::traits::anchor::AnchorType::BitcoinOts
-                && (anchor.tree_size >= target_tree_size
-                    || (anchor.target == "super_root" && anchor.super_tree_size.unwrap_or(0) > 0))
-            {
-                return Ok(Some(anchor));
-            }
-        }
-    }
+    let entry = index
+        .get_entry(entry_id)
+        .map_err(|e| {
+            crate::error::ServerError::Storage(crate::error::StorageError::Database(e.to_string()))
+        })?
+        .ok_or_else(|| crate::error::ServerError::EntryNotFound(entry_id.to_string()))?;
 
-    Ok(None)
+    let tree_id = match entry.tree_id {
+        Some(id) => id,
+        None => return Ok(None), // Active tree, no OTS anchor possible
+    };
+
+    let data_tree_index = match index.get_tree_data_tree_index(tree_id).map_err(|e| {
+        crate::error::ServerError::Storage(crate::error::StorageError::Database(e.to_string()))
+    })? {
+        Some(idx) => idx,
+        None => return Ok(None), // Tree not in super tree yet
+    };
+
+    drop(index); // Release lock before calling storage method
+
+    // Query OTS anchor covering this data_tree_index
+    server.storage().get_ots_anchor_covering(data_tree_index)
 }

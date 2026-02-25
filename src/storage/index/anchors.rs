@@ -4,7 +4,8 @@
 //!
 //! This module contains methods for managing anchors:
 //! - Storing anchors (store_anchor, store_anchor_returning_id)
-//! - Querying anchors (get_anchors, get_pending_ots_anchors, get_anchors_covering)
+//! - Querying anchors (get_anchors, get_pending_ots_anchors,
+//!   get_tsa_anchor_covering, get_ots_anchor_covering)
 //! - Updating anchors (update_anchor_status, update_anchor_token, update_anchor_metadata)
 //! - Atomic operations (confirm_ots_anchor_atomic)
 
@@ -221,68 +222,51 @@ impl IndexStore {
         Ok(())
     }
 
-    /// Get anchors that cover a specific tree size.
+    /// Get the minimum confirmed TSA anchor covering a data tree position.
     ///
-    /// Two categories of anchors are returned:
-    ///
-    /// **Data-tree anchors** (`target = 'data_tree_root'`): for each `anchor_type` present,
-    /// returns the single anchor with the minimum `tree_size >= target_tree_size`.
-    ///
-    /// **Super-root OTS anchors** (`target = 'super_root'`, `anchor_type = 'bitcoin_ots'`):
-    /// returns all confirmed anchors. The caller (`select_anchors_for_receipt`) filters by
-    /// `super_tree_size > data_tree_index`. Returning only the oldest anchor via `MIN(id)`
-    /// would discard anchors that actually cover the entry when earlier anchors have a
-    /// smaller `super_tree_size`.
-    ///
-    /// Only returns 'confirmed' status anchors. The combined result is capped by `limit`.
-    pub fn get_anchors_covering(
-        &self,
-        target_tree_size: u64,
-        limit: usize,
-    ) -> rusqlite::Result<Vec<Anchor>> {
-        let conn = self.connection();
-
-        // Part 1: best data-tree anchor per anchor_type (min tree_size >= target).
-        let mut data_tree_stmt = conn.prepare(
-            "SELECT a.id, a.tree_size, a.anchor_type, a.target, a.anchored_hash, a.super_tree_size, a.timestamp, a.token, a.metadata
-             FROM anchors a
-             INNER JOIN (
-                 SELECT anchor_type, MIN(tree_size) AS min_tree_size
+    /// Returns the RFC 3161 anchor with the smallest tree_size >= `tree_size`,
+    /// or None if no such anchor exists.
+    pub fn get_tsa_anchor_covering(&self, tree_size: u64) -> rusqlite::Result<Option<Anchor>> {
+        self.connection()
+            .query_row(
+                "SELECT id, tree_size, anchor_type, target, anchored_hash,
+                        super_tree_size, timestamp, token, metadata
                  FROM anchors
                  WHERE status = 'confirmed'
+                   AND anchor_type = 'rfc3161'
                    AND target = 'data_tree_root'
                    AND tree_size >= ?1
-                 GROUP BY anchor_type
-             ) AS best
-               ON a.anchor_type = best.anchor_type
-              AND a.tree_size    = best.min_tree_size
-              AND a.target       = 'data_tree_root'
-             WHERE a.status = 'confirmed'
-             ORDER BY a.tree_size ASC",
-        )?;
+                 ORDER BY tree_size ASC
+                 LIMIT 1",
+                rusqlite::params![tree_size as i64],
+                row_to_anchor,
+            )
+            .optional()
+    }
 
-        let data_tree_rows = data_tree_stmt
-            .query_map(params![target_tree_size as i64], row_to_anchor)?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        // Part 2: all confirmed super-root OTS anchors (filtered by super_tree_size in caller).
-        let mut super_root_stmt = conn.prepare(
-            "SELECT id, tree_size, anchor_type, target, anchored_hash, super_tree_size, timestamp, token, metadata
-             FROM anchors
-             WHERE status = 'confirmed'
-               AND target = 'super_root'
-               AND anchor_type = 'bitcoin_ots'
-             ORDER BY super_tree_size ASC",
-        )?;
-
-        let super_root_rows = super_root_stmt
-            .query_map(params![], row_to_anchor)?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let mut result = data_tree_rows;
-        result.extend(super_root_rows);
-        result.truncate(limit);
-        Ok(result)
+    /// Get the minimum confirmed OTS anchor covering a data tree index.
+    ///
+    /// Returns the Bitcoin OTS anchor with the smallest super_tree_size
+    /// that is > `data_tree_index`, or None if no such anchor exists.
+    pub fn get_ots_anchor_covering(
+        &self,
+        data_tree_index: u64,
+    ) -> rusqlite::Result<Option<Anchor>> {
+        self.connection()
+            .query_row(
+                "SELECT id, tree_size, anchor_type, target, anchored_hash,
+                        super_tree_size, timestamp, token, metadata
+                 FROM anchors
+                 WHERE status = 'confirmed'
+                   AND anchor_type = 'bitcoin_ots'
+                   AND target = 'super_root'
+                   AND super_tree_size > ?1
+                 ORDER BY super_tree_size ASC
+                 LIMIT 1",
+                rusqlite::params![data_tree_index as i64],
+                row_to_anchor,
+            )
+            .optional()
     }
 
     /// Create OTS anchor for Super Root (v2.0)
@@ -670,127 +654,6 @@ mod tests {
         let anchors = store.get_anchors(100).expect("Failed to get anchors");
         assert_eq!(anchors.len(), 1);
         assert_eq!(anchors[0].metadata, new_metadata);
-    }
-
-    #[test]
-    fn test_get_anchors_covering_empty() {
-        let store = create_test_store();
-        let anchors = store
-            .get_anchors_covering(100, 10)
-            .expect("Failed to get covering anchors");
-        assert_eq!(anchors.len(), 0);
-    }
-
-    #[test]
-    fn test_get_anchors_covering_exact_match() {
-        let store = create_test_store();
-        let anchor = create_test_anchor_rfc3161();
-
-        store
-            .store_anchor_returning_id(100, &anchor, "confirmed")
-            .expect("Failed to store anchor");
-
-        let covering = store
-            .get_anchors_covering(100, 10)
-            .expect("Failed to get covering anchors");
-        assert_eq!(covering.len(), 1);
-        assert_eq!(covering[0].tree_size, 100);
-    }
-
-    #[test]
-    fn test_get_anchors_covering_filters_by_status() {
-        let store = create_test_store();
-        let anchor = create_test_anchor_rfc3161();
-
-        // Store as pending
-        store
-            .store_anchor_returning_id(100, &anchor, "pending")
-            .expect("Failed to store anchor");
-
-        // Should not return pending anchors
-        let covering = store
-            .get_anchors_covering(100, 10)
-            .expect("Failed to get covering anchors");
-        assert_eq!(covering.len(), 0);
-    }
-
-    #[test]
-    fn test_get_anchors_covering_orders_by_tree_size() {
-        let store = create_test_store();
-
-        let anchor1 = create_test_anchor_rfc3161();
-        let anchor2 = create_test_anchor_rfc3161();
-
-        store
-            .store_anchor_returning_id(200, &anchor1, "confirmed")
-            .expect("Failed to store anchor1");
-        store
-            .store_anchor_returning_id(150, &anchor2, "confirmed")
-            .expect("Failed to store anchor2");
-
-        // Looking for anchors covering size 100
-        let covering = store
-            .get_anchors_covering(100, 10)
-            .expect("Failed to get covering anchors");
-        assert!(!covering.is_empty());
-        // Should get the closest (minimum) tree_size first
-        assert_eq!(covering[0].tree_size, 150);
-    }
-
-    #[test]
-    fn test_get_anchors_covering_respects_limit() {
-        let store = create_test_store();
-
-        let anchor1 = create_test_anchor_rfc3161();
-        let mut anchor2 = create_test_anchor_ots();
-        anchor2.tree_size = 150;
-
-        store
-            .store_anchor_returning_id(150, &anchor1, "confirmed")
-            .expect("Failed to store anchor1");
-        store
-            .store_anchor_returning_id(150, &anchor2, "confirmed")
-            .expect("Failed to store anchor2");
-
-        let covering = store
-            .get_anchors_covering(100, 1)
-            .expect("Failed to get covering anchors");
-        assert!(covering.len() <= 1);
-    }
-
-    #[test]
-    fn test_get_anchors_covering_min_per_type() {
-        let store = create_test_store();
-
-        let rfc1 = create_test_anchor_rfc3161();
-        let mut rfc2 = create_test_anchor_rfc3161();
-        rfc2.tree_size = 200;
-
-        let ots1 = create_test_anchor_ots();
-        let mut ots2 = create_test_anchor_ots();
-        ots2.tree_size = 250;
-
-        // Store multiple anchors of same type
-        store
-            .store_anchor_returning_id(100, &rfc1, "confirmed")
-            .expect("Failed to store rfc1");
-        store
-            .store_anchor_returning_id(200, &rfc2, "confirmed")
-            .expect("Failed to store rfc2");
-        store
-            .store_anchor_returning_id(200, &ots1, "confirmed")
-            .expect("Failed to store ots1");
-        store
-            .store_anchor_returning_id(250, &ots2, "confirmed")
-            .expect("Failed to store ots2");
-
-        // Should return only min tree_size per anchor type
-        let covering = store
-            .get_anchors_covering(100, 10)
-            .expect("Failed to get covering anchors");
-        assert_eq!(covering.len(), 2); // One per anchor type
-        assert_eq!(covering[0].tree_size, 100); // Min RFC3161
-        assert_eq!(covering[1].tree_size, 200); // Min OTS
     }
 
     #[test]
@@ -1212,22 +1075,6 @@ mod tests {
     }
 
     #[test]
-    fn test_get_anchors_covering_below_min_tree_size() {
-        let store = create_test_store();
-
-        let anchor = create_test_anchor_rfc3161();
-        store
-            .store_anchor_returning_id(100, &anchor, "confirmed")
-            .expect("Failed to store anchor");
-
-        // Looking for anchors covering size 150, but only have size 100
-        let covering = store
-            .get_anchors_covering(150, 10)
-            .expect("Failed to get covering anchors");
-        assert_eq!(covering.len(), 0);
-    }
-
-    #[test]
     fn test_confirm_ots_anchor_atomic_no_tree() {
         let mut store = create_test_store();
 
@@ -1417,63 +1264,254 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    // Tests for get_tsa_anchor_covering
+
     #[test]
-    fn test_get_anchors_covering_many_null_ots_does_not_evict_tsa() {
+    fn should_return_none_when_no_tsa_anchors_exist() {
+        let store = create_test_store();
+        let result = store
+            .get_tsa_anchor_covering(100)
+            .expect("Query should not fail");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn should_return_exact_match_tsa_anchor() {
+        let store = create_test_store();
+        let anchor = create_test_anchor_rfc3161();
+        store
+            .store_anchor_returning_id(100, &anchor, "confirmed")
+            .expect("Failed to store anchor");
+
+        let result = store
+            .get_tsa_anchor_covering(100)
+            .expect("Query should not fail");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().tree_size, 100);
+    }
+
+    #[test]
+    fn should_return_minimum_covering_tsa_anchor() {
         let store = create_test_store();
 
-        // Insert many confirmed OTS super_root anchors with NULL tree_size
-        for i in 0..15u8 {
+        let mut a100 = create_test_anchor_rfc3161();
+        a100.anchored_hash = [0x01u8; 32];
+        store
+            .store_anchor_returning_id(100, &a100, "confirmed")
+            .expect("Failed to store anchor at 100");
+
+        let mut a200 = create_test_anchor_rfc3161();
+        a200.anchored_hash = [0x02u8; 32];
+        store
+            .store_anchor_returning_id(200, &a200, "confirmed")
+            .expect("Failed to store anchor at 200");
+
+        let mut a300 = create_test_anchor_rfc3161();
+        a300.anchored_hash = [0x03u8; 32];
+        store
+            .store_anchor_returning_id(300, &a300, "confirmed")
+            .expect("Failed to store anchor at 300");
+
+        let result = store
+            .get_tsa_anchor_covering(150)
+            .expect("Query should not fail");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().tree_size, 200);
+    }
+
+    #[test]
+    fn should_skip_pending_tsa_anchors() {
+        let store = create_test_store();
+        let anchor = create_test_anchor_rfc3161();
+        store
+            .store_anchor_returning_id(100, &anchor, "pending")
+            .expect("Failed to store pending anchor");
+
+        let result = store
+            .get_tsa_anchor_covering(50)
+            .expect("Query should not fail");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn should_return_none_when_all_tsa_anchors_below_target() {
+        let store = create_test_store();
+        let anchor = create_test_anchor_rfc3161();
+        store
+            .store_anchor_returning_id(50, &anchor, "confirmed")
+            .expect("Failed to store anchor");
+
+        let result = store
+            .get_tsa_anchor_covering(100)
+            .expect("Query should not fail");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn should_ignore_ots_anchors_in_tsa_query() {
+        let store = create_test_store();
+        let mut anchor = create_test_anchor_ots();
+        anchor.target = "data_tree_root".to_string();
+        store
+            .store_anchor_returning_id(100, &anchor, "confirmed")
+            .expect("Failed to store OTS anchor");
+
+        let result = store
+            .get_tsa_anchor_covering(50)
+            .expect("Query should not fail");
+        assert_eq!(result, None);
+    }
+
+    // Tests for get_ots_anchor_covering
+
+    #[test]
+    fn should_return_none_when_no_ots_anchors_exist() {
+        let store = create_test_store();
+        let result = store
+            .get_ots_anchor_covering(0)
+            .expect("Query should not fail");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn should_return_ots_anchor_covering_index() {
+        let store = create_test_store();
+        store
+            .connection()
+            .execute(
+                "INSERT INTO anchors (tree_size, anchor_type, target, anchored_hash,
+                        super_tree_size, timestamp, token, status, created_at)
+                 VALUES (NULL, 'bitcoin_ots', 'super_root', ?1, 10, ?2, ?3, 'confirmed', ?4)",
+                rusqlite::params![
+                    [0x11u8; 32].as_slice(),
+                    1_234_567_890_000_000_000i64,
+                    vec![0xAAu8],
+                    chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+                ],
+            )
+            .expect("Failed to insert OTS anchor");
+
+        let result = store
+            .get_ots_anchor_covering(5)
+            .expect("Query should not fail");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().super_tree_size, Some(10));
+    }
+
+    #[test]
+    fn should_return_minimum_covering_ots_anchor() {
+        let store = create_test_store();
+
+        for (hash_byte, super_size) in [(0x01u8, 5i64), (0x02, 10), (0x03, 20)] {
             store
                 .connection()
                 .execute(
-                    "INSERT INTO anchors (tree_size, anchor_type, target, anchored_hash, super_tree_size, timestamp, token, status, created_at)
+                    "INSERT INTO anchors (tree_size, anchor_type, target, anchored_hash,
+                            super_tree_size, timestamp, token, status, created_at)
                      VALUES (NULL, 'bitcoin_ots', 'super_root', ?1, ?2, ?3, ?4, 'confirmed', ?5)",
                     rusqlite::params![
-                        [i; 32].as_slice(),
-                        (i as i64 + 1) * 10,
-                        1_234_567_890_000_000_000i64 + i64::from(i),
-                        vec![i],
+                        [hash_byte; 32].as_slice(),
+                        super_size,
+                        1_234_567_890_000_000_000i64,
+                        vec![hash_byte],
                         chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
                     ],
                 )
                 .expect("Failed to insert OTS anchor");
         }
 
-        // Insert one TSA anchor at tree_size=32
-        let tsa = create_test_anchor_rfc3161();
+        let result = store
+            .get_ots_anchor_covering(7)
+            .expect("Query should not fail");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().super_tree_size, Some(10));
+    }
+
+    #[test]
+    fn should_not_cover_equal_index() {
+        let store = create_test_store();
         store
-            .store_anchor_returning_id(32, &tsa, "confirmed")
+            .connection()
+            .execute(
+                "INSERT INTO anchors (tree_size, anchor_type, target, anchored_hash,
+                        super_tree_size, timestamp, token, status, created_at)
+                 VALUES (NULL, 'bitcoin_ots', 'super_root', ?1, 5, ?2, ?3, 'confirmed', ?4)",
+                rusqlite::params![
+                    [0x22u8; 32].as_slice(),
+                    1_234_567_890_000_000_000i64,
+                    vec![0xBBu8],
+                    chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+                ],
+            )
+            .expect("Failed to insert OTS anchor");
+
+        let result = store
+            .get_ots_anchor_covering(5)
+            .expect("Query should not fail");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn should_skip_pending_ots_anchors() {
+        let store = create_test_store();
+        store
+            .connection()
+            .execute(
+                "INSERT INTO anchors (tree_size, anchor_type, target, anchored_hash,
+                        super_tree_size, timestamp, token, status, created_at)
+                 VALUES (NULL, 'bitcoin_ots', 'super_root', ?1, 10, ?2, ?3, 'pending', ?4)",
+                rusqlite::params![
+                    [0x33u8; 32].as_slice(),
+                    1_234_567_890_000_000_000i64,
+                    vec![0xCCu8],
+                    chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+                ],
+            )
+            .expect("Failed to insert pending OTS anchor");
+
+        let result = store
+            .get_ots_anchor_covering(5)
+            .expect("Query should not fail");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn should_ignore_tsa_anchors_in_ots_query() {
+        let store = create_test_store();
+        let anchor = create_test_anchor_rfc3161();
+        store
+            .store_anchor_returning_id(100, &anchor, "confirmed")
             .expect("Failed to store TSA anchor");
 
-        // get_anchors_covering(32, 10) must return the TSA anchor
-        let covering = store
-            .get_anchors_covering(32, 10)
-            .expect("Failed to get covering anchors");
+        let result = store
+            .get_ots_anchor_covering(0)
+            .expect("Query should not fail");
+        assert_eq!(result, None);
+    }
 
-        let has_tsa = covering
-            .iter()
-            .any(|a| a.anchor_type == AnchorType::Rfc3161);
-        assert!(
-            has_tsa,
-            "TSA anchor must not be evicted by multiple OTS anchors with NULL tree_size"
-        );
+    #[test]
+    fn should_only_match_super_root_target() {
+        let store = create_test_store();
+        // OTS anchor with data_tree_root target (wrong target)
+        store
+            .connection()
+            .execute(
+                "INSERT INTO anchors (tree_size, anchor_type, target, anchored_hash,
+                        super_tree_size, timestamp, token, status, created_at)
+                 VALUES (100, 'bitcoin_ots', 'data_tree_root', ?1, 10, ?2, ?3, 'confirmed', ?4)",
+                rusqlite::params![
+                    [0x44u8; 32].as_slice(),
+                    1_234_567_890_000_000_000i64,
+                    vec![0xDDu8],
+                    chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+                ],
+            )
+            .expect("Failed to insert OTS anchor with wrong target");
 
-        // All super-root OTS anchors are returned so that select_anchors_for_receipt()
-        // can pick the correct one by super_tree_size. The result is capped by the
-        // overall limit (10). With 15 OTS anchors and 1 TSA consuming a slot,
-        // 9 OTS anchors are expected here.
-        let ots_count = covering
-            .iter()
-            .filter(|a| a.anchor_type == AnchorType::BitcoinOts)
-            .count();
-        assert!(
-            ots_count > 0,
-            "At least one OTS anchor must be returned for downstream filtering"
-        );
-        assert!(
-            covering.len() <= 10,
-            "Total result must respect the requested limit"
-        );
+        let result = store
+            .get_ots_anchor_covering(5)
+            .expect("Query should not fail");
+        assert_eq!(result, None);
     }
 
     #[test]

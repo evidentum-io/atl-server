@@ -260,23 +260,25 @@ pub async fn generate_receipt(
     // 6. Generate super_proof (may be None for active tree entries)
     let super_proof = generate_super_proof(entry_id, storage).await?;
 
-    // 7. Get all anchors
-    let all_anchors = if options.include_anchors {
-        storage.get_anchors_covering(leaf_index + 1, 10)?
+    // 7. Get covering anchors (each method uses the correct parameter)
+    let filtered_anchors = if options.include_anchors {
+        let mut result = Vec::new();
+
+        // TSA anchor: covers if tree_size >= leaf_index + 1
+        if let Some(tsa) = storage.get_tsa_anchor_covering(leaf_index + 1)? {
+            result.push(tsa);
+        }
+
+        // OTS anchor: only if super_proof is available (need data_tree_index)
+        if let Some(ref proof) = super_proof {
+            if let Some(ots) = storage.get_ots_anchor_covering(proof.data_tree_index)? {
+                result.push(ots);
+            }
+        }
+
+        result
     } else {
         Vec::new()
-    };
-
-    // 8. Filter anchors based on super_tree coverage (only if super_proof available)
-    let filtered_anchors = if let Some(ref proof) = super_proof {
-        select_anchors_for_receipt(&all_anchors, proof.data_tree_index)
-    } else {
-        // No super_proof yet, include TSA anchors only
-        all_anchors
-            .iter()
-            .filter(|a| matches!(a.anchor_type, crate::traits::anchor::AnchorType::Rfc3161))
-            .cloned()
-            .collect()
     };
 
     // 9. Generate upgrade_url logic
@@ -358,42 +360,6 @@ fn create_signed_checkpoint(
     checkpoint.signature = signer.sign_checkpoint(&blob);
 
     checkpoint
-}
-
-/// Select anchors that are valid for v2.0 receipt with super_proof
-///
-/// - TSA anchors: include if target matches entry's tree root
-/// - OTS anchors: include ONLY if:
-///   1. target == "super_root"
-///   2. super_tree_size >= data_tree_index + 1
-///
-/// # Arguments
-/// * `all_anchors` - All available anchors from storage
-/// * `data_tree_index` - Entry's data tree index in Super-Tree
-fn select_anchors_for_receipt(
-    all_anchors: &[crate::traits::anchor::Anchor],
-    data_tree_index: u64,
-) -> Vec<crate::traits::anchor::Anchor> {
-    all_anchors
-        .iter()
-        .filter(|anchor| {
-            match anchor.anchor_type {
-                crate::traits::anchor::AnchorType::Rfc3161 => {
-                    // TSA anchors always target data_tree_root, include them
-                    anchor.target == "data_tree_root"
-                }
-                crate::traits::anchor::AnchorType::BitcoinOts => {
-                    // OTS anchors must:
-                    // 1. Target super_root (not legacy data_tree_root)
-                    // 2. Cover entry's data_tree_index
-                    anchor.target == "super_root"
-                        && anchor.super_tree_size.unwrap_or(0) > data_tree_index
-                }
-                crate::traits::anchor::AnchorType::Other => false,
-            }
-        })
-        .cloned()
-        .collect()
 }
 
 /// Generate SuperProof for an entry (uses super_slabs directly)
@@ -723,109 +689,6 @@ mod tests {
     }
 
     #[test]
-    fn test_select_anchors_for_receipt_tsa_only() {
-        let anchors = vec![
-            crate::traits::anchor::Anchor {
-                anchor_type: crate::traits::anchor::AnchorType::Rfc3161,
-                target: "data_tree_root".to_string(),
-                anchored_hash: [0u8; 32],
-                tree_size: 100,
-                super_tree_size: None,
-                timestamp: 1000,
-                token: vec![],
-                metadata: serde_json::json!({}),
-            },
-            crate::traits::anchor::Anchor {
-                anchor_type: crate::traits::anchor::AnchorType::BitcoinOts,
-                target: "data_tree_root".to_string(), // Wrong target
-                anchored_hash: [0u8; 32],
-                tree_size: 100,
-                super_tree_size: Some(5),
-                timestamp: 2000,
-                token: vec![],
-                metadata: serde_json::json!({}),
-            },
-        ];
-
-        let selected = select_anchors_for_receipt(&anchors, 0);
-        // Should only include TSA anchor (OTS has wrong target)
-        assert_eq!(selected.len(), 1);
-        assert!(matches!(
-            selected[0].anchor_type,
-            crate::traits::anchor::AnchorType::Rfc3161
-        ));
-    }
-
-    #[test]
-    fn test_select_anchors_for_receipt_ots_coverage() {
-        let anchors = vec![crate::traits::anchor::Anchor {
-            anchor_type: crate::traits::anchor::AnchorType::BitcoinOts,
-            target: "super_root".to_string(),
-            anchored_hash: [0u8; 32],
-            tree_size: 100,
-            super_tree_size: Some(5), // Covers data_tree_index 0-4
-            timestamp: 1000,
-            token: vec![],
-            metadata: serde_json::json!({}),
-        }];
-
-        // data_tree_index = 3 should be covered (3 < 5)
-        let selected = select_anchors_for_receipt(&anchors, 3);
-        assert_eq!(selected.len(), 1);
-
-        // data_tree_index = 5 should NOT be covered (5 >= 5)
-        let selected = select_anchors_for_receipt(&anchors, 5);
-        assert_eq!(selected.len(), 0);
-    }
-
-    #[test]
-    fn test_select_anchors_for_receipt_mixed() {
-        let anchors = vec![
-            crate::traits::anchor::Anchor {
-                anchor_type: crate::traits::anchor::AnchorType::Rfc3161,
-                target: "data_tree_root".to_string(),
-                anchored_hash: [0u8; 32],
-                tree_size: 100,
-                super_tree_size: None,
-                timestamp: 1000,
-                token: vec![],
-                metadata: serde_json::json!({}),
-            },
-            crate::traits::anchor::Anchor {
-                anchor_type: crate::traits::anchor::AnchorType::BitcoinOts,
-                target: "super_root".to_string(),
-                anchored_hash: [0u8; 32],
-                tree_size: 200,
-                super_tree_size: Some(10),
-                timestamp: 2000,
-                token: vec![],
-                metadata: serde_json::json!({}),
-            },
-        ];
-
-        // Both should be included for data_tree_index = 5
-        let selected = select_anchors_for_receipt(&anchors, 5);
-        assert_eq!(selected.len(), 2);
-    }
-
-    #[test]
-    fn test_select_anchors_filters_other_type() {
-        let anchors = vec![crate::traits::anchor::Anchor {
-            anchor_type: crate::traits::anchor::AnchorType::Other,
-            target: "data_tree_root".to_string(),
-            anchored_hash: [0u8; 32],
-            tree_size: 100,
-            super_tree_size: None,
-            timestamp: 1000,
-            token: vec![],
-            metadata: serde_json::json!({}),
-        }];
-
-        let selected = select_anchors_for_receipt(&anchors, 0);
-        assert_eq!(selected.len(), 0); // Other type should be filtered out
-    }
-
-    #[test]
     fn test_checkpoint_signer_new() {
         let signing_key = SigningKey::from_bytes(&[1u8; 32]);
         let signer = CheckpointSigner::new(signing_key);
@@ -879,69 +742,6 @@ mod tests {
     }
 
     #[test]
-    fn test_select_anchors_empty_list() {
-        let anchors: Vec<crate::traits::anchor::Anchor> = vec![];
-        let selected = select_anchors_for_receipt(&anchors, 0);
-        assert_eq!(selected.len(), 0);
-    }
-
-    #[test]
-    fn test_select_anchors_tsa_with_wrong_target() {
-        let anchors = vec![crate::traits::anchor::Anchor {
-            anchor_type: crate::traits::anchor::AnchorType::Rfc3161,
-            target: "wrong_target".to_string(), // Should be "data_tree_root"
-            anchored_hash: [0u8; 32],
-            tree_size: 100,
-            super_tree_size: None,
-            timestamp: 1000,
-            token: vec![],
-            metadata: serde_json::json!({}),
-        }];
-
-        let selected = select_anchors_for_receipt(&anchors, 0);
-        assert_eq!(selected.len(), 0); // Wrong target should be filtered
-    }
-
-    #[test]
-    fn test_select_anchors_ots_with_none_super_tree_size() {
-        let anchors = vec![crate::traits::anchor::Anchor {
-            anchor_type: crate::traits::anchor::AnchorType::BitcoinOts,
-            target: "super_root".to_string(),
-            anchored_hash: [0u8; 32],
-            tree_size: 100,
-            super_tree_size: None, // Should be Some(n)
-            timestamp: 1000,
-            token: vec![],
-            metadata: serde_json::json!({}),
-        }];
-
-        let selected = select_anchors_for_receipt(&anchors, 0);
-        assert_eq!(selected.len(), 0); // None super_tree_size means not covered
-    }
-
-    #[test]
-    fn test_select_anchors_ots_exact_boundary() {
-        let anchors = vec![crate::traits::anchor::Anchor {
-            anchor_type: crate::traits::anchor::AnchorType::BitcoinOts,
-            target: "super_root".to_string(),
-            anchored_hash: [0u8; 32],
-            tree_size: 100,
-            super_tree_size: Some(10),
-            timestamp: 1000,
-            token: vec![],
-            metadata: serde_json::json!({}),
-        }];
-
-        // data_tree_index = 9 should be covered (9 < 10)
-        let selected = select_anchors_for_receipt(&anchors, 9);
-        assert_eq!(selected.len(), 1);
-
-        // data_tree_index = 10 should NOT be covered (10 >= 10)
-        let selected = select_anchors_for_receipt(&anchors, 10);
-        assert_eq!(selected.len(), 0);
-    }
-
-    #[test]
     fn test_checkpoint_signer_different_seeds_different_keys() {
         let signer1 = CheckpointSigner::from_bytes(&[1u8; 32]);
         let signer2 = CheckpointSigner::from_bytes(&[2u8; 32]);
@@ -977,70 +777,122 @@ mod tests {
         assert!(debug_output.contains("key_id"));
     }
 
-    #[test]
-    fn test_select_anchors_multiple_tsa() {
-        let anchors = vec![
-            crate::traits::anchor::Anchor {
-                anchor_type: crate::traits::anchor::AnchorType::Rfc3161,
-                target: "data_tree_root".to_string(),
-                anchored_hash: [1u8; 32],
-                tree_size: 100,
-                super_tree_size: None,
-                timestamp: 1000,
-                token: vec![],
-                metadata: serde_json::json!({}),
-            },
-            crate::traits::anchor::Anchor {
-                anchor_type: crate::traits::anchor::AnchorType::Rfc3161,
-                target: "data_tree_root".to_string(),
-                anchored_hash: [2u8; 32],
-                tree_size: 200,
-                super_tree_size: None,
-                timestamp: 2000,
-                token: vec![],
-                metadata: serde_json::json!({}),
-            },
-        ];
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_generate_receipt_without_anchors() {
+        use crate::receipt::options::ReceiptOptions;
+        use crate::storage::config::StorageConfig;
+        use crate::storage::engine::StorageEngine;
+        use crate::traits::AppendParams;
+        use tempfile::tempdir;
 
-        let selected = select_anchors_for_receipt(&anchors, 0);
-        assert_eq!(selected.len(), 2); // Both TSA anchors should be included
+        let dir = tempdir().unwrap();
+        let config = StorageConfig {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let origin = [1u8; 32];
+        let engine = StorageEngine::new(config, origin).await.unwrap();
+
+        let params = vec![AppendParams {
+            payload_hash: [42u8; 32],
+            metadata_hash: [0u8; 32],
+            metadata_cleartext: None,
+            external_id: None,
+        }];
+        let batch = engine.append_batch(params).await.unwrap();
+        let entry_id = batch.entries[0].id;
+
+        let signer = CheckpointSigner::from_bytes(&[1u8; 32]);
+        let options = ReceiptOptions {
+            include_anchors: false,
+            consistency_from: Some(0),
+            auto_consistency_from_anchor: false,
+            timestamp: Some(1_000_000),
+            at_tree_size: None,
+            upgrade_url_template: None,
+        };
+
+        let receipt = generate_receipt(&entry_id, &engine, &signer, options).await;
+        assert!(
+            receipt.is_ok(),
+            "generate_receipt should succeed: {:?}",
+            receipt.err()
+        );
+        let receipt = receipt.unwrap();
+        assert!(
+            receipt.anchors.is_empty(),
+            "anchors should be empty when include_anchors=false"
+        );
     }
 
-    #[test]
-    fn test_select_anchors_multiple_ots_different_coverage() {
-        let anchors = vec![
-            crate::traits::anchor::Anchor {
-                anchor_type: crate::traits::anchor::AnchorType::BitcoinOts,
-                target: "super_root".to_string(),
-                anchored_hash: [1u8; 32],
-                tree_size: 100,
-                super_tree_size: Some(5), // Covers 0-4
-                timestamp: 1000,
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_generate_receipt_with_tsa_anchor() {
+        use crate::receipt::options::ReceiptOptions;
+        use crate::storage::config::StorageConfig;
+        use crate::storage::engine::StorageEngine;
+        use crate::traits::anchor::{Anchor, AnchorType};
+        use crate::traits::AppendParams;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let config = StorageConfig {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let origin = [2u8; 32];
+        let engine = StorageEngine::new(config, origin).await.unwrap();
+
+        let params = vec![AppendParams {
+            payload_hash: [10u8; 32],
+            metadata_hash: [0u8; 32],
+            metadata_cleartext: None,
+            external_id: None,
+        }];
+        let batch = engine.append_batch(params).await.unwrap();
+        let entry_id = batch.entries[0].id;
+
+        // Store a confirmed TSA anchor covering tree_size=1
+        {
+            let index_store = engine.index_store();
+            let index = index_store.lock().await;
+            let anchor = Anchor {
+                anchor_type: AnchorType::Rfc3161,
+                target: "data_tree_root".to_string(),
+                anchored_hash: [0u8; 32],
+                tree_size: 1,
+                super_tree_size: None,
+                timestamp: 1_000_000,
                 token: vec![],
-                metadata: serde_json::json!({}),
-            },
-            crate::traits::anchor::Anchor {
-                anchor_type: crate::traits::anchor::AnchorType::BitcoinOts,
-                target: "super_root".to_string(),
-                anchored_hash: [2u8; 32],
-                tree_size: 200,
-                super_tree_size: Some(10), // Covers 0-9
-                timestamp: 2000,
-                token: vec![],
-                metadata: serde_json::json!({}),
-            },
-        ];
+                metadata: serde_json::json!({"status": "confirmed"}),
+            };
+            let anchor_id = index
+                .store_anchor_returning_id(1, &anchor, "confirmed")
+                .unwrap();
+            index
+                .update_anchor_metadata(anchor_id, serde_json::json!({"status": "confirmed"}))
+                .unwrap();
+        }
 
-        // data_tree_index = 3 should be covered by both
-        let selected = select_anchors_for_receipt(&anchors, 3);
-        assert_eq!(selected.len(), 2);
+        let signer = CheckpointSigner::from_bytes(&[2u8; 32]);
+        let options = ReceiptOptions {
+            include_anchors: true,
+            consistency_from: Some(0),
+            auto_consistency_from_anchor: false,
+            timestamp: Some(2_000_000),
+            at_tree_size: None,
+            upgrade_url_template: None,
+        };
 
-        // data_tree_index = 7 should be covered by second only
-        let selected = select_anchors_for_receipt(&anchors, 7);
-        assert_eq!(selected.len(), 1);
-
-        // data_tree_index = 12 should not be covered by any
-        let selected = select_anchors_for_receipt(&anchors, 12);
-        assert_eq!(selected.len(), 0);
+        let receipt = generate_receipt(&entry_id, &engine, &signer, options).await;
+        assert!(
+            receipt.is_ok(),
+            "generate_receipt with TSA anchor should succeed: {:?}",
+            receipt.err()
+        );
+        let receipt = receipt.unwrap();
+        assert!(
+            !receipt.anchors.is_empty(),
+            "receipt should contain TSA anchor"
+        );
     }
 }
