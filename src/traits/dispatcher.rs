@@ -266,16 +266,22 @@ impl SequencerClient for LocalDispatcher {
             crate::error::ServerError::Internal(format!("Entry {} has no leaf_index", entry_id))
         })?;
 
-        // 2. Get covering anchors (from ANCHOR-FIX-2)
+        // 2. Get covering TSA anchor
+        //    OTS anchor is not queried here: data_tree_index is not available
+        //    in this context (LocalDispatcher does not have super_proof info).
         let entry_tree_size = leaf_index + 1;
         let anchors = if request.include_anchors {
-            self.storage.get_anchors_covering(entry_tree_size, 10)?
+            let mut result = Vec::new();
+            if let Some(tsa) = self.storage.get_tsa_anchor_covering(entry_tree_size)? {
+                result.push(tsa);
+            }
+            result
         } else {
             vec![]
         };
 
         // 3. Determine target tree_size for receipt
-        //    - If anchors exist: use closest anchor's tree_size
+        //    - If TSA anchor exists: use anchor's tree_size
         //    - If no anchors: use current tree_size (fallback)
         let (target_tree_size, target_root_hash) = if let Some(anchor) = anchors.first() {
             // Build receipt at anchor's tree_size
