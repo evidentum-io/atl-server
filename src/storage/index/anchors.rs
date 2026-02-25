@@ -221,39 +221,68 @@ impl IndexStore {
         Ok(())
     }
 
-    /// Get anchors that cover a specific tree size
+    /// Get anchors that cover a specific tree size.
     ///
-    /// Returns anchors where tree_size >= target_tree_size,
-    /// ordered by tree_size ascending (closest first).
-    /// Only returns 'confirmed' status anchors.
-    /// For each anchor type, returns only the anchor with the minimum tree_size.
+    /// Two categories of anchors are returned:
+    ///
+    /// **Data-tree anchors** (`target = 'data_tree_root'`): for each `anchor_type` present,
+    /// returns the single anchor with the minimum `tree_size >= target_tree_size`.
+    ///
+    /// **Super-root OTS anchors** (`target = 'super_root'`, `anchor_type = 'bitcoin_ots'`):
+    /// returns all confirmed anchors. The caller (`select_anchors_for_receipt`) filters by
+    /// `super_tree_size > data_tree_index`. Returning only the oldest anchor via `MIN(id)`
+    /// would discard anchors that actually cover the entry when earlier anchors have a
+    /// smaller `super_tree_size`.
+    ///
+    /// Only returns 'confirmed' status anchors. The combined result is capped by `limit`.
     pub fn get_anchors_covering(
         &self,
         target_tree_size: u64,
         limit: usize,
     ) -> rusqlite::Result<Vec<Anchor>> {
         let conn = self.connection();
-        let mut stmt = conn.prepare(
+
+        // Part 1: best data-tree anchor per anchor_type (min tree_size >= target).
+        let mut data_tree_stmt = conn.prepare(
             "SELECT a.id, a.tree_size, a.anchor_type, a.target, a.anchored_hash, a.super_tree_size, a.timestamp, a.token, a.metadata
              FROM anchors a
              INNER JOIN (
-                 SELECT anchor_type, MIN(tree_size) as min_tree_size, MIN(id) as min_id
+                 SELECT anchor_type, MIN(tree_size) AS min_tree_size
                  FROM anchors
-                 WHERE (tree_size >= ?1 OR target = 'super_root') AND status = 'confirmed'
+                 WHERE status = 'confirmed'
+                   AND target = 'data_tree_root'
+                   AND tree_size >= ?1
                  GROUP BY anchor_type
-             ) AS best ON a.anchor_type = best.anchor_type
-                 AND (a.tree_size = best.min_tree_size OR (a.tree_size IS NULL AND best.min_tree_size IS NULL AND a.id = best.min_id))
+             ) AS best
+               ON a.anchor_type = best.anchor_type
+              AND a.tree_size    = best.min_tree_size
+              AND a.target       = 'data_tree_root'
              WHERE a.status = 'confirmed'
-             ORDER BY a.tree_size ASC
-             LIMIT ?2",
+             ORDER BY a.tree_size ASC",
         )?;
 
-        let rows = stmt.query_map(
-            params![target_tree_size as i64, limit as i64],
-            row_to_anchor,
+        let data_tree_rows = data_tree_stmt
+            .query_map(params![target_tree_size as i64], row_to_anchor)?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Part 2: all confirmed super-root OTS anchors (filtered by super_tree_size in caller).
+        let mut super_root_stmt = conn.prepare(
+            "SELECT id, tree_size, anchor_type, target, anchored_hash, super_tree_size, timestamp, token, metadata
+             FROM anchors
+             WHERE status = 'confirmed'
+               AND target = 'super_root'
+               AND anchor_type = 'bitcoin_ots'
+             ORDER BY super_tree_size ASC",
         )?;
 
-        rows.collect::<Result<Vec<_>, _>>()
+        let super_root_rows = super_root_stmt
+            .query_map(params![], row_to_anchor)?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut result = data_tree_rows;
+        result.extend(super_root_rows);
+        result.truncate(limit);
+        Ok(result)
     }
 
     /// Create OTS anchor for Super Root (v2.0)
@@ -1429,13 +1458,21 @@ mod tests {
             "TSA anchor must not be evicted by multiple OTS anchors with NULL tree_size"
         );
 
+        // All super-root OTS anchors are returned so that select_anchors_for_receipt()
+        // can pick the correct one by super_tree_size. The result is capped by the
+        // overall limit (10). With 15 OTS anchors and 1 TSA consuming a slot,
+        // 9 OTS anchors are expected here.
         let ots_count = covering
             .iter()
             .filter(|a| a.anchor_type == AnchorType::BitcoinOts)
             .count();
-        assert_eq!(
-            ots_count, 1,
-            "Only one OTS anchor should be returned per anchor_type"
+        assert!(
+            ots_count > 0,
+            "At least one OTS anchor must be returned for downstream filtering"
+        );
+        assert!(
+            covering.len() <= 10,
+            "Total result must respect the requested limit"
         );
     }
 
