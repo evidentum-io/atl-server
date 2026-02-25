@@ -762,12 +762,21 @@ async fn test_get_latest_anchored_size_empty() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_get_anchors_covering_empty() {
+async fn test_get_tsa_anchor_covering_empty() {
     let (engine, _dir) = create_test_engine([1u8; 32]).await;
 
     use crate::traits::storage::Storage;
-    let anchors = Storage::get_anchors_covering(&engine, 10, 5).unwrap();
-    assert_eq!(anchors.len(), 0);
+    let result = Storage::get_tsa_anchor_covering(&engine, 100).unwrap();
+    assert_eq!(result, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_get_ots_anchor_covering_empty() {
+    let (engine, _dir) = create_test_engine([1u8; 32]).await;
+
+    use crate::traits::storage::Storage;
+    let result = Storage::get_ots_anchor_covering(&engine, 0).unwrap();
+    assert_eq!(result, None);
 }
 
 #[tokio::test(flavor = "multi_thread")]

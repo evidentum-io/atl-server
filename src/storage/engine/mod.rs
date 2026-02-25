@@ -480,16 +480,29 @@ impl Storage for StorageEngine {
         })
     }
 
-    fn get_anchors_covering(
+    fn get_tsa_anchor_covering(
         &self,
-        target_tree_size: u64,
-        limit: usize,
-    ) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>> {
+        tree_size: u64,
+    ) -> crate::error::ServerResult<Option<crate::traits::anchor::Anchor>> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let index = self.index.lock().await;
+                index.get_tsa_anchor_covering(tree_size).map_err(|e| {
+                    crate::error::ServerError::Storage(StorageError::Database(e.to_string()))
+                })
+            })
+        })
+    }
+
+    fn get_ots_anchor_covering(
+        &self,
+        data_tree_index: u64,
+    ) -> crate::error::ServerResult<Option<crate::traits::anchor::Anchor>> {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let index = self.index.lock().await;
                 index
-                    .get_anchors_covering(target_tree_size, limit)
+                    .get_ots_anchor_covering(data_tree_index)
                     .map_err(|e| {
                         crate::error::ServerError::Storage(StorageError::Database(e.to_string()))
                     })

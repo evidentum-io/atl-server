@@ -231,13 +231,17 @@ pub trait Storage: Send + Sync + 'static {
     /// Get the most recent anchored tree size
     fn get_latest_anchored_size(&self) -> crate::error::ServerResult<Option<u64>>;
 
-    /// Get anchors covering a target tree size
-    #[allow(dead_code)]
-    fn get_anchors_covering(
+    /// Get the minimum confirmed TSA anchor covering a data tree position
+    fn get_tsa_anchor_covering(
         &self,
-        target_tree_size: u64,
-        limit: usize,
-    ) -> crate::error::ServerResult<Vec<crate::traits::anchor::Anchor>>;
+        tree_size: u64,
+    ) -> crate::error::ServerResult<Option<crate::traits::anchor::Anchor>>;
+
+    /// Get the minimum confirmed OTS anchor covering a data tree index
+    fn get_ots_anchor_covering(
+        &self,
+        data_tree_index: u64,
+    ) -> crate::error::ServerResult<Option<crate::traits::anchor::Anchor>>;
 
     /// Get root hash at specific tree size
     #[allow(dead_code)]
