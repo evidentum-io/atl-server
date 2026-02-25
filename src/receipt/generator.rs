@@ -184,9 +184,52 @@ pub async fn generate_receipt(
         .leaf_index
         .ok_or_else(|| ServerError::EntryNotInTree(entry_id.to_string()))?;
 
-    // 3. Get tree head
-    let tree_head = storage.tree_head();
-    let tree_size = options.at_tree_size.unwrap_or(tree_head.tree_size);
+    // 3. Determine tree_size and root_hash:
+    //    - For entries in closed trees: use the closed tree's end_size and root_hash
+    //    - For entries in the active tree: use the current tree_head
+    let (tree_size, root_hash) = {
+        // Look up the entry's tree_id via index_store (Entry trait type does not carry tree_id)
+        let index_entry = {
+            let index_store = storage.index_store();
+            let index = index_store.lock().await;
+            index
+                .get_entry(entry_id)?
+                .ok_or_else(|| ServerError::EntryNotFound(entry_id.to_string()))?
+        };
+
+        if let Some(tree_id) = index_entry.tree_id {
+            // Entry belongs to a known tree — check if it is closed
+            let tree_record = {
+                let index_store = storage.index_store();
+                let index = index_store.lock().await;
+                index
+                    .get_tree(tree_id)?
+                    .ok_or_else(|| ServerError::EntryNotFound(entry_id.to_string()))?
+            };
+
+            match (tree_record.end_size, tree_record.root_hash) {
+                (Some(end_size), Some(closed_root)) => {
+                    // Closed tree: receipt must use the frozen end_size and root_hash
+                    (end_size, closed_root)
+                }
+                _ => {
+                    // Active tree: fall back to the current tree_head
+                    let tree_head = storage.tree_head();
+                    (
+                        options.at_tree_size.unwrap_or(tree_head.tree_size),
+                        tree_head.root_hash,
+                    )
+                }
+            }
+        } else {
+            // No tree_id assigned yet (entry in active tree before any rotation)
+            let tree_head = storage.tree_head();
+            (
+                options.at_tree_size.unwrap_or(tree_head.tree_size),
+                tree_head.root_hash,
+            )
+        }
+    };
 
     // Validate tree size
     if leaf_index >= tree_size {
@@ -199,17 +242,7 @@ pub async fn generate_receipt(
     // 4. Generate inclusion proof
     let inclusion_proof = storage.get_inclusion_proof(entry_id, Some(tree_size))?;
 
-    // 5. Get root hash for the specified tree size
-    let root_hash = if tree_size == tree_head.tree_size {
-        tree_head.root_hash
-    } else {
-        // Historical receipt - not yet implemented
-        return Err(ServerError::NotSupported(
-            "historical receipts not yet implemented".into(),
-        ));
-    };
-
-    // 6. Create and sign checkpoint
+    // 5. Create and sign checkpoint
     let timestamp = options.timestamp.unwrap_or_else(current_timestamp_nanos);
     let origin = storage.origin_id();
 
@@ -224,17 +257,17 @@ pub async fn generate_receipt(
         key_id: format_hash(&checkpoint.key_id),
     };
 
-    // 7. Generate super_proof (may be None for active tree entries)
+    // 6. Generate super_proof (may be None for active tree entries)
     let super_proof = generate_super_proof(entry_id, storage).await?;
 
-    // 8. Get all anchors
+    // 7. Get all anchors
     let all_anchors = if options.include_anchors {
         storage.get_anchors_covering(leaf_index + 1, 10)?
     } else {
         Vec::new()
     };
 
-    // 9. Filter anchors based on super_tree coverage (only if super_proof available)
+    // 8. Filter anchors based on super_tree coverage (only if super_proof available)
     let filtered_anchors = if let Some(ref proof) = super_proof {
         select_anchors_for_receipt(&all_anchors, proof.data_tree_index)
     } else {
@@ -246,7 +279,7 @@ pub async fn generate_receipt(
             .collect()
     };
 
-    // 10. Generate upgrade_url logic
+    // 9. Generate upgrade_url logic
     let has_super_proof = super_proof.is_some();
     let has_confirmed_ots = filtered_anchors.iter().any(|a| {
         matches!(a.anchor_type, crate::traits::anchor::AnchorType::BitcoinOts)
@@ -265,10 +298,10 @@ pub async fn generate_receipt(
         None
     };
 
-    // 11. Generate consistency proof (Split-View protection)
+    // 10. Generate consistency proof (Split-View protection)
     let consistency_proof = determine_consistency_proof(storage, tree_size, &options)?;
 
-    // 12. Assemble receipt
+    // 11. Assemble receipt
     Ok(Receipt {
         spec_version: "2.0.0".to_string(),
         upgrade_url,
