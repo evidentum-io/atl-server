@@ -777,4 +777,122 @@ mod tests {
         assert!(debug_output.contains("key_id"));
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_generate_receipt_without_anchors() {
+        use crate::receipt::options::ReceiptOptions;
+        use crate::storage::config::StorageConfig;
+        use crate::storage::engine::StorageEngine;
+        use crate::traits::AppendParams;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let config = StorageConfig {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let origin = [1u8; 32];
+        let engine = StorageEngine::new(config, origin).await.unwrap();
+
+        let params = vec![AppendParams {
+            payload_hash: [42u8; 32],
+            metadata_hash: [0u8; 32],
+            metadata_cleartext: None,
+            external_id: None,
+        }];
+        let batch = engine.append_batch(params).await.unwrap();
+        let entry_id = batch.entries[0].id;
+
+        let signer = CheckpointSigner::from_bytes(&[1u8; 32]);
+        let options = ReceiptOptions {
+            include_anchors: false,
+            consistency_from: Some(0),
+            auto_consistency_from_anchor: false,
+            timestamp: Some(1_000_000),
+            at_tree_size: None,
+            upgrade_url_template: None,
+        };
+
+        let receipt = generate_receipt(&entry_id, &engine, &signer, options).await;
+        assert!(
+            receipt.is_ok(),
+            "generate_receipt should succeed: {:?}",
+            receipt.err()
+        );
+        let receipt = receipt.unwrap();
+        assert!(
+            receipt.anchors.is_empty(),
+            "anchors should be empty when include_anchors=false"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_generate_receipt_with_tsa_anchor() {
+        use crate::receipt::options::ReceiptOptions;
+        use crate::storage::config::StorageConfig;
+        use crate::storage::engine::StorageEngine;
+        use crate::traits::anchor::{Anchor, AnchorType};
+        use crate::traits::AppendParams;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let config = StorageConfig {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let origin = [2u8; 32];
+        let engine = StorageEngine::new(config, origin).await.unwrap();
+
+        let params = vec![AppendParams {
+            payload_hash: [10u8; 32],
+            metadata_hash: [0u8; 32],
+            metadata_cleartext: None,
+            external_id: None,
+        }];
+        let batch = engine.append_batch(params).await.unwrap();
+        let entry_id = batch.entries[0].id;
+
+        // Store a confirmed TSA anchor covering tree_size=1
+        {
+            let index_store = engine.index_store();
+            let index = index_store.lock().await;
+            let anchor = Anchor {
+                anchor_type: AnchorType::Rfc3161,
+                target: "data_tree_root".to_string(),
+                anchored_hash: [0u8; 32],
+                tree_size: 1,
+                super_tree_size: None,
+                timestamp: 1_000_000,
+                token: vec![],
+                metadata: serde_json::json!({"status": "confirmed"}),
+            };
+            let anchor_id = index
+                .store_anchor_returning_id(1, &anchor, "confirmed")
+                .unwrap();
+            index
+                .update_anchor_metadata(anchor_id, serde_json::json!({"status": "confirmed"}))
+                .unwrap();
+        }
+
+        let signer = CheckpointSigner::from_bytes(&[2u8; 32]);
+        let options = ReceiptOptions {
+            include_anchors: true,
+            consistency_from: Some(0),
+            auto_consistency_from_anchor: false,
+            timestamp: Some(2_000_000),
+            at_tree_size: None,
+            upgrade_url_template: None,
+        };
+
+        let receipt = generate_receipt(&entry_id, &engine, &signer, options).await;
+        assert!(
+            receipt.is_ok(),
+            "generate_receipt with TSA anchor should succeed: {:?}",
+            receipt.err()
+        );
+        let receipt = receipt.unwrap();
+        assert!(
+            !receipt.anchors.is_empty(),
+            "receipt should contain TSA anchor"
+        );
+    }
 }

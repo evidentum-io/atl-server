@@ -260,12 +260,18 @@ mod tests {
             unimplemented!()
         }
 
-        fn get_anchors_covering(
+        fn get_tsa_anchor_covering(
             &self,
-            _target_tree_size: u64,
-            _limit: usize,
-        ) -> ServerResult<Vec<crate::traits::anchor::Anchor>> {
-            unimplemented!()
+            _tree_size: u64,
+        ) -> ServerResult<Option<crate::traits::anchor::Anchor>> {
+            Ok(None)
+        }
+
+        fn get_ots_anchor_covering(
+            &self,
+            _data_tree_index: u64,
+        ) -> ServerResult<Option<crate::traits::anchor::Anchor>> {
+            Ok(None)
         }
 
         fn get_root_at_size(&self, _tree_size: u64) -> ServerResult<[u8; 32]> {
@@ -344,12 +350,18 @@ mod tests {
             unimplemented!()
         }
 
-        fn get_anchors_covering(
+        fn get_tsa_anchor_covering(
             &self,
-            _target_tree_size: u64,
-            _limit: usize,
-        ) -> ServerResult<Vec<crate::traits::anchor::Anchor>> {
-            unimplemented!()
+            _tree_size: u64,
+        ) -> ServerResult<Option<crate::traits::anchor::Anchor>> {
+            Ok(None)
+        }
+
+        fn get_ots_anchor_covering(
+            &self,
+            _data_tree_index: u64,
+        ) -> ServerResult<Option<crate::traits::anchor::Anchor>> {
+            Ok(None)
         }
 
         fn get_root_at_size(&self, _tree_size: u64) -> ServerResult<[u8; 32]> {
@@ -698,12 +710,18 @@ mod tests {
                 unimplemented!()
             }
 
-            fn get_anchors_covering(
+            fn get_tsa_anchor_covering(
                 &self,
-                _target_tree_size: u64,
-                _limit: usize,
-            ) -> ServerResult<Vec<crate::traits::anchor::Anchor>> {
-                unimplemented!()
+                _tree_size: u64,
+            ) -> ServerResult<Option<crate::traits::anchor::Anchor>> {
+                Ok(None)
+            }
+
+            fn get_ots_anchor_covering(
+                &self,
+                _data_tree_index: u64,
+            ) -> ServerResult<Option<crate::traits::anchor::Anchor>> {
+                Ok(None)
             }
 
             fn get_root_at_size(&self, _tree_size: u64) -> ServerResult<[u8; 32]> {
@@ -735,6 +753,16 @@ mod tests {
         let (status_code, response) = result.unwrap_err();
         assert_eq!(status_code, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(response.status, "unhealthy");
+
+        // Verify anchor methods return Ok(None) as expected for this mock
+        use crate::traits::storage::Storage;
+        let mock = MockStorageHealthyButNotInitialized;
+        assert!(Storage::get_tsa_anchor_covering(&mock, 0)
+            .unwrap()
+            .is_none());
+        assert!(Storage::get_ots_anchor_covering(&mock, 0)
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -1014,12 +1042,18 @@ mod tests {
                 unimplemented!()
             }
 
-            fn get_anchors_covering(
+            fn get_tsa_anchor_covering(
                 &self,
-                _target_tree_size: u64,
-                _limit: usize,
-            ) -> ServerResult<Vec<crate::traits::anchor::Anchor>> {
-                unimplemented!()
+                _tree_size: u64,
+            ) -> ServerResult<Option<crate::traits::anchor::Anchor>> {
+                Ok(None)
+            }
+
+            fn get_ots_anchor_covering(
+                &self,
+                _data_tree_index: u64,
+            ) -> ServerResult<Option<crate::traits::anchor::Anchor>> {
+                Ok(None)
             }
 
             fn get_root_at_size(&self, _tree_size: u64) -> ServerResult<[u8; 32]> {
@@ -1047,6 +1081,16 @@ mod tests {
 
         let result = check_sequencer_health(state).await;
         assert!(result.is_ok());
+
+        // Verify anchor methods return Ok(None) for this mock
+        use crate::traits::storage::Storage;
+        let mock = MockStorageEdgeCase;
+        assert!(Storage::get_tsa_anchor_covering(&mock, 0)
+            .unwrap()
+            .is_none());
+        assert!(Storage::get_ots_anchor_covering(&mock, 0)
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -1220,12 +1264,18 @@ mod tests {
                 unimplemented!()
             }
 
-            fn get_anchors_covering(
+            fn get_tsa_anchor_covering(
                 &self,
-                _target_tree_size: u64,
-                _limit: usize,
-            ) -> ServerResult<Vec<crate::traits::anchor::Anchor>> {
-                unimplemented!()
+                _tree_size: u64,
+            ) -> ServerResult<Option<crate::traits::anchor::Anchor>> {
+                Ok(None)
+            }
+
+            fn get_ots_anchor_covering(
+                &self,
+                _data_tree_index: u64,
+            ) -> ServerResult<Option<crate::traits::anchor::Anchor>> {
+                Ok(None)
             }
 
             fn get_root_at_size(&self, _tree_size: u64) -> ServerResult<[u8; 32]> {
@@ -1268,6 +1318,16 @@ mod tests {
 
         let result_not_initialized = check_sequencer_health(state_not_initialized).await;
         assert!(result_not_initialized.is_err());
+
+        // Verify anchor methods return Ok(None) for this mock
+        use crate::traits::storage::Storage;
+        let mock = MockStorageVariant { initialized: true };
+        assert!(Storage::get_tsa_anchor_covering(&mock, 0)
+            .unwrap()
+            .is_none());
+        assert!(Storage::get_ots_anchor_covering(&mock, 0)
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -1647,5 +1707,29 @@ mod tests {
 
         let seq_result = health_check(State(seq_state)).await;
         assert!(seq_result.is_ok());
+    }
+
+    #[test]
+    fn test_mock_storage_initialized_anchor_methods() {
+        use crate::traits::storage::Storage;
+        let storage = MockStorageInitialized;
+        assert!(Storage::get_tsa_anchor_covering(&storage, 0)
+            .unwrap()
+            .is_none());
+        assert!(Storage::get_ots_anchor_covering(&storage, 0)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_mock_storage_uninitialized_anchor_methods() {
+        use crate::traits::storage::Storage;
+        let storage = MockStorageUninitialized;
+        assert!(Storage::get_tsa_anchor_covering(&storage, 100)
+            .unwrap()
+            .is_none());
+        assert!(Storage::get_ots_anchor_covering(&storage, 50)
+            .unwrap()
+            .is_none());
     }
 }

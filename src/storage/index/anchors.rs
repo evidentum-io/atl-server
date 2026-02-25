@@ -226,10 +226,7 @@ impl IndexStore {
     ///
     /// Returns the RFC 3161 anchor with the smallest tree_size >= `tree_size`,
     /// or None if no such anchor exists.
-    pub fn get_tsa_anchor_covering(
-        &self,
-        tree_size: u64,
-    ) -> rusqlite::Result<Option<Anchor>> {
+    pub fn get_tsa_anchor_covering(&self, tree_size: u64) -> rusqlite::Result<Option<Anchor>> {
         self.connection()
             .query_row(
                 "SELECT id, tree_size, anchor_type, target, anchored_hash,

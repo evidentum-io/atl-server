@@ -501,11 +501,9 @@ impl Storage for StorageEngine {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
                 let index = self.index.lock().await;
-                index
-                    .get_ots_anchor_covering(data_tree_index)
-                    .map_err(|e| {
-                        crate::error::ServerError::Storage(StorageError::Database(e.to_string()))
-                    })
+                index.get_ots_anchor_covering(data_tree_index).map_err(|e| {
+                    crate::error::ServerError::Storage(StorageError::Database(e.to_string()))
+                })
             })
         })
     }
