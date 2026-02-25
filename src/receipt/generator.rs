@@ -257,11 +257,11 @@ pub async fn generate_receipt(
         key_id: format_hash(&checkpoint.key_id),
     };
 
-    // 6. Generate super_proof (may be None for active tree entries)
-    let super_proof = generate_super_proof(entry_id, storage).await?;
+    // 6. Resolve data_tree_index (needed for OTS anchor selection before super_proof)
+    let data_tree_index = resolve_data_tree_index(entry_id, storage).await?;
 
-    // 7. Get covering anchors (each method uses the correct parameter)
-    let filtered_anchors = if options.include_anchors {
+    // 7. Get covering anchors
+    let (filtered_anchors, ots_super_tree_size) = if options.include_anchors {
         let mut result = Vec::new();
 
         // TSA anchor: covers if tree_size >= leaf_index + 1
@@ -269,17 +269,26 @@ pub async fn generate_receipt(
             result.push(tsa);
         }
 
-        // OTS anchor: only if super_proof is available (need data_tree_index)
-        if let Some(ref proof) = super_proof {
-            if let Some(ots) = storage.get_ots_anchor_covering(proof.data_tree_index)? {
+        // OTS anchor: only if data_tree_index is available
+        let ots_size = if let Some(idx) = data_tree_index {
+            if let Some(ots) = storage.get_ots_anchor_covering(idx)? {
+                let size = ots.super_tree_size;
                 result.push(ots);
+                size
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
 
-        result
+        (result, ots_size)
     } else {
-        Vec::new()
+        (Vec::new(), None)
     };
+
+    // 8. Generate super_proof at OTS anchor's super_tree_size (or current if no OTS anchor)
+    let super_proof = generate_super_proof(data_tree_index, storage, ots_super_tree_size).await?;
 
     // 9. Generate upgrade_url logic
     let has_super_proof = super_proof.is_some();
@@ -362,25 +371,23 @@ fn create_signed_checkpoint(
     checkpoint
 }
 
-/// Generate SuperProof for an entry (uses super_slabs directly)
+/// Resolve the data_tree_index for an entry (if it belongs to a closed tree in the Super-Tree).
 ///
 /// # Arguments
 /// * `entry_id` - UUID of the entry
-/// * `storage` - StorageEngine with access to super_slabs and index_store
+/// * `storage` - StorageEngine with access to index_store
 ///
 /// # Returns
-/// * `Ok(Some(proof))` - Entry's tree is closed and in Super-Tree
-/// * `Ok(None)` - Entry's tree is active (not yet in Super-Tree)
-/// * `Err(...)` - Only for real errors (DB failure, entry not found, etc.)
+/// * `Ok(Some(idx))` - Entry's tree is closed and has a position in the Super-Tree
+/// * `Ok(None)` - Entry is in the active tree or its tree is not yet in the Super-Tree
 ///
 /// # Errors
-/// * `ServerError::EntryNotFound` if entry doesn't exist
+/// * `ServerError::EntryNotFound` if entry doesn't exist in index
 /// * `ServerError::Storage` for storage errors
-#[allow(dead_code)]
-async fn generate_super_proof(
+async fn resolve_data_tree_index(
     entry_id: &Uuid,
     storage: &StorageEngine,
-) -> ServerResult<Option<atl_core::SuperProof>> {
+) -> ServerResult<Option<u64>> {
     // 1. Get entry's tree info
     let entry = {
         let index_store = storage.index_store();
@@ -393,28 +400,40 @@ async fn generate_super_proof(
     // 2. Check if entry has tree_id
     let tree_id = match entry.tree_id {
         Some(id) => id,
-        None => {
-            // Entry in active tree - no super_proof available
-            tracing::debug!(
-                entry_id = %entry_id,
-                "Entry in active tree, super_proof not available"
-            );
-            return Ok(None);
-        }
+        None => return Ok(None),
     };
 
-    // 3. Check if tree has data_tree_index (is in Super-Tree)
-    let data_tree_index = {
-        let index_store = storage.index_store();
-        let index = index_store.lock().await;
-        match index.get_tree_data_tree_index(tree_id)? {
-            Some(idx) => idx,
-            None => {
-                // Tree exists but not yet in Super-Tree (unusual but possible)
-                tracing::warn!(tree_id = tree_id, "Tree exists but data_tree_index is NULL");
-                return Ok(None);
-            }
-        }
+    // 3. Check if tree has data_tree_index
+    let index_store = storage.index_store();
+    let index = index_store.lock().await;
+    Ok(index.get_tree_data_tree_index(tree_id)?)
+}
+
+/// Generate SuperProof for an entry (uses super_slabs directly)
+///
+/// # Arguments
+/// * `data_tree_index` - The index of the entry's data tree in the Super-Tree. `None` means
+///   the entry's tree is still active (not yet closed into the Super-Tree), in which case
+///   `Ok(None)` is returned immediately without any storage access.
+/// * `storage` - StorageEngine with access to super_slabs and index_store
+/// * `target_super_tree_size` - If `Some`, build the proof at this exact super_tree_size
+///   (used to match the OTS anchor's size). If `None`, uses the current super_tree_size.
+///
+/// # Returns
+/// * `Ok(Some(proof))` - Entry's tree is closed and in Super-Tree
+/// * `Ok(None)` - Entry's tree is active (not yet in Super-Tree)
+/// * `Err(...)` - Only for real errors (DB failure, etc.)
+///
+/// # Errors
+/// * `ServerError::Storage` for storage errors
+async fn generate_super_proof(
+    data_tree_index: Option<u64>,
+    storage: &StorageEngine,
+    target_super_tree_size: Option<u64>,
+) -> ServerResult<Option<atl_core::SuperProof>> {
+    let data_tree_index = match data_tree_index {
+        Some(idx) => idx,
+        None => return Ok(None),
     };
 
     // 4. Get Super-Tree state
@@ -429,7 +448,10 @@ async fn generate_super_proof(
                 return Ok(None);
             }
         };
-        let size = index.get_super_tree_size()?;
+        let size = match target_super_tree_size {
+            Some(target) => target,
+            None => index.get_super_tree_size()?,
+        };
         (genesis, size)
     };
 
@@ -893,6 +915,241 @@ mod tests {
         assert!(
             !receipt.anchors.is_empty(),
             "receipt should contain TSA anchor"
+        );
+    }
+
+    /// Helper: create a StorageEngine backed by a temp directory.
+    /// Returns (engine, _dir) — _dir must be kept alive for the engine to function.
+    async fn make_engine(origin: [u8; 32]) -> (StorageEngine, tempfile::TempDir) {
+        use crate::storage::config::StorageConfig;
+        let dir = tempfile::tempdir().unwrap();
+        let config = StorageConfig {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let engine = StorageEngine::new(config, origin).await.unwrap();
+        (engine, dir)
+    }
+
+    /// Helper: append one entry and return its UUID.
+    async fn append_one(engine: &StorageEngine, seed: u8) -> uuid::Uuid {
+        use crate::traits::AppendParams;
+        let batch = engine
+            .append_batch(vec![AppendParams {
+                payload_hash: [seed; 32],
+                metadata_hash: [0u8; 32],
+                metadata_cleartext: None,
+                external_id: None,
+            }])
+            .await
+            .unwrap();
+        batch.entries[0].id
+    }
+
+    /// Helper: default ReceiptOptions with anchors disabled.
+    fn opts_no_anchors() -> ReceiptOptions {
+        use crate::receipt::options::ReceiptOptions;
+        ReceiptOptions {
+            include_anchors: false,
+            consistency_from: Some(0),
+            auto_consistency_from_anchor: false,
+            timestamp: Some(1_000_000),
+            at_tree_size: None,
+            upgrade_url_template: None,
+        }
+    }
+
+    /// Helper: default ReceiptOptions with anchors enabled.
+    fn opts_with_anchors() -> ReceiptOptions {
+        use crate::receipt::options::ReceiptOptions;
+        ReceiptOptions {
+            include_anchors: true,
+            consistency_from: Some(0),
+            auto_consistency_from_anchor: false,
+            timestamp: Some(1_000_000),
+            at_tree_size: None,
+            upgrade_url_template: None,
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // resolve_data_tree_index: entry whose IndexEntry.tree_id IS NULL
+    // This exercises the `None => return Ok(None)` branch at line 403.
+    // -------------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_resolve_data_tree_index_no_tree_id_returns_none() {
+        let (engine, _dir) = make_engine([10u8; 32]).await;
+
+        // Insert a single normal entry so the tree has at least one leaf.
+        let entry_id = append_one(&engine, 0xAA).await;
+
+        // Overwrite tree_id with NULL directly in SQLite to simulate an active-
+        // tree entry that has no tree assignment yet.
+        {
+            let index_store = engine.index_store();
+            let index = index_store.lock().await;
+            index
+                .connection()
+                .execute(
+                    "UPDATE entries SET tree_id = NULL WHERE id = ?1",
+                    rusqlite::params![entry_id.to_string()],
+                )
+                .unwrap();
+        }
+
+        let signer = CheckpointSigner::from_bytes(&[10u8; 32]);
+        let receipt = generate_receipt(&entry_id, &engine, &signer, opts_no_anchors()).await;
+
+        // Receipt generation must succeed and super_proof must be None because
+        // data_tree_index resolved to None (entry is in the active tree).
+        assert!(
+            receipt.is_ok(),
+            "generate_receipt must succeed for active-tree entry: {:?}",
+            receipt.err()
+        );
+        assert!(
+            receipt.unwrap().super_proof.is_none(),
+            "super_proof must be None when entry has no tree_id"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // generate_super_proof(None, ...) — early return Ok(None)
+    // Lines 434–437.  Entry is in a freshly-created engine (no tree rotation yet)
+    // so resolve_data_tree_index naturally returns None.
+    // -------------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_generate_super_proof_none_when_no_rotation() {
+        let (engine, _dir) = make_engine([11u8; 32]).await;
+        let entry_id = append_one(&engine, 0xBB).await;
+
+        let signer = CheckpointSigner::from_bytes(&[11u8; 32]);
+        let receipt = generate_receipt(&entry_id, &engine, &signer, opts_no_anchors()).await;
+
+        assert!(
+            receipt.is_ok(),
+            "generate_receipt must succeed: {:?}",
+            receipt.err()
+        );
+        assert!(
+            receipt.unwrap().super_proof.is_none(),
+            "super_proof must be None when tree has never been rotated"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // OTS anchor absent: get_ots_anchor_covering returns None
+    // Lines 278–279: the else branch inside `if let Some(idx) = data_tree_index`.
+    // Entry is in a closed tree (data_tree_index assigned) but no OTS anchor exists.
+    // -------------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_generate_receipt_no_ots_anchor_after_rotation() {
+        let (engine, _dir) = make_engine([12u8; 32]).await;
+
+        // Append an entry and then rotate the tree so the entry ends up in a
+        // closed tree with a valid data_tree_index.
+        let entry_id = append_one(&engine, 0xCC).await;
+        let origin = engine.origin_id();
+        let tree_head = engine.tree_head();
+        engine
+            .rotate_tree(&origin, tree_head.tree_size, &tree_head.root_hash)
+            .await
+            .unwrap();
+
+        let signer = CheckpointSigner::from_bytes(&[12u8; 32]);
+        // Request anchors so the OTS branch is executed.
+        let receipt = generate_receipt(&entry_id, &engine, &signer, opts_with_anchors()).await;
+
+        assert!(
+            receipt.is_ok(),
+            "generate_receipt must succeed after rotation with no OTS: {:?}",
+            receipt.err()
+        );
+        let receipt = receipt.unwrap();
+
+        // No OTS anchor was stored, so ots_super_tree_size stays None and the
+        // super_proof is generated using the current super_tree_size.
+        // The anchors list must not contain a BitcoinOts entry.
+        let has_ots = receipt
+            .anchors
+            .iter()
+            .any(|a| matches!(a, atl_core::ReceiptAnchor::BitcoinOts { .. }));
+        assert!(!has_ots, "anchors must not contain OTS when none is stored");
+
+        // super_proof should be Some because the entry is in a closed tree.
+        assert!(
+            receipt.super_proof.is_some(),
+            "super_proof must be present after tree rotation"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // OTS anchor present: lines 274–277 (Some branch) + lines 451–452
+    // (target_super_tree_size = Some(target) path in generate_super_proof).
+    // -------------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_generate_receipt_with_ots_anchor_uses_target_super_tree_size() {
+        use crate::traits::anchor::{Anchor, AnchorType};
+
+        let (engine, _dir) = make_engine([13u8; 32]).await;
+
+        // Append entry and rotate so it has a data_tree_index.
+        let entry_id = append_one(&engine, 0xDD).await;
+        let origin = engine.origin_id();
+        let tree_head = engine.tree_head();
+        let rotation = engine
+            .rotate_tree(&origin, tree_head.tree_size, &tree_head.root_hash)
+            .await
+            .unwrap();
+
+        // data_tree_index of the closed tree is 0 (first rotation).
+        // OTS query: super_tree_size > data_tree_index, so use 1.
+        let ots_super_tree_size = rotation.data_tree_index + 1; // == 1
+
+        // Store a confirmed OTS anchor that covers data_tree_index 0.
+        {
+            let index_store = engine.index_store();
+            let index = index_store.lock().await;
+            let anchor = Anchor {
+                anchor_type: AnchorType::BitcoinOts,
+                target: "super_root".to_string(),
+                anchored_hash: [0xAAu8; 32],
+                tree_size: 0,
+                super_tree_size: Some(ots_super_tree_size),
+                timestamp: 1_000_000,
+                token: vec![],
+                metadata: serde_json::json!({"status": "confirmed"}),
+            };
+            let anchor_id = index
+                .store_anchor_returning_id(0, &anchor, "confirmed")
+                .unwrap();
+            index
+                .update_anchor_metadata(anchor_id, serde_json::json!({"status": "confirmed"}))
+                .unwrap();
+        }
+
+        let signer = CheckpointSigner::from_bytes(&[13u8; 32]);
+        let receipt = generate_receipt(&entry_id, &engine, &signer, opts_with_anchors()).await;
+
+        assert!(
+            receipt.is_ok(),
+            "generate_receipt with OTS anchor must succeed: {:?}",
+            receipt.err()
+        );
+        let receipt = receipt.unwrap();
+
+        // OTS anchor must be present in receipt.
+        let has_ots = receipt
+            .anchors
+            .iter()
+            .any(|a| matches!(a, atl_core::ReceiptAnchor::BitcoinOts { .. }));
+        assert!(has_ots, "receipt must contain the OTS anchor");
+
+        // super_proof must exist and use the OTS super_tree_size.
+        let sp = receipt.super_proof.expect("super_proof must be present");
+        assert_eq!(
+            sp.super_tree_size, ots_super_tree_size,
+            "super_proof super_tree_size must match OTS anchor super_tree_size"
         );
     }
 }
