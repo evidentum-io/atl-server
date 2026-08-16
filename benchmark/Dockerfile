@@ -13,9 +13,8 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /build
 
-# Clone repositories
-RUN git clone https://github.com/evidentum-io/atl-core.git && \
-    git clone https://github.com/evidentum-io/atl-server.git
+# Clone repository (atl-core is resolved from crates.io)
+RUN git clone https://github.com/evidentum-io/atl-server.git
 
 # Build atl-server
 WORKDIR /build/atl-server

@@ -15,12 +15,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: evidentum-io/atl-core
-          path: atl-core
-          token: ${{ secrets.ATL_CORE_TOKEN }}
-      - run: ln -s $GITHUB_WORKSPACE/atl-core ../atl-core
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -31,12 +25,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: evidentum-io/atl-core
-          path: atl-core
-          token: ${{ secrets.ATL_CORE_TOKEN }}
-      - run: ln -s $GITHUB_WORKSPACE/atl-core ../atl-core
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -52,12 +40,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: evidentum-io/atl-core
-          path: atl-core
-          token: ${{ secrets.ATL_CORE_TOKEN }}
-      - run: ln -s $GITHUB_WORKSPACE/atl-core ../atl-core
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-targets
@@ -68,12 +50,6 @@ jobs:
   #   runs-on: ubuntu-latest
   #   steps:
   #     - uses: actions/checkout@v4
-  #     - uses: actions/checkout@v4
-  #       with:
-  #         repository: evidentum-io/atl-core
-  #         path: atl-core
-  #         token: ${{ secrets.ATL_CORE_TOKEN }}
-  #     - run: ln -s $GITHUB_WORKSPACE/atl-core ../atl-core
   #     - uses: dtolnay/rust-toolchain@stable
   #     - uses: Swatinem/rust-cache@v2
   #     - name: Install cargo-llvm-cov
@@ -93,12 +69,6 @@ jobs:
       RUSTUP_TOOLCHAIN: "1.92.0"
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          repository: evidentum-io/atl-core
-          path: atl-core
-          token: ${{ secrets.ATL_CORE_TOKEN }}
-      - run: ln -s $GITHUB_WORKSPACE/atl-core ../atl-core
       - uses: dtolnay/rust-toolchain@1.92.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo check
