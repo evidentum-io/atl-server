@@ -77,6 +77,77 @@ impl RoundRobinSelector {
         )))
     }
 
+    /// Try to anchor the active (still-open) tree head with round-robin TSA
+    /// selection.
+    ///
+    /// Same fallback semantics as [`anchor_with_round_robin`](Self::anchor_with_round_robin):
+    /// every configured server is tried in round-robin order within a
+    /// single pass, and a failure (request error or messageImprint
+    /// verification failure) simply advances to the next one. This exists
+    /// separately because the active-tree periodic anchoring path has no
+    /// `TreeRecord` yet (the tree is still open) -- it anchors a bare
+    /// `(root_hash, tree_size)` pair via
+    /// [`create_tsa_anchor_for_tree_head`](super::request::create_tsa_anchor_for_tree_head)
+    /// instead of [`try_tsa_timestamp`](super::request::try_tsa_timestamp).
+    ///
+    /// Returns anchor_id on success, error if all servers fail.
+    pub async fn anchor_tree_head_with_round_robin(
+        &self,
+        root_hash: [u8; 32],
+        tree_size: u64,
+        index: &Arc<Mutex<IndexStore>>,
+        timeout_ms: u64,
+    ) -> ServerResult<i64> {
+        if self.urls.is_empty() {
+            return Err(ServerError::Internal("No TSA URLs configured".into()));
+        }
+
+        let num_servers = self.urls.len();
+        let start_index = (self.last_index.load(Ordering::Relaxed) + 1) % num_servers;
+
+        // Try each server in round-robin order
+        for i in 0..num_servers {
+            let current_index = (start_index + i) % num_servers;
+            let tsa_url = &self.urls[current_index];
+
+            tracing::debug!(
+                tree_size = tree_size,
+                root_hash = hex::encode(root_hash),
+                tsa_url = %tsa_url,
+                attempt = i + 1,
+                total_servers = num_servers,
+                "Attempting TSA timestamp for active tree"
+            );
+
+            match super::request::create_tsa_anchor_for_tree_head(
+                root_hash, tree_size, tsa_url, timeout_ms, index,
+            )
+            .await
+            {
+                Ok(anchor_id) => {
+                    // Update round-robin index for next request
+                    self.last_index.store(current_index, Ordering::Relaxed);
+                    return Ok(anchor_id);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        tree_size = tree_size,
+                        root_hash = hex::encode(root_hash),
+                        tsa_url = %tsa_url,
+                        error = %e,
+                        "TSA server failed, trying next"
+                    );
+                    continue;
+                }
+            }
+        }
+
+        Err(ServerError::Internal(format!(
+            "All {} TSA servers failed for active tree (size {})",
+            num_servers, tree_size
+        )))
+    }
+
     /// Get number of configured URLs
     pub fn urls_count(&self) -> usize {
         self.urls.len()

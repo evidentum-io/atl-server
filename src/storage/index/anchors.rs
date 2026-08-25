@@ -344,6 +344,13 @@ impl IndexStore {
     }
 
     /// Get existing TSA anchor ID for a root hash (if any)
+    ///
+    /// Production code should prefer
+    /// [`get_tsa_anchor_with_token_for_hash`](Self::get_tsa_anchor_with_token_for_hash),
+    /// which also loads the token so it can be verified before reuse; this
+    /// lighter lookup is kept for tests and for callers that only need the
+    /// id.
+    #[allow(dead_code)]
     pub fn get_tsa_anchor_for_hash(&self, root_hash: &[u8; 32]) -> rusqlite::Result<Option<i64>> {
         self.connection()
             .query_row(
@@ -352,6 +359,41 @@ impl IndexStore {
                 |row| row.get(0),
             )
             .optional()
+    }
+
+    /// Get the existing TSA anchor for a root hash, including its stored
+    /// token, so the caller can verify it before trusting/reusing it.
+    ///
+    /// Unlike [`get_tsa_anchor_for_hash`](Self::get_tsa_anchor_for_hash),
+    /// which only returns the row id, this loads the full anchor so a
+    /// caller can re-run `TsaClient::verify()` on a token that was stored
+    /// before verification-on-receipt existed.
+    pub fn get_tsa_anchor_with_token_for_hash(
+        &self,
+        root_hash: &[u8; 32],
+    ) -> rusqlite::Result<Option<AnchorWithId>> {
+        self.connection()
+            .query_row(
+                "SELECT id, tree_size, anchor_type, target, anchored_hash, super_tree_size, timestamp, token, metadata, status
+                 FROM anchors WHERE anchored_hash = ?1 AND anchor_type = 'rfc3161' LIMIT 1",
+                [root_hash.as_slice()],
+                row_to_anchor_with_id,
+            )
+            .optional()
+    }
+
+    /// Permanently remove an anchor row.
+    ///
+    /// Used when a previously stored TSA token is found to fail
+    /// `messageImprint` verification: the row must never be served to a
+    /// client again. Deleting it (rather than only flagging its status)
+    /// guarantees it drops out of every query that reads anchors by
+    /// `tree_size` -- including [`get_anchors`](Self::get_anchors), which
+    /// does not filter by status for non-`super_root` targets.
+    pub fn delete_anchor(&self, anchor_id: i64) -> rusqlite::Result<()> {
+        self.connection()
+            .execute("DELETE FROM anchors WHERE id = ?1", params![anchor_id])?;
+        Ok(())
     }
 
     /// Get the latest anchored tree_size for TSA anchors (rfc3161)
