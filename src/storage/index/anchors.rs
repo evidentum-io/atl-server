@@ -118,6 +118,62 @@ fn row_to_anchor_with_id(row: &rusqlite::Row) -> rusqlite::Result<AnchorWithId> 
     })
 }
 
+/// Merge `new_fields` into an anchor's existing `metadata`, tolerant of
+/// `existing_metadata` holding anything other than a well-formed JSON
+/// object.
+///
+/// This exists so that read-modify-write updates to the `metadata` column
+/// (currently [`IndexStore::reject_anchor_atomic`] and
+/// [`IndexStore::confirm_ots_anchor_atomic`]) never depend on SQL-side JSON
+/// functions (`json_set` and friends), which require their input to
+/// already be well-formed JSON and abort the whole enclosing transaction
+/// with "malformed JSON" otherwise -- silently leaving whatever the
+/// transaction was supposed to accomplish (rejecting a bad anchor,
+/// confirming a good one) undone. `metadata` is user/network-influenced
+/// data (it round-trips TSA/calendar URLs and, historically, was written
+/// before some of today's invariants existed), so it must never be assumed
+/// well-formed.
+///
+/// Three cases:
+/// - `existing_metadata` is `None`: starts from an empty object.
+/// - It parses as JSON and the top-level value is an object: `new_fields`
+///   are merged directly into that object, preserving every pre-existing
+///   key.
+/// - It fails to parse as JSON at all, or parses but isn't an object (a
+///   bare number, array, string, bool, or null): neither can be merged
+///   into structurally, but corrupted or unexpected metadata is itself
+///   evidence and must not be discarded, so the original raw text is
+///   preserved verbatim under `legacy_metadata_raw` on a fresh object.
+///
+/// Returns the resulting object serialized back to a JSON string, ready
+/// for a plain parameterized `UPDATE ... SET metadata = ?`.
+fn merge_metadata_fields(
+    existing_metadata: Option<&str>,
+    new_fields: impl IntoIterator<Item = (&'static str, serde_json::Value)>,
+) -> String {
+    let mut merged = match existing_metadata {
+        None => serde_json::Map::new(),
+        Some(raw) => match serde_json::from_str::<serde_json::Value>(raw) {
+            Ok(serde_json::Value::Object(map)) => map,
+            Ok(_) | Err(_) => {
+                let mut map = serde_json::Map::new();
+                map.insert(
+                    "legacy_metadata_raw".to_string(),
+                    serde_json::Value::String(raw.to_string()),
+                );
+                map
+            }
+        },
+    };
+
+    for (key, value) in new_fields {
+        merged.insert(key.to_string(), value);
+    }
+
+    serde_json::to_string(&serde_json::Value::Object(merged))
+        .expect("serializing a serde_json::Map to a JSON string cannot fail")
+}
+
 impl IndexStore {
     /// Store an external anchor for a tree size
     #[allow(dead_code)]
@@ -346,14 +402,46 @@ impl IndexStore {
             params![anchor_id],
         )?;
 
-        // Update anchor metadata with Bitcoin block info
+        // Update anchor metadata with Bitcoin block info. Merged in Rust
+        // (see `merge_metadata_fields`) rather than via SQLite's
+        // `json_set`, which required `metadata` to already be a
+        // well-formed JSON object and aborted this whole transaction with
+        // "malformed JSON" otherwise. Unlike the `reject_anchor_atomic`
+        // case (where a failure here leaves a bad anchor still in
+        // circulation), a failure here is the opposite and arguably worse:
+        // it silently, permanently prevents a *good* Bitcoin anchor from
+        // ever confirming -- the token stays un-upgraded, status stays
+        // non-`confirmed`, and the tree never advances to `closed` -- for
+        // exactly this one row, until someone manually repairs its
+        // metadata. Bitcoin confirmation is the one trust source here that
+        // needs no trusted root of its own, so losing it silently is
+        // costly.
+        let existing_metadata: Option<String> = tx
+            .query_row(
+                "SELECT metadata FROM anchors WHERE id = ?1",
+                params![anchor_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let metadata_json = merge_metadata_fields(
+            existing_metadata.as_deref(),
+            [
+                (
+                    "bitcoin_block_height",
+                    serde_json::Value::Number((block_height as i64).into()),
+                ),
+                (
+                    "bitcoin_block_time",
+                    serde_json::Value::Number((block_time as i64).into()),
+                ),
+                ("status", serde_json::Value::String("confirmed".to_string())),
+            ],
+        );
+
         tx.execute(
-            "UPDATE anchors SET metadata = json_set(metadata,
-                '$.bitcoin_block_height', ?1,
-                '$.bitcoin_block_time', ?2,
-                '$.status', 'confirmed')
-             WHERE id = ?3",
-            params![block_height as i64, block_time as i64, anchor_id],
+            "UPDATE anchors SET metadata = ?1 WHERE id = ?2",
+            params![metadata_json, anchor_id],
         )?;
 
         // Update tree status
@@ -452,16 +540,12 @@ impl IndexStore {
         let mut conn = self.connection_mut();
         let tx = conn.transaction()?;
 
-        // Merge into `metadata` in Rust rather than via SQLite's `json_set`.
-        // `json_set` requires its input to already be well-formed JSON; if
-        // `metadata` is NULL that's fine (`COALESCE(metadata, '{}')`
-        // handles it), but if it holds a non-JSON string or JSON that
-        // isn't an object, `json_set` raises "malformed JSON" and the
-        // whole transaction rolls back -- leaving the very row this method
-        // exists to reject sitting at `status = 'confirmed'`, still
-        // servable and reusable. Handling all three shapes here instead
-        // means this UPDATE can never fail on account of what a prior,
-        // possibly buggy, write left in `metadata`.
+        // Merge into `metadata` in Rust (see `merge_metadata_fields`)
+        // rather than via SQLite's `json_set`, which would abort this
+        // whole transaction with "malformed JSON" if `metadata` holds
+        // anything other than a well-formed JSON object -- leaving the
+        // very row this method exists to reject sitting at
+        // `status = 'confirmed'`, still servable and reusable.
         let existing_metadata: Option<String> = tx
             .query_row(
                 "SELECT metadata FROM anchors WHERE id = ?1",
@@ -470,40 +554,16 @@ impl IndexStore {
             )
             .optional()?;
 
-        let mut merged = match existing_metadata.as_deref() {
-            // No metadata at all: start fresh.
-            None => serde_json::Map::new(),
-            Some(raw) => match serde_json::from_str::<serde_json::Value>(raw) {
-                // The common case: a JSON object, merge into it directly.
-                Ok(serde_json::Value::Object(map)) => map,
-                // Either not valid JSON at all, or valid JSON that isn't an
-                // object (a bare number, array, string, bool, or null).
-                // Neither can be merged into structurally, but corrupted
-                // metadata is itself evidence -- the same reasoning that
-                // rules out deleting the row applies to its metadata -- so
-                // it is preserved verbatim rather than discarded.
-                Ok(_) | Err(_) => {
-                    let mut map = serde_json::Map::new();
-                    map.insert(
-                        "legacy_metadata_raw".to_string(),
-                        serde_json::Value::String(raw.to_string()),
-                    );
-                    map
-                }
-            },
-        };
-
-        merged.insert(
-            "rejection_reason".to_string(),
-            serde_json::Value::String(reason.to_string()),
+        let metadata_json = merge_metadata_fields(
+            existing_metadata.as_deref(),
+            [
+                (
+                    "rejection_reason",
+                    serde_json::Value::String(reason.to_string()),
+                ),
+                ("rejected_at", serde_json::Value::Number(now.into())),
+            ],
         );
-        merged.insert(
-            "rejected_at".to_string(),
-            serde_json::Value::Number(now.into()),
-        );
-
-        let metadata_json = serde_json::to_string(&serde_json::Value::Object(merged))
-            .expect("serializing a serde_json::Map to a JSON string cannot fail");
 
         tx.execute(
             "UPDATE anchors SET status = 'rejected', metadata = ?1 WHERE id = ?2",
@@ -995,6 +1055,12 @@ mod tests {
             metadata.get("status").and_then(|v| v.as_str()),
             Some("confirmed")
         );
+        // Pre-existing metadata fields (a normal JSON object) must survive
+        // the merge, not be discarded.
+        assert_eq!(
+            metadata.get("calendar_url").and_then(|v| v.as_str()),
+            Some("https://ots.example.com")
+        );
     }
 
     #[test]
@@ -1321,6 +1387,129 @@ mod tests {
             .get_pending_ots_anchors()
             .expect("Failed to get pending anchors");
         assert_eq!(pending.len(), 0);
+    }
+
+    // -------------------------------------------------------------------
+    // Regression: `confirm_ots_anchor_atomic` must go through to
+    // completion no matter what `metadata` currently holds. It used to
+    // merge the Bitcoin block info via SQLite's `json_set`, which raises
+    // "malformed JSON" (and rolls back the whole transaction -- token
+    // upgrade, status, and metadata all revert) if `metadata` is not
+    // itself well-formed JSON. Unlike the `reject_anchor_atomic` failure
+    // mode (a bad anchor stays in circulation), this one silently and
+    // permanently prevents a *good* Bitcoin anchor from ever confirming.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_confirm_ots_anchor_atomic_survives_non_json_metadata() {
+        let mut store = create_test_store();
+
+        let anchor = create_test_anchor_ots();
+        let anchor_id = store
+            .store_anchor_returning_id(200, &anchor, "pending")
+            .expect("Failed to store anchor");
+
+        // Corrupt metadata to a string that is not valid JSON at all.
+        let garbage = "not json at all {{{";
+        store
+            .connection()
+            .execute(
+                "UPDATE anchors SET metadata = ?1 WHERE id = ?2",
+                rusqlite::params![garbage, anchor_id],
+            )
+            .expect("Failed to corrupt metadata");
+
+        let upgraded_proof = vec![0xFF, 0xEE, 0xDD];
+        let block_height = 700_000;
+        let block_time = 1_600_000_000;
+
+        store
+            .confirm_ots_anchor_atomic(anchor_id, &upgraded_proof, block_height, block_time)
+            .expect("confirmation must succeed even with unparseable metadata");
+
+        let (status, token, metadata_json): (String, Vec<u8>, Option<String>) = store
+            .connection()
+            .query_row(
+                "SELECT status, token, metadata FROM anchors WHERE id = ?1",
+                rusqlite::params![anchor_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("row must still exist");
+        assert_eq!(status, "confirmed", "status must become confirmed");
+        assert_eq!(token, upgraded_proof, "token must be upgraded");
+
+        let metadata: serde_json::Value =
+            serde_json::from_str(&metadata_json.expect("metadata must be set"))
+                .expect("resulting metadata must itself be valid JSON");
+        assert_eq!(
+            metadata["bitcoin_block_height"],
+            serde_json::json!(block_height)
+        );
+        assert_eq!(
+            metadata["bitcoin_block_time"],
+            serde_json::json!(block_time)
+        );
+        assert_eq!(metadata["status"], "confirmed");
+        assert_eq!(
+            metadata["legacy_metadata_raw"], garbage,
+            "the original unparseable content must be preserved, not discarded"
+        );
+    }
+
+    #[test]
+    fn test_confirm_ots_anchor_atomic_survives_non_object_json_metadata() {
+        let mut store = create_test_store();
+
+        let anchor = create_test_anchor_ots();
+        let anchor_id = store
+            .store_anchor_returning_id(200, &anchor, "pending")
+            .expect("Failed to store anchor");
+
+        // `metadata` is valid JSON, but an array, not an object.
+        let non_object = "[1,2,3]";
+        store
+            .connection()
+            .execute(
+                "UPDATE anchors SET metadata = ?1 WHERE id = ?2",
+                rusqlite::params![non_object, anchor_id],
+            )
+            .expect("Failed to corrupt metadata");
+
+        let upgraded_proof = vec![0x11, 0x22];
+        let block_height = 800_000;
+        let block_time = 1_650_000_000;
+
+        store
+            .confirm_ots_anchor_atomic(anchor_id, &upgraded_proof, block_height, block_time)
+            .expect("confirmation must succeed even with non-object JSON metadata");
+
+        let (status, token, metadata_json): (String, Vec<u8>, Option<String>) = store
+            .connection()
+            .query_row(
+                "SELECT status, token, metadata FROM anchors WHERE id = ?1",
+                rusqlite::params![anchor_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("row must still exist");
+        assert_eq!(status, "confirmed", "status must become confirmed");
+        assert_eq!(token, upgraded_proof, "token must be upgraded");
+
+        let metadata: serde_json::Value =
+            serde_json::from_str(&metadata_json.expect("metadata must be set"))
+                .expect("resulting metadata must itself be valid JSON");
+        assert_eq!(
+            metadata["bitcoin_block_height"],
+            serde_json::json!(block_height)
+        );
+        assert_eq!(
+            metadata["bitcoin_block_time"],
+            serde_json::json!(block_time)
+        );
+        assert_eq!(metadata["status"], "confirmed");
+        assert_eq!(
+            metadata["legacy_metadata_raw"], non_object,
+            "the original non-object JSON content must be preserved, not discarded"
+        );
     }
 
     #[test]
