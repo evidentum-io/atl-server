@@ -7,17 +7,35 @@
 //! - Querying anchors (get_anchors, get_pending_ots_anchors,
 //!   get_tsa_anchor_covering, get_ots_anchor_covering)
 //! - Updating anchors (update_anchor_status, update_anchor_token, update_anchor_metadata)
-//! - Atomic operations (confirm_ots_anchor_atomic)
+//! - Atomic operations (confirm_ots_anchor_atomic, reject_anchor_atomic)
 
 use super::queries::IndexStore;
 use crate::traits::{Anchor, AnchorType};
 use rusqlite::{params, OptionalExtension};
+
+/// Structured `metadata.rejection_reason` code recorded when a stored RFC
+/// 3161 token is found to fail `messageImprint` verification (bound to a
+/// hash other than its own `anchored_hash`).
+pub const REJECTION_REASON_MESSAGE_IMPRINT_MISMATCH: &str = "message_imprint_mismatch";
 
 /// Anchor with ID (for OTS poll job)
 #[derive(Debug, Clone)]
 pub struct AnchorWithId {
     pub id: i64,
     pub anchor: Anchor,
+}
+
+/// A raw `rfc3161` anchor row for the admin audit tool.
+///
+/// See [`IndexStore::list_rfc3161_anchors_for_audit`].
+#[derive(Debug, Clone)]
+pub struct AuditableAnchor {
+    pub id: i64,
+    pub tree_size: Option<u64>,
+    pub anchored_hash: [u8; 32],
+    pub token: Vec<u8>,
+    pub timestamp: u64,
+    pub status: String,
 }
 
 /// Convert database row to Anchor
@@ -155,11 +173,17 @@ impl IndexStore {
     }
 
     /// Get all anchors for a tree size
+    ///
+    /// Only `confirmed` anchors are eligible: a valid TSA token has no
+    /// intermediate state (both insertion paths write `confirmed`
+    /// immediately), `pending` is exclusively an in-flight OTS state, and
+    /// `rejected` marks a token that failed `messageImprint` verification.
+    /// None of those should ever be served in a receipt.
     pub fn get_anchors(&self, tree_size: u64) -> rusqlite::Result<Vec<Anchor>> {
         let conn = self.connection();
         let mut stmt = conn.prepare(
             "SELECT id, tree_size, anchor_type, target, anchored_hash, super_tree_size, timestamp, token, metadata
-             FROM anchors WHERE tree_size = ?1 OR (target = 'super_root' AND status = 'confirmed')",
+             FROM anchors WHERE status = 'confirmed' AND (tree_size = ?1 OR target = 'super_root')",
         )?;
 
         let rows = stmt.query_map(params![tree_size as i64], row_to_anchor)?;
@@ -168,11 +192,11 @@ impl IndexStore {
 
     /// Get the most recent anchored tree size
     pub fn get_latest_anchored_size(&self) -> rusqlite::Result<Option<u64>> {
-        let result =
-            self.connection()
-                .query_row("SELECT MAX(tree_size) FROM anchors", [], |row| {
-                    row.get::<_, Option<i64>>(0)
-                })?;
+        let result = self.connection().query_row(
+            "SELECT MAX(tree_size) FROM anchors WHERE status = 'confirmed'",
+            [],
+            |row| row.get::<_, Option<i64>>(0),
+        )?;
 
         Ok(result.map(|s| s as u64))
     }
@@ -343,7 +367,11 @@ impl IndexStore {
         Ok(())
     }
 
-    /// Get existing TSA anchor ID for a root hash (if any)
+    /// Get existing, confirmed TSA anchor ID for a root hash (if any)
+    ///
+    /// Excludes `rejected` rows (a token that failed `messageImprint`
+    /// verification must never be found again for reuse) and anything
+    /// that isn't a `data_tree_root` anchor.
     ///
     /// Production code should prefer
     /// [`get_tsa_anchor_with_token_for_hash`](Self::get_tsa_anchor_with_token_for_hash),
@@ -354,20 +382,29 @@ impl IndexStore {
     pub fn get_tsa_anchor_for_hash(&self, root_hash: &[u8; 32]) -> rusqlite::Result<Option<i64>> {
         self.connection()
             .query_row(
-                "SELECT id FROM anchors WHERE anchored_hash = ?1 AND anchor_type = 'rfc3161' LIMIT 1",
+                "SELECT id FROM anchors
+                 WHERE anchored_hash = ?1 AND anchor_type = 'rfc3161'
+                   AND target = 'data_tree_root' AND status = 'confirmed'
+                 LIMIT 1",
                 [root_hash.as_slice()],
                 |row| row.get(0),
             )
             .optional()
     }
 
-    /// Get the existing TSA anchor for a root hash, including its stored
-    /// token, so the caller can verify it before trusting/reusing it.
+    /// Get the existing, confirmed TSA anchor for a root hash, including
+    /// its stored token, so the caller can verify it before trusting or
+    /// reusing it.
     ///
-    /// Unlike [`get_tsa_anchor_for_hash`](Self::get_tsa_anchor_for_hash),
-    /// which only returns the row id, this loads the full anchor so a
-    /// caller can re-run `TsaClient::verify()` on a token that was stored
-    /// before verification-on-receipt existed.
+    /// Excludes `rejected` rows for the same reason as
+    /// [`get_tsa_anchor_for_hash`](Self::get_tsa_anchor_for_hash): once a
+    /// token has been marked rejected it must never be surfaced again as
+    /// something to reuse, only as an audit trail entry.
+    ///
+    /// Unlike `get_tsa_anchor_for_hash`, which only returns the row id,
+    /// this loads the full anchor so a caller can re-run
+    /// `TsaClient::verify()` on a token that was stored before
+    /// verification-on-receipt existed.
     pub fn get_tsa_anchor_with_token_for_hash(
         &self,
         root_hash: &[u8; 32],
@@ -375,39 +412,119 @@ impl IndexStore {
         self.connection()
             .query_row(
                 "SELECT id, tree_size, anchor_type, target, anchored_hash, super_tree_size, timestamp, token, metadata, status
-                 FROM anchors WHERE anchored_hash = ?1 AND anchor_type = 'rfc3161' LIMIT 1",
+                 FROM anchors
+                 WHERE anchored_hash = ?1 AND anchor_type = 'rfc3161'
+                   AND target = 'data_tree_root' AND status = 'confirmed'
+                 LIMIT 1",
                 [root_hash.as_slice()],
                 row_to_anchor_with_id,
             )
             .optional()
     }
 
-    /// Permanently remove an anchor row.
+    /// Mark an RFC 3161 anchor as rejected and atomically release any tree
+    /// pointing to it via `tsa_anchor_id`.
     ///
-    /// Used when a previously stored TSA token is found to fail
-    /// `messageImprint` verification: the row must never be served to a
-    /// client again. Deleting it (rather than only flagging its status)
-    /// guarantees it drops out of every query that reads anchors by
-    /// `tree_size` -- including [`get_anchors`](Self::get_anchors), which
-    /// does not filter by status for non-`super_root` targets.
-    pub fn delete_anchor(&self, anchor_id: i64) -> rusqlite::Result<()> {
-        self.connection()
-            .execute("DELETE FROM anchors WHERE id = ?1", params![anchor_id])?;
+    /// Used when a stored token is found to fail `messageImprint`
+    /// verification. The row is never deleted: for a product whose premise
+    /// is an immutable audit trail, permanently erasing the record that a
+    /// bad root was once anchored under this id is a worse precedent than
+    /// keeping it -- incident review needs it. Instead the row is flagged
+    /// `status = 'rejected'` (a lifecycle state, distinct from the
+    /// *reason*, which is recorded structurally as
+    /// `metadata.rejection_reason` plus `metadata.rejected_at`), which
+    /// every read path (`get_anchors`, `get_tsa_anchor_with_token_for_hash`,
+    /// `get_tsa_anchor_for_hash`, `get_latest_anchored_size`,
+    /// `get_latest_tsa_anchored_size`) now excludes.
+    ///
+    /// Releasing the tree in the SAME transaction is required, not
+    /// optional: [`IndexStore::get_trees_pending_tsa`] only picks up trees
+    /// with `tsa_anchor_id IS NULL`, so a tree left pointing at a rejected
+    /// anchor would never be re-queued for anchoring -- worse than either
+    /// rejecting cleanly or not rejecting at all.
+    pub fn reject_anchor_atomic(&self, anchor_id: i64, reason: &str) -> rusqlite::Result<()> {
+        let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let mut conn = self.connection_mut();
+        let tx = conn.transaction()?;
+
+        tx.execute(
+            "UPDATE anchors
+             SET status = 'rejected',
+                 metadata = json_set(COALESCE(metadata, '{}'),
+                     '$.rejection_reason', ?1,
+                     '$.rejected_at', ?2)
+             WHERE id = ?3",
+            params![reason, now, anchor_id],
+        )?;
+
+        tx.execute(
+            "UPDATE trees SET tsa_anchor_id = NULL WHERE tsa_anchor_id = ?1",
+            params![anchor_id],
+        )?;
+
+        tx.commit()?;
         Ok(())
     }
 
     /// Get the latest anchored tree_size for TSA anchors (rfc3161)
     ///
-    /// Returns the maximum tree_size that has been anchored via TSA.
+    /// Returns the maximum tree_size that has been anchored via TSA, among
+    /// `confirmed` anchors only (a `rejected` row's tree_size must not
+    /// influence this).
     /// Used for periodic active tree anchoring.
     pub fn get_latest_tsa_anchored_size(&self) -> rusqlite::Result<Option<u64>> {
         let result = self.connection().query_row(
-            "SELECT MAX(tree_size) FROM anchors WHERE anchor_type = 'rfc3161'",
+            "SELECT MAX(tree_size) FROM anchors WHERE anchor_type = 'rfc3161' AND status = 'confirmed'",
             [],
             |row| row.get::<_, Option<i64>>(0),
         )?;
 
         Ok(result.map(|s| s as u64))
+    }
+
+    /// List every `rfc3161` anchor row, regardless of status.
+    ///
+    /// This is for the one-off admin audit tool
+    /// ([`crate::background::tsa_job::audit`]) only: unlike every other
+    /// read path in this module, it deliberately does **not** filter by
+    /// status, and exposes `status` on each row -- the audit needs to see
+    /// `rejected` rows too (to skip them, for idempotency) as well as
+    /// whatever `confirmed` rows may still be carrying a bad token from
+    /// before verification-on-receipt existed.
+    pub fn list_rfc3161_anchors_for_audit(&self) -> rusqlite::Result<Vec<AuditableAnchor>> {
+        let conn = self.connection();
+        let mut stmt = conn.prepare(
+            "SELECT id, tree_size, anchored_hash, token, timestamp, status
+             FROM anchors WHERE anchor_type = 'rfc3161' ORDER BY id",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let id: i64 = row.get(0)?;
+            let tree_size: Option<i64> = row.get(1)?;
+            let anchored_hash: Vec<u8> = row.get(2)?;
+            let token: Vec<u8> = row.get(3)?;
+            let timestamp: i64 = row.get(4)?;
+            let status: String = row.get(5)?;
+
+            let anchored_hash: [u8; 32] = anchored_hash.try_into().map_err(|_| {
+                rusqlite::Error::InvalidColumnType(
+                    2,
+                    "anchored_hash".into(),
+                    rusqlite::types::Type::Blob,
+                )
+            })?;
+
+            Ok(AuditableAnchor {
+                id,
+                tree_size: tree_size.map(|s| s as u64),
+                anchored_hash,
+                token,
+                timestamp: timestamp as u64,
+                status,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>()
     }
 }
 
@@ -475,6 +592,18 @@ mod tests {
         let result = store.store_anchor(100, &anchor);
         assert!(result.is_ok(), "Failed to store anchor: {:?}", result.err());
 
+        // `store_anchor` defaults to status='pending', but only 'confirmed'
+        // anchors are ever served via `get_anchors`. Promote it directly so
+        // this test keeps exercising `store_anchor`'s own field round-trip
+        // rather than switching to a different insert method.
+        store
+            .connection()
+            .execute(
+                "UPDATE anchors SET status = 'confirmed' WHERE tree_size = 100",
+                [],
+            )
+            .expect("Failed to promote anchor to confirmed");
+
         // Verify anchor was stored
         let anchors = store.get_anchors(100).expect("Failed to get anchors");
         assert_eq!(anchors.len(), 1);
@@ -535,10 +664,10 @@ mod tests {
         let anchor2 = create_test_anchor_ots();
 
         store
-            .store_anchor(100, &anchor1)
+            .store_anchor_returning_id(100, &anchor1, "confirmed")
             .expect("Failed to store anchor1");
         store
-            .store_anchor(100, &anchor2)
+            .store_anchor_returning_id(100, &anchor2, "confirmed")
             .expect("Failed to store anchor2");
 
         let anchors = store.get_anchors(100).expect("Failed to get anchors");
@@ -559,7 +688,7 @@ mod tests {
         // Store a regular anchor
         let anchor = create_test_anchor_rfc3161();
         store
-            .store_anchor(100, &anchor)
+            .store_anchor_returning_id(100, &anchor, "confirmed")
             .expect("Failed to store regular anchor");
 
         // get_anchors should return both
@@ -584,10 +713,10 @@ mod tests {
         let anchor2 = create_test_anchor_ots();
 
         store
-            .store_anchor(100, &anchor1)
+            .store_anchor_returning_id(100, &anchor1, "confirmed")
             .expect("Failed to store anchor1");
         store
-            .store_anchor(200, &anchor2)
+            .store_anchor_returning_id(200, &anchor2, "confirmed")
             .expect("Failed to store anchor2");
 
         let size = store
@@ -684,7 +813,7 @@ mod tests {
         let anchor = create_test_anchor_rfc3161();
 
         let id = store
-            .store_anchor_returning_id(100, &anchor, "pending")
+            .store_anchor_returning_id(100, &anchor, "confirmed")
             .expect("Failed to store anchor");
 
         let new_metadata = serde_json::json!({"updated": true, "value": 42});
@@ -920,10 +1049,10 @@ mod tests {
         rfc2.tree_size = 200;
 
         store
-            .store_anchor(100, &rfc1)
+            .store_anchor_returning_id(100, &rfc1, "confirmed")
             .expect("Failed to store rfc1");
         store
-            .store_anchor(200, &rfc2)
+            .store_anchor_returning_id(200, &rfc2, "confirmed")
             .expect("Failed to store rfc2");
 
         let size = store
@@ -940,10 +1069,10 @@ mod tests {
         let ots = create_test_anchor_ots();
 
         store
-            .store_anchor(100, &rfc)
+            .store_anchor_returning_id(100, &rfc, "confirmed")
             .expect("Failed to store RFC anchor");
         store
-            .store_anchor(300, &ots)
+            .store_anchor_returning_id(300, &ots, "confirmed")
             .expect("Failed to store OTS anchor");
 
         // Should return RFC size, not OTS
@@ -959,7 +1088,7 @@ mod tests {
         let anchor = create_test_anchor_rfc3161();
 
         store
-            .store_anchor(100, &anchor)
+            .store_anchor_returning_id(100, &anchor, "confirmed")
             .expect("Failed to store anchor");
 
         let anchors = store.get_anchors(100).expect("Failed to get anchors");
@@ -981,7 +1110,7 @@ mod tests {
         let anchor = create_test_anchor_ots();
 
         store
-            .store_anchor(200, &anchor)
+            .store_anchor_returning_id(200, &anchor, "confirmed")
             .expect("Failed to store anchor");
 
         let anchors = store.get_anchors(200).expect("Failed to get anchors");
@@ -998,7 +1127,7 @@ mod tests {
         let anchor = create_test_anchor_other();
 
         store
-            .store_anchor(300, &anchor)
+            .store_anchor_returning_id(300, &anchor, "confirmed")
             .expect("Failed to store anchor");
 
         let anchors = store.get_anchors(300).expect("Failed to get anchors");
@@ -1037,7 +1166,7 @@ mod tests {
         });
 
         store
-            .store_anchor(100, &anchor)
+            .store_anchor_returning_id(100, &anchor, "confirmed")
             .expect("Failed to store anchor");
 
         let anchors = store.get_anchors(100).expect("Failed to get anchors");
@@ -1062,11 +1191,12 @@ mod tests {
             .store_anchor(100, &anchor)
             .expect("Failed to store anchor");
 
-        // Manually corrupt metadata in DB
+        // Manually corrupt metadata in DB, and promote to 'confirmed' since
+        // that is now required for `get_anchors` to return the row at all.
         store
             .connection()
             .execute(
-                "UPDATE anchors SET metadata = 'invalid json' WHERE tree_size = 100",
+                "UPDATE anchors SET metadata = 'invalid json', status = 'confirmed' WHERE tree_size = 100",
                 [],
             )
             .expect("Failed to corrupt metadata");
@@ -1099,10 +1229,14 @@ mod tests {
         let ots = create_test_anchor_ots();
         let other = create_test_anchor_other();
 
-        store.store_anchor(100, &rfc).expect("Failed to store RFC");
-        store.store_anchor(200, &ots).expect("Failed to store OTS");
         store
-            .store_anchor(300, &other)
+            .store_anchor_returning_id(100, &rfc, "confirmed")
+            .expect("Failed to store RFC");
+        store
+            .store_anchor_returning_id(200, &ots, "confirmed")
+            .expect("Failed to store OTS");
+        store
+            .store_anchor_returning_id(300, &other, "confirmed")
             .expect("Failed to store Other");
 
         // Verify all types stored correctly
@@ -1140,12 +1274,15 @@ mod tests {
     fn test_row_to_anchor_invalid_hash_length() {
         let store = create_test_store();
 
-        // Insert anchor with invalid hash length (not 32 bytes)
+        // Insert anchor with invalid hash length (not 32 bytes). Must be
+        // 'confirmed' or `get_anchors` would simply not find the row at all
+        // (returning an empty, not erroring, result) instead of exercising
+        // the row-parsing failure this test is about.
         store
             .connection()
             .execute(
-                "INSERT INTO anchors (tree_size, anchor_type, target, anchored_hash, timestamp, token, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO anchors (tree_size, anchor_type, target, anchored_hash, timestamp, token, status, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 rusqlite::params![
                     100i64,
                     "rfc3161",
@@ -1153,6 +1290,7 @@ mod tests {
                     vec![0x01u8, 0x02, 0x03], // Invalid: only 3 bytes instead of 32
                     1_234_567_890_000_000_000i64,
                     vec![0xDEu8, 0xAD],
+                    "confirmed",
                     chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
                 ],
             )
@@ -1216,8 +1354,8 @@ mod tests {
         store
             .connection()
             .execute(
-                "INSERT INTO anchors (tree_size, anchor_type, target, anchored_hash, timestamp, token, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO anchors (tree_size, anchor_type, target, anchored_hash, timestamp, token, status, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 rusqlite::params![
                     100i64,
                     "unknown_future_type", // Unknown anchor type
@@ -1225,6 +1363,7 @@ mod tests {
                     [0x42u8; 32].as_slice(),
                     1_234_567_890_000_000_000i64,
                     vec![0xDEu8, 0xAD],
+                    "confirmed",
                     chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
                 ],
             )
@@ -1283,6 +1422,16 @@ mod tests {
 
         let result = store.store_anchor(100, &anchor);
         assert!(result.is_ok());
+
+        // `store_anchor` defaults to status='pending'; promote so
+        // `get_anchors` (now 'confirmed'-only) can see it.
+        store
+            .connection()
+            .execute(
+                "UPDATE anchors SET status = 'confirmed' WHERE tree_size = 100",
+                [],
+            )
+            .expect("Failed to promote anchor to confirmed");
 
         let anchors = store.get_anchors(100).expect("Failed to get anchors");
         assert_eq!(anchors.len(), 1);
@@ -1580,5 +1729,181 @@ mod tests {
         let anchors = store.get_anchors(50).expect("Failed to get anchors");
         assert!(!anchors.is_empty());
         assert!(anchors.iter().any(|a| a.target == "super_root"));
+    }
+
+    // -------------------------------------------------------------------
+    // Regression: rejecting an anchor must hide it from every read path
+    // and atomically release the tree pointing at it, so the tree is
+    // re-queued for anchoring instead of being stuck forever with a
+    // non-NULL `tsa_anchor_id` that resolves to nothing usable.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_reject_anchor_atomic_hides_row_and_requeues_tree() {
+        let store = create_test_store();
+        let hash = [9u8; 32];
+        let origin_id = [0u8; 32];
+
+        let mut anchor = create_test_anchor_rfc3161();
+        anchor.anchored_hash = hash;
+        anchor.tree_size = 100;
+
+        let anchor_id = store
+            .store_anchor_returning_id(100, &anchor, "confirmed")
+            .expect("Failed to store anchor");
+
+        let tree_id = store
+            .create_active_tree(&origin_id, 0)
+            .expect("Failed to create tree");
+        store
+            .connection()
+            .execute(
+                "UPDATE trees SET status = 'pending_bitcoin', end_size = ?1, root_hash = ?2, tsa_anchor_id = ?3 WHERE id = ?4",
+                rusqlite::params![100i64, hash.as_slice(), anchor_id, tree_id],
+            )
+            .expect("Failed to link tree to anchor");
+
+        // Sanity: everything is visible/linked before rejection, and the
+        // tree is NOT in the anchoring queue (it already has an anchor).
+        assert_eq!(store.get_anchors(100).unwrap().len(), 1);
+        assert_eq!(store.get_latest_anchored_size().unwrap(), Some(100));
+        assert_eq!(store.get_latest_tsa_anchored_size().unwrap(), Some(100));
+        assert_eq!(
+            store.get_tsa_anchor_for_hash(&hash).unwrap(),
+            Some(anchor_id)
+        );
+        assert!(store
+            .get_tsa_anchor_with_token_for_hash(&hash)
+            .unwrap()
+            .is_some());
+        assert!(store
+            .get_trees_pending_tsa()
+            .unwrap()
+            .iter()
+            .all(|t| t.id != tree_id));
+
+        store
+            .reject_anchor_atomic(anchor_id, REJECTION_REASON_MESSAGE_IMPRINT_MISMATCH)
+            .expect("Failed to reject anchor");
+
+        // The row must be gone from every read path...
+        assert!(
+            store.get_anchors(100).unwrap().is_empty(),
+            "rejected anchor must not be served in a receipt"
+        );
+        assert_eq!(
+            store.get_latest_anchored_size().unwrap(),
+            None,
+            "rejected anchor must not count toward the latest anchored size"
+        );
+        assert_eq!(
+            store.get_latest_tsa_anchored_size().unwrap(),
+            None,
+            "rejected anchor must not count toward the latest TSA anchored size"
+        );
+        assert_eq!(
+            store.get_tsa_anchor_for_hash(&hash).unwrap(),
+            None,
+            "rejected anchor must not be found for reuse by hash"
+        );
+        assert!(
+            store
+                .get_tsa_anchor_with_token_for_hash(&hash)
+                .unwrap()
+                .is_none(),
+            "rejected anchor must not be found for reuse by hash (with token)"
+        );
+
+        // ...but the row itself must still exist, as an auditable record.
+        let (status, metadata_json): (String, Option<String>) = store
+            .connection()
+            .query_row(
+                "SELECT status, metadata FROM anchors WHERE id = ?1",
+                rusqlite::params![anchor_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("rejected row must still exist");
+        assert_eq!(status, "rejected");
+        let metadata: serde_json::Value =
+            serde_json::from_str(&metadata_json.expect("metadata must be set")).unwrap();
+        assert_eq!(
+            metadata["rejection_reason"],
+            REJECTION_REASON_MESSAGE_IMPRINT_MISMATCH
+        );
+        assert!(metadata["rejected_at"].is_number());
+
+        // The tree must be detached and back in the anchoring queue.
+        let tree = store
+            .get_tree(tree_id)
+            .expect("query should succeed")
+            .expect("tree must still exist");
+        assert!(
+            tree.tsa_anchor_id.is_none(),
+            "tree must be detached from the rejected anchor"
+        );
+        assert!(
+            store
+                .get_trees_pending_tsa()
+                .unwrap()
+                .iter()
+                .any(|t| t.id == tree_id),
+            "tree must be re-queued for TSA anchoring after its anchor is rejected"
+        );
+    }
+
+    #[test]
+    fn test_reject_anchor_atomic_is_idempotent() {
+        let store = create_test_store();
+        let anchor = create_test_anchor_rfc3161();
+        let anchor_id = store
+            .store_anchor_returning_id(100, &anchor, "confirmed")
+            .expect("Failed to store anchor");
+
+        store
+            .reject_anchor_atomic(anchor_id, REJECTION_REASON_MESSAGE_IMPRINT_MISMATCH)
+            .expect("first rejection should succeed");
+        // Calling it again (e.g. the admin audit re-running) must not
+        // error and must leave the row rejected.
+        store
+            .reject_anchor_atomic(anchor_id, REJECTION_REASON_MESSAGE_IMPRINT_MISMATCH)
+            .expect("second rejection should also succeed");
+
+        let status: String = store
+            .connection()
+            .query_row(
+                "SELECT status FROM anchors WHERE id = ?1",
+                rusqlite::params![anchor_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "rejected");
+    }
+
+    #[test]
+    fn test_get_anchors_excludes_pending_ots() {
+        let store = create_test_store();
+        let ots_anchor = create_test_anchor_ots();
+
+        // An in-flight (not yet Bitcoin-confirmed) OTS anchor.
+        store
+            .store_anchor_returning_id(200, &ots_anchor, "pending")
+            .expect("Failed to store pending OTS anchor");
+
+        let anchors = store.get_anchors(200).expect("Failed to get anchors");
+        assert!(
+            anchors.is_empty(),
+            "an unconfirmed OTS anchor must never be served in a receipt"
+        );
+
+        // Once confirmed, it becomes visible.
+        store
+            .connection()
+            .execute(
+                "UPDATE anchors SET status = 'confirmed' WHERE tree_size = 200",
+                [],
+            )
+            .expect("Failed to confirm anchor");
+        let anchors = store.get_anchors(200).expect("Failed to get anchors");
+        assert_eq!(anchors.len(), 1);
     }
 }

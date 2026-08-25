@@ -58,19 +58,24 @@ pub async fn try_tsa_timestamp(
 
         // A previously stored token does not match its own recorded hash
         // (e.g. it predates messageImprint verification-on-receipt, or was
-        // corrupted). It must never be reused or served again: remove it
-        // outright and fall through to request a fresh, verified
+        // corrupted). It must never be reused or served again -- but the
+        // row itself is evidence that a bad root was once anchored under
+        // this id, so it is marked `rejected` rather than deleted, and the
+        // tree pointing at it is atomically released so it gets picked up
+        // for re-anchoring. Fall through to request a fresh, verified
         // replacement below.
         tracing::error!(
             tree_id = tree.id,
             anchor_id = existing.id,
             tsa_url = tsa_url,
-            "Stored TSA anchor failed messageImprint verification, discarding and requesting a replacement"
+            "Stored TSA anchor failed messageImprint verification, rejecting and requesting a replacement"
         );
         let idx = index.lock().await;
-        idx.delete_anchor(existing.id).map_err(|e| {
-            ServerError::Storage(crate::error::StorageError::Database(e.to_string()))
-        })?;
+        idx.reject_anchor_atomic(
+            existing.id,
+            crate::storage::index::REJECTION_REASON_MESSAGE_IMPRINT_MISMATCH,
+        )
+        .map_err(|e| ServerError::Storage(crate::error::StorageError::Database(e.to_string())))?;
     }
 
     let response = client
@@ -194,18 +199,21 @@ pub async fn create_tsa_anchor_for_tree_head(
 
         // Same reasoning as in `try_tsa_timestamp`: a stored token that does
         // not match its own recorded hash must never be reused or served
-        // again. Discard it and fall through to request a fresh one.
+        // again, but the row is kept (marked `rejected`) as evidence rather
+        // than deleted. Fall through to request a fresh one.
         tracing::error!(
             tree_size = tree_size,
             anchor_id = existing.id,
             root_hash = hex::encode(root_hash),
             tsa_url = tsa_url,
-            "Stored TSA anchor failed messageImprint verification, discarding and requesting a replacement"
+            "Stored TSA anchor failed messageImprint verification, rejecting and requesting a replacement"
         );
         let idx = index.lock().await;
-        idx.delete_anchor(existing.id).map_err(|e| {
-            ServerError::Storage(crate::error::StorageError::Database(e.to_string()))
-        })?;
+        idx.reject_anchor_atomic(
+            existing.id,
+            crate::storage::index::REJECTION_REASON_MESSAGE_IMPRINT_MISMATCH,
+        )
+        .map_err(|e| ServerError::Storage(crate::error::StorageError::Database(e.to_string())))?;
     }
 
     let response = client
