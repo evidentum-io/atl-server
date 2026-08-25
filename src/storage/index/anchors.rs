@@ -442,19 +442,72 @@ impl IndexStore {
     /// with `tsa_anchor_id IS NULL`, so a tree left pointing at a rejected
     /// anchor would never be re-queued for anchoring -- worse than either
     /// rejecting cleanly or not rejecting at all.
+    ///
+    /// This must succeed regardless of what `metadata` currently holds --
+    /// including a non-JSON string or JSON that isn't an object, both of
+    /// which are preserved (not discarded) under `legacy_metadata_raw`.
+    /// See the implementation for why.
     pub fn reject_anchor_atomic(&self, anchor_id: i64, reason: &str) -> rusqlite::Result<()> {
         let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
         let mut conn = self.connection_mut();
         let tx = conn.transaction()?;
 
+        // Merge into `metadata` in Rust rather than via SQLite's `json_set`.
+        // `json_set` requires its input to already be well-formed JSON; if
+        // `metadata` is NULL that's fine (`COALESCE(metadata, '{}')`
+        // handles it), but if it holds a non-JSON string or JSON that
+        // isn't an object, `json_set` raises "malformed JSON" and the
+        // whole transaction rolls back -- leaving the very row this method
+        // exists to reject sitting at `status = 'confirmed'`, still
+        // servable and reusable. Handling all three shapes here instead
+        // means this UPDATE can never fail on account of what a prior,
+        // possibly buggy, write left in `metadata`.
+        let existing_metadata: Option<String> = tx
+            .query_row(
+                "SELECT metadata FROM anchors WHERE id = ?1",
+                params![anchor_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let mut merged = match existing_metadata.as_deref() {
+            // No metadata at all: start fresh.
+            None => serde_json::Map::new(),
+            Some(raw) => match serde_json::from_str::<serde_json::Value>(raw) {
+                // The common case: a JSON object, merge into it directly.
+                Ok(serde_json::Value::Object(map)) => map,
+                // Either not valid JSON at all, or valid JSON that isn't an
+                // object (a bare number, array, string, bool, or null).
+                // Neither can be merged into structurally, but corrupted
+                // metadata is itself evidence -- the same reasoning that
+                // rules out deleting the row applies to its metadata -- so
+                // it is preserved verbatim rather than discarded.
+                Ok(_) | Err(_) => {
+                    let mut map = serde_json::Map::new();
+                    map.insert(
+                        "legacy_metadata_raw".to_string(),
+                        serde_json::Value::String(raw.to_string()),
+                    );
+                    map
+                }
+            },
+        };
+
+        merged.insert(
+            "rejection_reason".to_string(),
+            serde_json::Value::String(reason.to_string()),
+        );
+        merged.insert(
+            "rejected_at".to_string(),
+            serde_json::Value::Number(now.into()),
+        );
+
+        let metadata_json = serde_json::to_string(&serde_json::Value::Object(merged))
+            .expect("serializing a serde_json::Map to a JSON string cannot fail");
+
         tx.execute(
-            "UPDATE anchors
-             SET status = 'rejected',
-                 metadata = json_set(COALESCE(metadata, '{}'),
-                     '$.rejection_reason', ?1,
-                     '$.rejected_at', ?2)
-             WHERE id = ?3",
-            params![reason, now, anchor_id],
+            "UPDATE anchors SET status = 'rejected', metadata = ?1 WHERE id = ?2",
+            params![metadata_json, anchor_id],
         )?;
 
         tx.execute(
@@ -1831,6 +1884,9 @@ mod tests {
             REJECTION_REASON_MESSAGE_IMPRINT_MISMATCH
         );
         assert!(metadata["rejected_at"].is_number());
+        // Pre-existing metadata fields (a normal JSON object) must survive
+        // the merge, not be discarded.
+        assert_eq!(metadata["tsa_url"], "https://example.com");
 
         // The tree must be detached and back in the anchoring queue.
         let tree = store
@@ -1877,6 +1933,107 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "rejected");
+    }
+
+    // -------------------------------------------------------------------
+    // Regression: `reject_anchor_atomic` must go through to completion no
+    // matter what `metadata` currently holds. It used to build the merged
+    // metadata via SQLite's `json_set`, which raises "malformed JSON" (and
+    // rolls back the whole transaction, including the tree detach) if
+    // `metadata` is not itself well-formed JSON -- leaving exactly the row
+    // this method exists to reject sitting at `status = 'confirmed'`.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_reject_anchor_atomic_survives_non_json_metadata() {
+        let store = create_test_store();
+        let anchor = create_test_anchor_rfc3161();
+        let anchor_id = store
+            .store_anchor_returning_id(100, &anchor, "confirmed")
+            .expect("Failed to store anchor");
+
+        // Corrupt metadata to a string that is not valid JSON at all.
+        let garbage = "not json at all {{{";
+        store
+            .connection()
+            .execute(
+                "UPDATE anchors SET metadata = ?1 WHERE id = ?2",
+                rusqlite::params![garbage, anchor_id],
+            )
+            .expect("Failed to corrupt metadata");
+
+        store
+            .reject_anchor_atomic(anchor_id, REJECTION_REASON_MESSAGE_IMPRINT_MISMATCH)
+            .expect("rejection must succeed even with unparseable metadata");
+
+        let (status, metadata_json): (String, Option<String>) = store
+            .connection()
+            .query_row(
+                "SELECT status, metadata FROM anchors WHERE id = ?1",
+                rusqlite::params![anchor_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("row must still exist");
+        assert_eq!(status, "rejected");
+
+        let metadata: serde_json::Value =
+            serde_json::from_str(&metadata_json.expect("metadata must be set"))
+                .expect("resulting metadata must itself be valid JSON");
+        assert_eq!(
+            metadata["rejection_reason"],
+            REJECTION_REASON_MESSAGE_IMPRINT_MISMATCH
+        );
+        assert!(metadata["rejected_at"].is_number());
+        assert_eq!(
+            metadata["legacy_metadata_raw"], garbage,
+            "the original unparseable content must be preserved, not discarded"
+        );
+    }
+
+    #[test]
+    fn test_reject_anchor_atomic_survives_non_object_json_metadata() {
+        let store = create_test_store();
+        let anchor = create_test_anchor_rfc3161();
+        let anchor_id = store
+            .store_anchor_returning_id(100, &anchor, "confirmed")
+            .expect("Failed to store anchor");
+
+        // `metadata` is valid JSON, but a number, not an object.
+        let non_object = "42";
+        store
+            .connection()
+            .execute(
+                "UPDATE anchors SET metadata = ?1 WHERE id = ?2",
+                rusqlite::params![non_object, anchor_id],
+            )
+            .expect("Failed to corrupt metadata");
+
+        store
+            .reject_anchor_atomic(anchor_id, REJECTION_REASON_MESSAGE_IMPRINT_MISMATCH)
+            .expect("rejection must succeed even with non-object JSON metadata");
+
+        let (status, metadata_json): (String, Option<String>) = store
+            .connection()
+            .query_row(
+                "SELECT status, metadata FROM anchors WHERE id = ?1",
+                rusqlite::params![anchor_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("row must still exist");
+        assert_eq!(status, "rejected");
+
+        let metadata: serde_json::Value =
+            serde_json::from_str(&metadata_json.expect("metadata must be set"))
+                .expect("resulting metadata must itself be valid JSON");
+        assert_eq!(
+            metadata["rejection_reason"],
+            REJECTION_REASON_MESSAGE_IMPRINT_MISMATCH
+        );
+        assert!(metadata["rejected_at"].is_number());
+        assert_eq!(
+            metadata["legacy_metadata_raw"], non_object,
+            "the original non-object JSON content must be preserved, not discarded"
+        );
     }
 
     #[test]
