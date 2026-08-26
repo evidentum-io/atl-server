@@ -120,7 +120,7 @@ fn row_to_anchor_with_id(row: &rusqlite::Row) -> rusqlite::Result<AnchorWithId> 
 
 /// Merge `new_fields` into an anchor's existing `metadata`, tolerant of
 /// `existing_metadata` holding anything other than a well-formed JSON
-/// object.
+/// object -- including bytes that are not even valid UTF-8.
 ///
 /// This exists so that read-modify-write updates to the `metadata` column
 /// (currently [`IndexStore::reject_anchor_atomic`] and
@@ -132,35 +132,60 @@ fn row_to_anchor_with_id(row: &rusqlite::Row) -> rusqlite::Result<AnchorWithId> 
 /// confirming a good one) undone. `metadata` is user/network-influenced
 /// data (it round-trips TSA/calendar URLs and, historically, was written
 /// before some of today's invariants existed), so it must never be assumed
-/// well-formed.
+/// well-formed -- not even assumed to be text: the caller must read the
+/// column as raw bytes (`CAST(metadata AS BLOB)`), not as `String`, since
+/// `rusqlite` itself rejects invalid UTF-8 when a column is read as
+/// `String`, which would abort the transaction exactly the same way
+/// `json_set` did before this existed.
 ///
 /// Three cases:
 /// - `existing_metadata` is `None`: starts from an empty object.
-/// - It parses as JSON and the top-level value is an object: `new_fields`
-///   are merged directly into that object, preserving every pre-existing
+/// - It parses (via [`serde_json::from_slice`]) as JSON and the top-level
+///   value is an object: `new_fields` are merged into it, overwriting any
+///   key they share with it and otherwise preserving every pre-existing
 ///   key.
 /// - It fails to parse as JSON at all, or parses but isn't an object (a
 ///   bare number, array, string, bool, or null): neither can be merged
 ///   into structurally, but corrupted or unexpected metadata is itself
-///   evidence and must not be discarded, so the original raw text is
-///   preserved verbatim under `legacy_metadata_raw` on a fresh object.
+///   evidence and must not be discarded. If the bytes are valid UTF-8,
+///   they are preserved verbatim as a string under `legacy_metadata_raw`
+///   on a fresh object (note: JSON is required to be valid UTF-8, so a
+///   successful parse of a non-object value always falls in this case).
+///   If they are not even valid UTF-8, they are preserved losslessly as
+///   base64 under `legacy_metadata_raw_base64` instead -- a distinctly
+///   named key so a reader never has to guess which encoding a given
+///   `legacy_metadata_*` field is in.
 ///
 /// Returns the resulting object serialized back to a JSON string, ready
 /// for a plain parameterized `UPDATE ... SET metadata = ?`.
 fn merge_metadata_fields(
-    existing_metadata: Option<&str>,
+    existing_metadata: Option<&[u8]>,
     new_fields: impl IntoIterator<Item = (&'static str, serde_json::Value)>,
 ) -> String {
+    use base64::Engine;
+
     let mut merged = match existing_metadata {
         None => serde_json::Map::new(),
-        Some(raw) => match serde_json::from_str::<serde_json::Value>(raw) {
+        Some(raw_bytes) => match serde_json::from_slice::<serde_json::Value>(raw_bytes) {
             Ok(serde_json::Value::Object(map)) => map,
             Ok(_) | Err(_) => {
                 let mut map = serde_json::Map::new();
-                map.insert(
-                    "legacy_metadata_raw".to_string(),
-                    serde_json::Value::String(raw.to_string()),
-                );
+                match std::str::from_utf8(raw_bytes) {
+                    Ok(raw) => {
+                        map.insert(
+                            "legacy_metadata_raw".to_string(),
+                            serde_json::Value::String(raw.to_string()),
+                        );
+                    }
+                    Err(_) => {
+                        map.insert(
+                            "legacy_metadata_raw_base64".to_string(),
+                            serde_json::Value::String(
+                                base64::engine::general_purpose::STANDARD.encode(raw_bytes),
+                            ),
+                        );
+                    }
+                }
                 map
             }
         },
@@ -416,9 +441,13 @@ impl IndexStore {
         // metadata. Bitcoin confirmation is the one trust source here that
         // needs no trusted root of its own, so losing it silently is
         // costly.
-        let existing_metadata: Option<String> = tx
+        // Read as raw bytes, not `String`: `rusqlite` rejects invalid
+        // UTF-8 when a column is fetched as `String`, which would fail
+        // this query (and roll back the transaction) for exactly the kind
+        // of corrupted `metadata` this whole merge exists to tolerate.
+        let existing_metadata: Option<Vec<u8>> = tx
             .query_row(
-                "SELECT metadata FROM anchors WHERE id = ?1",
+                "SELECT CAST(metadata AS BLOB) FROM anchors WHERE id = ?1",
                 params![anchor_id],
                 |row| row.get(0),
             )
@@ -546,9 +575,13 @@ impl IndexStore {
         // anything other than a well-formed JSON object -- leaving the
         // very row this method exists to reject sitting at
         // `status = 'confirmed'`, still servable and reusable.
-        let existing_metadata: Option<String> = tx
+        // Read as raw bytes, not `String`: `rusqlite` rejects invalid
+        // UTF-8 when a column is fetched as `String`, which would fail
+        // this query (and roll back the transaction) for exactly the kind
+        // of corrupted `metadata` this whole merge exists to tolerate.
+        let existing_metadata: Option<Vec<u8>> = tx
             .query_row(
-                "SELECT metadata FROM anchors WHERE id = ?1",
+                "SELECT CAST(metadata AS BLOB) FROM anchors WHERE id = ?1",
                 params![anchor_id],
                 |row| row.get(0),
             )
@@ -1513,6 +1546,72 @@ mod tests {
     }
 
     #[test]
+    fn test_confirm_ots_anchor_atomic_survives_non_utf8_metadata() {
+        let mut store = create_test_store();
+
+        let anchor = create_test_anchor_ots();
+        let anchor_id = store
+            .store_anchor_returning_id(200, &anchor, "pending")
+            .expect("Failed to store anchor");
+
+        // Invalid UTF-8 bytes stored directly into the TEXT column. Before
+        // this fix, `rusqlite` would refuse to fetch this as a `String`
+        // and the whole confirmation transaction would roll back --
+        // silently and permanently blocking this anchor's Bitcoin
+        // confirmation.
+        store
+            .connection()
+            .execute(
+                "UPDATE anchors SET metadata = CAST(X'FF80' AS TEXT) WHERE id = ?1",
+                rusqlite::params![anchor_id],
+            )
+            .expect("Failed to corrupt metadata");
+
+        let upgraded_proof = vec![0x33, 0x44];
+        let block_height = 900_000;
+        let block_time = 1_700_000_000;
+
+        store
+            .confirm_ots_anchor_atomic(anchor_id, &upgraded_proof, block_height, block_time)
+            .expect("confirmation must succeed even with non-UTF-8 metadata");
+
+        let (status, token, metadata_json): (String, Vec<u8>, Option<String>) = store
+            .connection()
+            .query_row(
+                "SELECT status, token, metadata FROM anchors WHERE id = ?1",
+                rusqlite::params![anchor_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("row must still exist");
+        assert_eq!(status, "confirmed", "status must become confirmed");
+        assert_eq!(token, upgraded_proof, "token must be upgraded");
+
+        let metadata: serde_json::Value =
+            serde_json::from_str(&metadata_json.expect("metadata must be set"))
+                .expect("resulting metadata must itself be valid JSON (and therefore valid UTF-8)");
+        assert_eq!(
+            metadata["bitcoin_block_height"],
+            serde_json::json!(block_height)
+        );
+        assert_eq!(
+            metadata["bitcoin_block_time"],
+            serde_json::json!(block_time)
+        );
+        assert_eq!(metadata["status"], "confirmed");
+
+        use base64::Engine;
+        let expected_b64 = base64::engine::general_purpose::STANDARD.encode([0xFFu8, 0x80u8]);
+        assert_eq!(
+            metadata["legacy_metadata_raw_base64"], expected_b64,
+            "non-UTF-8 original content must be preserved losslessly as base64"
+        );
+        assert!(
+            metadata.get("legacy_metadata_raw").is_none(),
+            "non-UTF-8 content must not be mixed into the plain-text legacy field"
+        );
+    }
+
+    #[test]
     fn test_row_to_anchor_invalid_hash_length() {
         let store = create_test_store();
 
@@ -2222,6 +2321,63 @@ mod tests {
         assert_eq!(
             metadata["legacy_metadata_raw"], non_object,
             "the original non-object JSON content must be preserved, not discarded"
+        );
+    }
+
+    #[test]
+    fn test_reject_anchor_atomic_survives_non_utf8_metadata() {
+        let store = create_test_store();
+        let anchor = create_test_anchor_rfc3161();
+        let anchor_id = store
+            .store_anchor_returning_id(100, &anchor, "confirmed")
+            .expect("Failed to store anchor");
+
+        // Invalid UTF-8 bytes stored directly into the TEXT column --
+        // SQLite's TEXT affinity does not enforce valid UTF-8, so this can
+        // happen from outside Rust entirely (a manual DB edit, a buggy
+        // migration, etc). `rusqlite` itself would refuse to fetch this as
+        // a `String`, which is exactly the failure mode this test guards
+        // against.
+        store
+            .connection()
+            .execute(
+                "UPDATE anchors SET metadata = CAST(X'FF80' AS TEXT) WHERE id = ?1",
+                rusqlite::params![anchor_id],
+            )
+            .expect("Failed to corrupt metadata");
+
+        store
+            .reject_anchor_atomic(anchor_id, REJECTION_REASON_MESSAGE_IMPRINT_MISMATCH)
+            .expect("rejection must succeed even with non-UTF-8 metadata");
+
+        let (status, metadata_json): (String, Option<String>) = store
+            .connection()
+            .query_row(
+                "SELECT status, metadata FROM anchors WHERE id = ?1",
+                rusqlite::params![anchor_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("row must still exist");
+        assert_eq!(status, "rejected");
+
+        let metadata: serde_json::Value =
+            serde_json::from_str(&metadata_json.expect("metadata must be set"))
+                .expect("resulting metadata must itself be valid JSON (and therefore valid UTF-8)");
+        assert_eq!(
+            metadata["rejection_reason"],
+            REJECTION_REASON_MESSAGE_IMPRINT_MISMATCH
+        );
+        assert!(metadata["rejected_at"].is_number());
+
+        use base64::Engine;
+        let expected_b64 = base64::engine::general_purpose::STANDARD.encode([0xFFu8, 0x80u8]);
+        assert_eq!(
+            metadata["legacy_metadata_raw_base64"], expected_b64,
+            "non-UTF-8 original content must be preserved losslessly as base64"
+        );
+        assert!(
+            metadata.get("legacy_metadata_raw").is_none(),
+            "non-UTF-8 content must not be mixed into the plain-text legacy field"
         );
     }
 
