@@ -925,6 +925,109 @@ mod tests {
         assert_eq!(tree_record.status, TreeStatus::PendingBitcoin);
     }
 
+    /// End-to-end regression: before the row mappers were made
+    /// byte-resilient, an existing anchor whose `metadata` was not valid
+    /// UTF-8 would make `get_tsa_anchor_with_token_for_hash` itself fail
+    /// (rusqlite rejects invalid UTF-8 when a column is fetched as
+    /// `String`), aborting the whole `try_tsa_timestamp` call before the
+    /// bad token was ever re-verified or rejected. This proves the whole
+    /// path -- select, map, re-verify, reject, replace -- now goes
+    /// through even when `metadata` cannot be decoded as text at all.
+    #[tokio::test]
+    async fn test_try_tsa_timestamp_discards_bad_existing_anchor_with_non_utf8_metadata() {
+        use crate::storage::index::lifecycle::TreeStatus;
+
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+        let root_hash = freetsa_expected_hash();
+        let origin_id = [0u8; 32];
+
+        // Same "bad" anchor as the sibling test (token bound to a
+        // different hash), but with metadata that isn't even valid UTF-8.
+        let bad_token = freetsa_mismatched_token_der().await;
+        let bad_anchor = crate::traits::Anchor {
+            anchor_type: crate::traits::AnchorType::Rfc3161,
+            target: "data_tree_root".to_string(),
+            anchored_hash: root_hash,
+            tree_size: 100,
+            super_tree_size: None,
+            timestamp: 1_234_567_890,
+            token: bad_token.clone(),
+            metadata: serde_json::json!({"tsa_url": "https://stale-tsa.example.com"}),
+        };
+
+        let (bad_anchor_id, tree_id) = {
+            let idx = index.lock().await;
+            let aid = idx
+                .store_anchor_returning_id(100, &bad_anchor, "confirmed")
+                .expect("failed to store bad anchor");
+            idx.connection()
+                .execute(
+                    "UPDATE anchors SET metadata = CAST(X'FF80' AS TEXT) WHERE id = ?1",
+                    rusqlite::params![aid],
+                )
+                .expect("failed to corrupt metadata");
+            let tid = idx
+                .create_active_tree(&origin_id, 0)
+                .expect("failed to create tree");
+            idx.connection()
+                .execute(
+                    "UPDATE trees SET status = 'pending_bitcoin', end_size = ?1, root_hash = ?2 WHERE id = ?3",
+                    rusqlite::params![100i64, root_hash.as_slice(), tid],
+                )
+                .expect("failed to update tree");
+            (aid, tid)
+        };
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_body(freetsa_response_der())
+            .create_async()
+            .await;
+
+        let tree = create_test_tree_record(tree_id, Some(root_hash), 0, Some(100));
+        let result = try_tsa_timestamp(&tree, &server.url(), &index, 5000).await;
+
+        mock.assert_async().await;
+        assert!(
+            result.is_ok(),
+            "a bad existing anchor with non-UTF-8 metadata must still be replaced: {:?}",
+            result
+        );
+        let new_anchor_id = result.unwrap();
+        assert_ne!(
+            new_anchor_id, bad_anchor_id,
+            "the bad anchor must not be reused"
+        );
+
+        let idx = index.lock().await;
+
+        // The bad row must still exist (as an audit record), now
+        // rejected, with its non-UTF-8 metadata preserved losslessly.
+        let (status, metadata_json): (String, Option<String>) = idx
+            .connection()
+            .query_row(
+                "SELECT status, metadata FROM anchors WHERE id = ?1",
+                rusqlite::params![bad_anchor_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("bad row must still exist");
+        assert_eq!(status, "rejected");
+        let metadata: serde_json::Value =
+            serde_json::from_str(&metadata_json.expect("metadata must be set"))
+                .expect("resulting metadata must itself be valid JSON");
+        assert!(
+            metadata["legacy_metadata_raw_base64"].is_string(),
+            "the original non-UTF-8 metadata must be preserved losslessly"
+        );
+
+        // The tree must now be linked to the fresh, verified anchor.
+        let tree_record = idx.get_tree(tree.id).unwrap().unwrap();
+        assert_eq!(tree_record.tsa_anchor_id, Some(new_anchor_id));
+        assert_eq!(tree_record.status, TreeStatus::PendingBitcoin);
+    }
+
     #[tokio::test]
     async fn test_try_tsa_timestamp_accepts_correct_message_imprint() {
         let mut server = mockito::Server::new_async().await;

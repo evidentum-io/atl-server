@@ -38,6 +38,26 @@ pub struct AuditableAnchor {
     pub status: String,
 }
 
+/// Parse a `metadata` column's raw bytes into a `serde_json::Value`,
+/// degrading to the default value (`Value::Null`) on any failure to parse
+/// -- unparseable JSON, or bytes that aren't even valid UTF-8 (which
+/// `serde_json::from_slice` also rejects, since JSON requires UTF-8).
+///
+/// Row mappers must never error out over `metadata` content: a row that
+/// fails to load can't be verified or rejected
+/// ([`IndexStore::reject_anchor_atomic`]) and can't be picked up for
+/// confirmation ([`IndexStore::confirm_ots_anchor_atomic`]) -- exactly the
+/// two operations that exist to handle a corrupted or malicious row, so
+/// the read path that feeds them must be at least as tolerant as they are.
+/// The caller must pass the column's raw bytes (typically fetched via
+/// `SELECT CAST(metadata AS BLOB) ...`), not a `String`: `rusqlite`
+/// itself rejects invalid UTF-8 when a column is fetched as `String`,
+/// which would fail the whole query before this function ever runs.
+fn parse_metadata_lossy(raw: Option<&[u8]>) -> serde_json::Value {
+    raw.and_then(|bytes| serde_json::from_slice(bytes).ok())
+        .unwrap_or_default()
+}
+
 /// Convert database row to Anchor
 fn row_to_anchor(row: &rusqlite::Row) -> rusqlite::Result<Anchor> {
     let _id: i64 = row.get(0)?;
@@ -48,7 +68,7 @@ fn row_to_anchor(row: &rusqlite::Row) -> rusqlite::Result<Anchor> {
     let super_tree_size: Option<i64> = row.get(5)?;
     let timestamp: i64 = row.get(6)?;
     let token: Vec<u8> = row.get(7)?;
-    let metadata: Option<String> = row.get(8)?;
+    let metadata: Option<Vec<u8>> = row.get(8)?;
 
     let anchor_type = match anchor_type.as_str() {
         "rfc3161" => AnchorType::Rfc3161,
@@ -70,9 +90,7 @@ fn row_to_anchor(row: &rusqlite::Row) -> rusqlite::Result<Anchor> {
         super_tree_size: super_tree_size.map(|s| s as u64),
         timestamp: timestamp as u64,
         token,
-        metadata: metadata
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default(),
+        metadata: parse_metadata_lossy(metadata.as_deref()),
     })
 }
 
@@ -86,7 +104,7 @@ fn row_to_anchor_with_id(row: &rusqlite::Row) -> rusqlite::Result<AnchorWithId> 
     let super_tree_size: Option<i64> = row.get(5)?;
     let timestamp: i64 = row.get(6)?;
     let token: Vec<u8> = row.get(7)?;
-    let metadata: Option<String> = row.get(8)?;
+    let metadata: Option<Vec<u8>> = row.get(8)?;
     let _status: String = row.get(9)?;
 
     let anchor_type = match anchor_type.as_str() {
@@ -111,9 +129,7 @@ fn row_to_anchor_with_id(row: &rusqlite::Row) -> rusqlite::Result<AnchorWithId> 
             super_tree_size: super_tree_size.map(|s| s as u64),
             timestamp: timestamp as u64,
             token,
-            metadata: metadata
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_default(),
+            metadata: parse_metadata_lossy(metadata.as_deref()),
         },
     })
 }
@@ -263,7 +279,7 @@ impl IndexStore {
     pub fn get_anchors(&self, tree_size: u64) -> rusqlite::Result<Vec<Anchor>> {
         let conn = self.connection();
         let mut stmt = conn.prepare(
-            "SELECT id, tree_size, anchor_type, target, anchored_hash, super_tree_size, timestamp, token, metadata
+            "SELECT id, tree_size, anchor_type, target, anchored_hash, super_tree_size, timestamp, token, CAST(metadata AS BLOB)
              FROM anchors WHERE status = 'confirmed' AND (tree_size = ?1 OR target = 'super_root')",
         )?;
 
@@ -286,7 +302,7 @@ impl IndexStore {
     pub fn get_pending_ots_anchors(&self) -> rusqlite::Result<Vec<AnchorWithId>> {
         let conn = self.connection();
         let mut stmt = conn.prepare(
-            "SELECT id, tree_size, anchor_type, target, anchored_hash, super_tree_size, timestamp, token, metadata, status
+            "SELECT id, tree_size, anchor_type, target, anchored_hash, super_tree_size, timestamp, token, CAST(metadata AS BLOB), status
              FROM anchors WHERE anchor_type = 'bitcoin_ots' AND status = 'pending'",
         )?;
 
@@ -335,7 +351,7 @@ impl IndexStore {
         self.connection()
             .query_row(
                 "SELECT id, tree_size, anchor_type, target, anchored_hash,
-                        super_tree_size, timestamp, token, metadata
+                        super_tree_size, timestamp, token, CAST(metadata AS BLOB)
                  FROM anchors
                  WHERE status = 'confirmed'
                    AND anchor_type = 'rfc3161'
@@ -360,7 +376,7 @@ impl IndexStore {
         self.connection()
             .query_row(
                 "SELECT id, tree_size, anchor_type, target, anchored_hash,
-                        super_tree_size, timestamp, token, metadata
+                        super_tree_size, timestamp, token, CAST(metadata AS BLOB)
                  FROM anchors
                  WHERE status = 'confirmed'
                    AND anchor_type = 'bitcoin_ots'
@@ -528,7 +544,7 @@ impl IndexStore {
     ) -> rusqlite::Result<Option<AnchorWithId>> {
         self.connection()
             .query_row(
-                "SELECT id, tree_size, anchor_type, target, anchored_hash, super_tree_size, timestamp, token, metadata, status
+                "SELECT id, tree_size, anchor_type, target, anchored_hash, super_tree_size, timestamp, token, CAST(metadata AS BLOB), status
                  FROM anchors
                  WHERE anchored_hash = ?1 AND anchor_type = 'rfc3161'
                    AND target = 'data_tree_root' AND status = 'confirmed'
@@ -1358,6 +1374,67 @@ mod tests {
         assert_eq!(anchors.len(), 1);
         // Default metadata should be empty object or null
         assert!(anchors[0].metadata.is_null() || anchors[0].metadata == serde_json::json!({}));
+    }
+
+    // -------------------------------------------------------------------
+    // Regression: `row_to_anchor` / `row_to_anchor_with_id` must load a
+    // row whose `metadata` is not even valid UTF-8, degrading to default
+    // metadata the same way they already do for merely-invalid JSON,
+    // rather than making the whole query fail. A row that can't be loaded
+    // can't be re-verified or rejected, and can't be picked up for
+    // confirmation.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_row_to_anchor_non_utf8_metadata_defaults_to_empty() {
+        let store = create_test_store();
+        let anchor = create_test_anchor_rfc3161();
+
+        store
+            .store_anchor_returning_id(100, &anchor, "confirmed")
+            .expect("Failed to store anchor");
+
+        store
+            .connection()
+            .execute(
+                "UPDATE anchors SET metadata = CAST(X'FF80' AS TEXT) WHERE tree_size = 100",
+                [],
+            )
+            .expect("Failed to corrupt metadata");
+
+        let anchors = store
+            .get_anchors(100)
+            .expect("get_anchors must not fail on non-UTF-8 metadata");
+        assert_eq!(anchors.len(), 1);
+        assert!(anchors[0].metadata.is_null() || anchors[0].metadata == serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_row_to_anchor_with_id_non_utf8_metadata_defaults_to_empty() {
+        let store = create_test_store();
+        let anchor = create_test_anchor_ots();
+
+        let anchor_id = store
+            .store_anchor_returning_id(200, &anchor, "pending")
+            .expect("Failed to store anchor");
+
+        store
+            .connection()
+            .execute(
+                "UPDATE anchors SET metadata = CAST(X'FF80' AS TEXT) WHERE id = ?1",
+                rusqlite::params![anchor_id],
+            )
+            .expect("Failed to corrupt metadata");
+
+        let pending = store
+            .get_pending_ots_anchors()
+            .expect("get_pending_ots_anchors must not fail on non-UTF-8 metadata");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, anchor_id);
+        assert!(
+            pending[0].anchor.metadata.is_null()
+                || pending[0].anchor.metadata == serde_json::json!({})
+        );
     }
 
     #[test]
