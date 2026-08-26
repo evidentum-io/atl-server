@@ -261,7 +261,7 @@ pub async fn generate_receipt(
     let data_tree_index = resolve_data_tree_index(entry_id, storage).await?;
 
     // 7. Get covering anchors
-    let (filtered_anchors, ots_super_tree_size) = if options.include_anchors {
+    let (filtered_anchors, ots_super_tree_size, has_confirmed_ots) = if options.include_anchors {
         let mut result = Vec::new();
 
         // TSA anchor: covers if tree_size >= leaf_index + 1
@@ -269,22 +269,31 @@ pub async fn generate_receipt(
             result.push(tsa);
         }
 
-        // OTS anchor: only if data_tree_index is available
-        let ots_size = if let Some(idx) = data_tree_index {
+        // OTS anchor: only if data_tree_index is available.
+        // `get_ots_anchor_covering` already filters `status = 'confirmed'`
+        // at the SQL column level, so finding an anchor at all *is*
+        // "there is a confirmed OTS anchor" -- this must not be
+        // re-derived from `anchor.metadata.get("status")`, a redundant,
+        // historically-written copy of the same fact that carries no
+        // guarantee of being present or in sync with the source-of-truth
+        // `status` column (e.g. for anchors confirmed before that
+        // metadata field existed, or by any future insert path that
+        // forgets to set it).
+        let (ots_size, has_confirmed_ots) = if let Some(idx) = data_tree_index {
             if let Some(ots) = storage.get_ots_anchor_covering(idx)? {
                 let size = ots.super_tree_size;
                 result.push(ots);
-                size
+                (size, true)
             } else {
-                None
+                (None, false)
             }
         } else {
-            None
+            (None, false)
         };
 
-        (result, ots_size)
+        (result, ots_size, has_confirmed_ots)
     } else {
-        (Vec::new(), None)
+        (Vec::new(), None, false)
     };
 
     // 8. Generate super_proof at OTS anchor's super_tree_size (or current if no OTS anchor)
@@ -292,10 +301,6 @@ pub async fn generate_receipt(
 
     // 9. Generate upgrade_url logic
     let has_super_proof = super_proof.is_some();
-    let has_confirmed_ots = filtered_anchors.iter().any(|a| {
-        matches!(a.anchor_type, crate::traits::anchor::AnchorType::BitcoinOts)
-            && a.metadata.get("status").and_then(|v| v.as_str()) == Some("confirmed")
-    });
 
     // upgrade_url: show when no super_proof OR no confirmed OTS
     let upgrade_url = if !has_super_proof || !has_confirmed_ots {
@@ -1150,6 +1155,71 @@ mod tests {
         assert_eq!(
             sp.super_tree_size, ots_super_tree_size,
             "super_proof super_tree_size must match OTS anchor super_tree_size"
+        );
+    }
+
+    /// Regression: `upgrade_url` must reflect the anchor's actual
+    /// `status` column (via `get_ots_anchor_covering`, which only ever
+    /// returns `confirmed` rows), not the anchor's `metadata.status`
+    /// field. This anchor is confirmed at the column level but its
+    /// `metadata` deliberately omits `status` entirely (as a real
+    /// pre-existing row might, e.g. one confirmed before that metadata
+    /// field was introduced) -- if the check still depended on
+    /// `metadata.status`, this would incorrectly show an `upgrade_url` for
+    /// an already-confirmed anchor.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_generate_receipt_upgrade_url_ignores_metadata_status() {
+        use crate::traits::anchor::{Anchor, AnchorType};
+
+        let (engine, _dir) = make_engine([14u8; 32]).await;
+
+        let entry_id = append_one(&engine, 0xEE).await;
+        let origin = engine.origin_id();
+        let tree_head = engine.tree_head();
+        let rotation = engine
+            .rotate_tree(&origin, tree_head.tree_size, &tree_head.root_hash)
+            .await
+            .unwrap();
+
+        let ots_super_tree_size = rotation.data_tree_index + 1;
+
+        // Confirmed at the column level (status = 'confirmed'), but
+        // `metadata` has no `status` key at all.
+        {
+            let index_store = engine.index_store();
+            let index = index_store.lock().await;
+            let anchor = Anchor {
+                anchor_type: AnchorType::BitcoinOts,
+                target: "super_root".to_string(),
+                anchored_hash: [0xBBu8; 32],
+                tree_size: 0,
+                super_tree_size: Some(ots_super_tree_size),
+                timestamp: 1_000_000,
+                token: vec![],
+                metadata: serde_json::json!({"calendar_url": "https://ots.example.com"}),
+            };
+            index
+                .store_anchor_returning_id(0, &anchor, "confirmed")
+                .unwrap();
+        }
+
+        let signer = CheckpointSigner::from_bytes(&[14u8; 32]);
+        let mut options = opts_with_anchors();
+        options.upgrade_url_template = Some("https://example.com/upgrade/{entry_id}".to_string());
+        let receipt = generate_receipt(&entry_id, &engine, &signer, options).await;
+
+        assert!(
+            receipt.is_ok(),
+            "generate_receipt must succeed: {:?}",
+            receipt.err()
+        );
+        let receipt = receipt.unwrap();
+
+        assert!(receipt.super_proof.is_some(), "super_proof must be present");
+        assert!(
+            receipt.upgrade_url.is_none(),
+            "a column-confirmed OTS anchor must suppress upgrade_url even when \
+             metadata.status is absent/out of sync"
         );
     }
 }

@@ -7,17 +7,55 @@
 //! - Querying anchors (get_anchors, get_pending_ots_anchors,
 //!   get_tsa_anchor_covering, get_ots_anchor_covering)
 //! - Updating anchors (update_anchor_status, update_anchor_token, update_anchor_metadata)
-//! - Atomic operations (confirm_ots_anchor_atomic)
+//! - Atomic operations (confirm_ots_anchor_atomic, reject_anchor_atomic)
 
 use super::queries::IndexStore;
 use crate::traits::{Anchor, AnchorType};
 use rusqlite::{params, OptionalExtension};
+
+/// Structured `metadata.rejection_reason` code recorded when a stored RFC
+/// 3161 token is found to fail `messageImprint` verification (bound to a
+/// hash other than its own `anchored_hash`).
+pub const REJECTION_REASON_MESSAGE_IMPRINT_MISMATCH: &str = "message_imprint_mismatch";
 
 /// Anchor with ID (for OTS poll job)
 #[derive(Debug, Clone)]
 pub struct AnchorWithId {
     pub id: i64,
     pub anchor: Anchor,
+}
+
+/// A raw `rfc3161` anchor row for the admin audit tool.
+///
+/// See [`IndexStore::list_rfc3161_anchors_for_audit`].
+#[derive(Debug, Clone)]
+pub struct AuditableAnchor {
+    pub id: i64,
+    pub tree_size: Option<u64>,
+    pub anchored_hash: [u8; 32],
+    pub token: Vec<u8>,
+    pub timestamp: u64,
+    pub status: String,
+}
+
+/// Parse a `metadata` column's raw bytes into a `serde_json::Value`,
+/// degrading to the default value (`Value::Null`) on any failure to parse
+/// -- unparseable JSON, or bytes that aren't even valid UTF-8 (which
+/// `serde_json::from_slice` also rejects, since JSON requires UTF-8).
+///
+/// Row mappers must never error out over `metadata` content: a row that
+/// fails to load can't be verified or rejected
+/// ([`IndexStore::reject_anchor_atomic`]) and can't be picked up for
+/// confirmation ([`IndexStore::confirm_ots_anchor_atomic`]) -- exactly the
+/// two operations that exist to handle a corrupted or malicious row, so
+/// the read path that feeds them must be at least as tolerant as they are.
+/// The caller must pass the column's raw bytes (typically fetched via
+/// `SELECT CAST(metadata AS BLOB) ...`), not a `String`: `rusqlite`
+/// itself rejects invalid UTF-8 when a column is fetched as `String`,
+/// which would fail the whole query before this function ever runs.
+fn parse_metadata_lossy(raw: Option<&[u8]>) -> serde_json::Value {
+    raw.and_then(|bytes| serde_json::from_slice(bytes).ok())
+        .unwrap_or_default()
 }
 
 /// Convert database row to Anchor
@@ -30,7 +68,7 @@ fn row_to_anchor(row: &rusqlite::Row) -> rusqlite::Result<Anchor> {
     let super_tree_size: Option<i64> = row.get(5)?;
     let timestamp: i64 = row.get(6)?;
     let token: Vec<u8> = row.get(7)?;
-    let metadata: Option<String> = row.get(8)?;
+    let metadata: Option<Vec<u8>> = row.get(8)?;
 
     let anchor_type = match anchor_type.as_str() {
         "rfc3161" => AnchorType::Rfc3161,
@@ -52,9 +90,7 @@ fn row_to_anchor(row: &rusqlite::Row) -> rusqlite::Result<Anchor> {
         super_tree_size: super_tree_size.map(|s| s as u64),
         timestamp: timestamp as u64,
         token,
-        metadata: metadata
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default(),
+        metadata: parse_metadata_lossy(metadata.as_deref()),
     })
 }
 
@@ -68,7 +104,7 @@ fn row_to_anchor_with_id(row: &rusqlite::Row) -> rusqlite::Result<AnchorWithId> 
     let super_tree_size: Option<i64> = row.get(5)?;
     let timestamp: i64 = row.get(6)?;
     let token: Vec<u8> = row.get(7)?;
-    let metadata: Option<String> = row.get(8)?;
+    let metadata: Option<Vec<u8>> = row.get(8)?;
     let _status: String = row.get(9)?;
 
     let anchor_type = match anchor_type.as_str() {
@@ -93,11 +129,90 @@ fn row_to_anchor_with_id(row: &rusqlite::Row) -> rusqlite::Result<AnchorWithId> 
             super_tree_size: super_tree_size.map(|s| s as u64),
             timestamp: timestamp as u64,
             token,
-            metadata: metadata
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_default(),
+            metadata: parse_metadata_lossy(metadata.as_deref()),
         },
     })
+}
+
+/// Merge `new_fields` into an anchor's existing `metadata`, tolerant of
+/// `existing_metadata` holding anything other than a well-formed JSON
+/// object -- including bytes that are not even valid UTF-8.
+///
+/// This exists so that read-modify-write updates to the `metadata` column
+/// (currently [`IndexStore::reject_anchor_atomic`] and
+/// [`IndexStore::confirm_ots_anchor_atomic`]) never depend on SQL-side JSON
+/// functions (`json_set` and friends), which require their input to
+/// already be well-formed JSON and abort the whole enclosing transaction
+/// with "malformed JSON" otherwise -- silently leaving whatever the
+/// transaction was supposed to accomplish (rejecting a bad anchor,
+/// confirming a good one) undone. `metadata` is user/network-influenced
+/// data (it round-trips TSA/calendar URLs and, historically, was written
+/// before some of today's invariants existed), so it must never be assumed
+/// well-formed -- not even assumed to be text: the caller must read the
+/// column as raw bytes (`CAST(metadata AS BLOB)`), not as `String`, since
+/// `rusqlite` itself rejects invalid UTF-8 when a column is read as
+/// `String`, which would abort the transaction exactly the same way
+/// `json_set` did before this existed.
+///
+/// Three cases:
+/// - `existing_metadata` is `None`: starts from an empty object.
+/// - It parses (via [`serde_json::from_slice`]) as JSON and the top-level
+///   value is an object: `new_fields` are merged into it, overwriting any
+///   key they share with it and otherwise preserving every pre-existing
+///   key.
+/// - It fails to parse as JSON at all, or parses but isn't an object (a
+///   bare number, array, string, bool, or null): neither can be merged
+///   into structurally, but corrupted or unexpected metadata is itself
+///   evidence and must not be discarded. If the bytes are valid UTF-8,
+///   they are preserved verbatim as a string under `legacy_metadata_raw`
+///   on a fresh object (note: JSON is required to be valid UTF-8, so a
+///   successful parse of a non-object value always falls in this case).
+///   If they are not even valid UTF-8, they are preserved losslessly as
+///   base64 under `legacy_metadata_raw_base64` instead -- a distinctly
+///   named key so a reader never has to guess which encoding a given
+///   `legacy_metadata_*` field is in.
+///
+/// Returns the resulting object serialized back to a JSON string, ready
+/// for a plain parameterized `UPDATE ... SET metadata = ?`.
+fn merge_metadata_fields(
+    existing_metadata: Option<&[u8]>,
+    new_fields: impl IntoIterator<Item = (&'static str, serde_json::Value)>,
+) -> String {
+    use base64::Engine;
+
+    let mut merged = match existing_metadata {
+        None => serde_json::Map::new(),
+        Some(raw_bytes) => match serde_json::from_slice::<serde_json::Value>(raw_bytes) {
+            Ok(serde_json::Value::Object(map)) => map,
+            Ok(_) | Err(_) => {
+                let mut map = serde_json::Map::new();
+                match std::str::from_utf8(raw_bytes) {
+                    Ok(raw) => {
+                        map.insert(
+                            "legacy_metadata_raw".to_string(),
+                            serde_json::Value::String(raw.to_string()),
+                        );
+                    }
+                    Err(_) => {
+                        map.insert(
+                            "legacy_metadata_raw_base64".to_string(),
+                            serde_json::Value::String(
+                                base64::engine::general_purpose::STANDARD.encode(raw_bytes),
+                            ),
+                        );
+                    }
+                }
+                map
+            }
+        },
+    };
+
+    for (key, value) in new_fields {
+        merged.insert(key.to_string(), value);
+    }
+
+    serde_json::to_string(&serde_json::Value::Object(merged))
+        .expect("serializing a serde_json::Map to a JSON string cannot fail")
 }
 
 impl IndexStore {
@@ -155,11 +270,17 @@ impl IndexStore {
     }
 
     /// Get all anchors for a tree size
+    ///
+    /// Only `confirmed` anchors are eligible: a valid TSA token has no
+    /// intermediate state (both insertion paths write `confirmed`
+    /// immediately), `pending` is exclusively an in-flight OTS state, and
+    /// `rejected` marks a token that failed `messageImprint` verification.
+    /// None of those should ever be served in a receipt.
     pub fn get_anchors(&self, tree_size: u64) -> rusqlite::Result<Vec<Anchor>> {
         let conn = self.connection();
         let mut stmt = conn.prepare(
-            "SELECT id, tree_size, anchor_type, target, anchored_hash, super_tree_size, timestamp, token, metadata
-             FROM anchors WHERE tree_size = ?1 OR (target = 'super_root' AND status = 'confirmed')",
+            "SELECT id, tree_size, anchor_type, target, anchored_hash, super_tree_size, timestamp, token, CAST(metadata AS BLOB)
+             FROM anchors WHERE status = 'confirmed' AND (tree_size = ?1 OR target = 'super_root')",
         )?;
 
         let rows = stmt.query_map(params![tree_size as i64], row_to_anchor)?;
@@ -168,11 +289,11 @@ impl IndexStore {
 
     /// Get the most recent anchored tree size
     pub fn get_latest_anchored_size(&self) -> rusqlite::Result<Option<u64>> {
-        let result =
-            self.connection()
-                .query_row("SELECT MAX(tree_size) FROM anchors", [], |row| {
-                    row.get::<_, Option<i64>>(0)
-                })?;
+        let result = self.connection().query_row(
+            "SELECT MAX(tree_size) FROM anchors WHERE status = 'confirmed'",
+            [],
+            |row| row.get::<_, Option<i64>>(0),
+        )?;
 
         Ok(result.map(|s| s as u64))
     }
@@ -181,7 +302,7 @@ impl IndexStore {
     pub fn get_pending_ots_anchors(&self) -> rusqlite::Result<Vec<AnchorWithId>> {
         let conn = self.connection();
         let mut stmt = conn.prepare(
-            "SELECT id, tree_size, anchor_type, target, anchored_hash, super_tree_size, timestamp, token, metadata, status
+            "SELECT id, tree_size, anchor_type, target, anchored_hash, super_tree_size, timestamp, token, CAST(metadata AS BLOB), status
              FROM anchors WHERE anchor_type = 'bitcoin_ots' AND status = 'pending'",
         )?;
 
@@ -230,7 +351,7 @@ impl IndexStore {
         self.connection()
             .query_row(
                 "SELECT id, tree_size, anchor_type, target, anchored_hash,
-                        super_tree_size, timestamp, token, metadata
+                        super_tree_size, timestamp, token, CAST(metadata AS BLOB)
                  FROM anchors
                  WHERE status = 'confirmed'
                    AND anchor_type = 'rfc3161'
@@ -255,7 +376,7 @@ impl IndexStore {
         self.connection()
             .query_row(
                 "SELECT id, tree_size, anchor_type, target, anchored_hash,
-                        super_tree_size, timestamp, token, metadata
+                        super_tree_size, timestamp, token, CAST(metadata AS BLOB)
                  FROM anchors
                  WHERE status = 'confirmed'
                    AND anchor_type = 'bitcoin_ots'
@@ -322,14 +443,50 @@ impl IndexStore {
             params![anchor_id],
         )?;
 
-        // Update anchor metadata with Bitcoin block info
+        // Update anchor metadata with Bitcoin block info. Merged in Rust
+        // (see `merge_metadata_fields`) rather than via SQLite's
+        // `json_set`, which required `metadata` to already be a
+        // well-formed JSON object and aborted this whole transaction with
+        // "malformed JSON" otherwise. Unlike the `reject_anchor_atomic`
+        // case (where a failure here leaves a bad anchor still in
+        // circulation), a failure here is the opposite and arguably worse:
+        // it silently, permanently prevents a *good* Bitcoin anchor from
+        // ever confirming -- the token stays un-upgraded, status stays
+        // non-`confirmed`, and the tree never advances to `closed` -- for
+        // exactly this one row, until someone manually repairs its
+        // metadata. Bitcoin confirmation is the one trust source here that
+        // needs no trusted root of its own, so losing it silently is
+        // costly.
+        // Read as raw bytes, not `String`: `rusqlite` rejects invalid
+        // UTF-8 when a column is fetched as `String`, which would fail
+        // this query (and roll back the transaction) for exactly the kind
+        // of corrupted `metadata` this whole merge exists to tolerate.
+        let existing_metadata: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT CAST(metadata AS BLOB) FROM anchors WHERE id = ?1",
+                params![anchor_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let metadata_json = merge_metadata_fields(
+            existing_metadata.as_deref(),
+            [
+                (
+                    "bitcoin_block_height",
+                    serde_json::Value::Number((block_height as i64).into()),
+                ),
+                (
+                    "bitcoin_block_time",
+                    serde_json::Value::Number((block_time as i64).into()),
+                ),
+                ("status", serde_json::Value::String("confirmed".to_string())),
+            ],
+        );
+
         tx.execute(
-            "UPDATE anchors SET metadata = json_set(metadata,
-                '$.bitcoin_block_height', ?1,
-                '$.bitcoin_block_time', ?2,
-                '$.status', 'confirmed')
-             WHERE id = ?3",
-            params![block_height as i64, block_time as i64, anchor_id],
+            "UPDATE anchors SET metadata = ?1 WHERE id = ?2",
+            params![metadata_json, anchor_id],
         )?;
 
         // Update tree status
@@ -343,29 +500,193 @@ impl IndexStore {
         Ok(())
     }
 
-    /// Get existing TSA anchor ID for a root hash (if any)
+    /// Get existing, confirmed TSA anchor ID for a root hash (if any)
+    ///
+    /// Excludes `rejected` rows (a token that failed `messageImprint`
+    /// verification must never be found again for reuse) and anything
+    /// that isn't a `data_tree_root` anchor.
+    ///
+    /// Production code should prefer
+    /// [`get_tsa_anchor_with_token_for_hash`](Self::get_tsa_anchor_with_token_for_hash),
+    /// which also loads the token so it can be verified before reuse; this
+    /// lighter lookup is kept for tests and for callers that only need the
+    /// id.
+    #[allow(dead_code)]
     pub fn get_tsa_anchor_for_hash(&self, root_hash: &[u8; 32]) -> rusqlite::Result<Option<i64>> {
         self.connection()
             .query_row(
-                "SELECT id FROM anchors WHERE anchored_hash = ?1 AND anchor_type = 'rfc3161' LIMIT 1",
+                "SELECT id FROM anchors
+                 WHERE anchored_hash = ?1 AND anchor_type = 'rfc3161'
+                   AND target = 'data_tree_root' AND status = 'confirmed'
+                 LIMIT 1",
                 [root_hash.as_slice()],
                 |row| row.get(0),
             )
             .optional()
     }
 
+    /// Get the existing, confirmed TSA anchor for a root hash, including
+    /// its stored token, so the caller can verify it before trusting or
+    /// reusing it.
+    ///
+    /// Excludes `rejected` rows for the same reason as
+    /// [`get_tsa_anchor_for_hash`](Self::get_tsa_anchor_for_hash): once a
+    /// token has been marked rejected it must never be surfaced again as
+    /// something to reuse, only as an audit trail entry.
+    ///
+    /// Unlike `get_tsa_anchor_for_hash`, which only returns the row id,
+    /// this loads the full anchor so a caller can re-run
+    /// `TsaClient::verify()` on a token that was stored before
+    /// verification-on-receipt existed.
+    pub fn get_tsa_anchor_with_token_for_hash(
+        &self,
+        root_hash: &[u8; 32],
+    ) -> rusqlite::Result<Option<AnchorWithId>> {
+        self.connection()
+            .query_row(
+                "SELECT id, tree_size, anchor_type, target, anchored_hash, super_tree_size, timestamp, token, CAST(metadata AS BLOB), status
+                 FROM anchors
+                 WHERE anchored_hash = ?1 AND anchor_type = 'rfc3161'
+                   AND target = 'data_tree_root' AND status = 'confirmed'
+                 LIMIT 1",
+                [root_hash.as_slice()],
+                row_to_anchor_with_id,
+            )
+            .optional()
+    }
+
+    /// Mark an RFC 3161 anchor as rejected and atomically release any tree
+    /// pointing to it via `tsa_anchor_id`.
+    ///
+    /// Used when a stored token is found to fail `messageImprint`
+    /// verification. The row is never deleted: for a product whose premise
+    /// is an immutable audit trail, permanently erasing the record that a
+    /// bad root was once anchored under this id is a worse precedent than
+    /// keeping it -- incident review needs it. Instead the row is flagged
+    /// `status = 'rejected'` (a lifecycle state, distinct from the
+    /// *reason*, which is recorded structurally as
+    /// `metadata.rejection_reason` plus `metadata.rejected_at`), which
+    /// every read path (`get_anchors`, `get_tsa_anchor_with_token_for_hash`,
+    /// `get_tsa_anchor_for_hash`, `get_latest_anchored_size`,
+    /// `get_latest_tsa_anchored_size`) now excludes.
+    ///
+    /// Releasing the tree in the SAME transaction is required, not
+    /// optional: [`IndexStore::get_trees_pending_tsa`] only picks up trees
+    /// with `tsa_anchor_id IS NULL`, so a tree left pointing at a rejected
+    /// anchor would never be re-queued for anchoring -- worse than either
+    /// rejecting cleanly or not rejecting at all.
+    ///
+    /// This must succeed regardless of what `metadata` currently holds --
+    /// including a non-JSON string or JSON that isn't an object, both of
+    /// which are preserved (not discarded) under `legacy_metadata_raw`.
+    /// See the implementation for why.
+    pub fn reject_anchor_atomic(&self, anchor_id: i64, reason: &str) -> rusqlite::Result<()> {
+        let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        let mut conn = self.connection_mut();
+        let tx = conn.transaction()?;
+
+        // Merge into `metadata` in Rust (see `merge_metadata_fields`)
+        // rather than via SQLite's `json_set`, which would abort this
+        // whole transaction with "malformed JSON" if `metadata` holds
+        // anything other than a well-formed JSON object -- leaving the
+        // very row this method exists to reject sitting at
+        // `status = 'confirmed'`, still servable and reusable.
+        // Read as raw bytes, not `String`: `rusqlite` rejects invalid
+        // UTF-8 when a column is fetched as `String`, which would fail
+        // this query (and roll back the transaction) for exactly the kind
+        // of corrupted `metadata` this whole merge exists to tolerate.
+        let existing_metadata: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT CAST(metadata AS BLOB) FROM anchors WHERE id = ?1",
+                params![anchor_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let metadata_json = merge_metadata_fields(
+            existing_metadata.as_deref(),
+            [
+                (
+                    "rejection_reason",
+                    serde_json::Value::String(reason.to_string()),
+                ),
+                ("rejected_at", serde_json::Value::Number(now.into())),
+            ],
+        );
+
+        tx.execute(
+            "UPDATE anchors SET status = 'rejected', metadata = ?1 WHERE id = ?2",
+            params![metadata_json, anchor_id],
+        )?;
+
+        tx.execute(
+            "UPDATE trees SET tsa_anchor_id = NULL WHERE tsa_anchor_id = ?1",
+            params![anchor_id],
+        )?;
+
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Get the latest anchored tree_size for TSA anchors (rfc3161)
     ///
-    /// Returns the maximum tree_size that has been anchored via TSA.
+    /// Returns the maximum tree_size that has been anchored via TSA, among
+    /// `confirmed` anchors only (a `rejected` row's tree_size must not
+    /// influence this).
     /// Used for periodic active tree anchoring.
     pub fn get_latest_tsa_anchored_size(&self) -> rusqlite::Result<Option<u64>> {
         let result = self.connection().query_row(
-            "SELECT MAX(tree_size) FROM anchors WHERE anchor_type = 'rfc3161'",
+            "SELECT MAX(tree_size) FROM anchors WHERE anchor_type = 'rfc3161' AND status = 'confirmed'",
             [],
             |row| row.get::<_, Option<i64>>(0),
         )?;
 
         Ok(result.map(|s| s as u64))
+    }
+
+    /// List every `rfc3161` anchor row, regardless of status.
+    ///
+    /// This is for the one-off admin audit tool
+    /// ([`crate::background::tsa_job::audit`]) only: unlike every other
+    /// read path in this module, it deliberately does **not** filter by
+    /// status, and exposes `status` on each row -- the audit needs to see
+    /// `rejected` rows too (to skip them, for idempotency) as well as
+    /// whatever `confirmed` rows may still be carrying a bad token from
+    /// before verification-on-receipt existed.
+    pub fn list_rfc3161_anchors_for_audit(&self) -> rusqlite::Result<Vec<AuditableAnchor>> {
+        let conn = self.connection();
+        let mut stmt = conn.prepare(
+            "SELECT id, tree_size, anchored_hash, token, timestamp, status
+             FROM anchors WHERE anchor_type = 'rfc3161' ORDER BY id",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let id: i64 = row.get(0)?;
+            let tree_size: Option<i64> = row.get(1)?;
+            let anchored_hash: Vec<u8> = row.get(2)?;
+            let token: Vec<u8> = row.get(3)?;
+            let timestamp: i64 = row.get(4)?;
+            let status: String = row.get(5)?;
+
+            let anchored_hash: [u8; 32] = anchored_hash.try_into().map_err(|_| {
+                rusqlite::Error::InvalidColumnType(
+                    2,
+                    "anchored_hash".into(),
+                    rusqlite::types::Type::Blob,
+                )
+            })?;
+
+            Ok(AuditableAnchor {
+                id,
+                tree_size: tree_size.map(|s| s as u64),
+                anchored_hash,
+                token,
+                timestamp: timestamp as u64,
+                status,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>()
     }
 }
 
@@ -433,6 +754,18 @@ mod tests {
         let result = store.store_anchor(100, &anchor);
         assert!(result.is_ok(), "Failed to store anchor: {:?}", result.err());
 
+        // `store_anchor` defaults to status='pending', but only 'confirmed'
+        // anchors are ever served via `get_anchors`. Promote it directly so
+        // this test keeps exercising `store_anchor`'s own field round-trip
+        // rather than switching to a different insert method.
+        store
+            .connection()
+            .execute(
+                "UPDATE anchors SET status = 'confirmed' WHERE tree_size = 100",
+                [],
+            )
+            .expect("Failed to promote anchor to confirmed");
+
         // Verify anchor was stored
         let anchors = store.get_anchors(100).expect("Failed to get anchors");
         assert_eq!(anchors.len(), 1);
@@ -493,10 +826,10 @@ mod tests {
         let anchor2 = create_test_anchor_ots();
 
         store
-            .store_anchor(100, &anchor1)
+            .store_anchor_returning_id(100, &anchor1, "confirmed")
             .expect("Failed to store anchor1");
         store
-            .store_anchor(100, &anchor2)
+            .store_anchor_returning_id(100, &anchor2, "confirmed")
             .expect("Failed to store anchor2");
 
         let anchors = store.get_anchors(100).expect("Failed to get anchors");
@@ -517,7 +850,7 @@ mod tests {
         // Store a regular anchor
         let anchor = create_test_anchor_rfc3161();
         store
-            .store_anchor(100, &anchor)
+            .store_anchor_returning_id(100, &anchor, "confirmed")
             .expect("Failed to store regular anchor");
 
         // get_anchors should return both
@@ -542,10 +875,10 @@ mod tests {
         let anchor2 = create_test_anchor_ots();
 
         store
-            .store_anchor(100, &anchor1)
+            .store_anchor_returning_id(100, &anchor1, "confirmed")
             .expect("Failed to store anchor1");
         store
-            .store_anchor(200, &anchor2)
+            .store_anchor_returning_id(200, &anchor2, "confirmed")
             .expect("Failed to store anchor2");
 
         let size = store
@@ -642,7 +975,7 @@ mod tests {
         let anchor = create_test_anchor_rfc3161();
 
         let id = store
-            .store_anchor_returning_id(100, &anchor, "pending")
+            .store_anchor_returning_id(100, &anchor, "confirmed")
             .expect("Failed to store anchor");
 
         let new_metadata = serde_json::json!({"updated": true, "value": 42});
@@ -771,6 +1104,12 @@ mod tests {
             metadata.get("status").and_then(|v| v.as_str()),
             Some("confirmed")
         );
+        // Pre-existing metadata fields (a normal JSON object) must survive
+        // the merge, not be discarded.
+        assert_eq!(
+            metadata.get("calendar_url").and_then(|v| v.as_str()),
+            Some("https://ots.example.com")
+        );
     }
 
     #[test]
@@ -878,10 +1217,10 @@ mod tests {
         rfc2.tree_size = 200;
 
         store
-            .store_anchor(100, &rfc1)
+            .store_anchor_returning_id(100, &rfc1, "confirmed")
             .expect("Failed to store rfc1");
         store
-            .store_anchor(200, &rfc2)
+            .store_anchor_returning_id(200, &rfc2, "confirmed")
             .expect("Failed to store rfc2");
 
         let size = store
@@ -898,10 +1237,10 @@ mod tests {
         let ots = create_test_anchor_ots();
 
         store
-            .store_anchor(100, &rfc)
+            .store_anchor_returning_id(100, &rfc, "confirmed")
             .expect("Failed to store RFC anchor");
         store
-            .store_anchor(300, &ots)
+            .store_anchor_returning_id(300, &ots, "confirmed")
             .expect("Failed to store OTS anchor");
 
         // Should return RFC size, not OTS
@@ -917,7 +1256,7 @@ mod tests {
         let anchor = create_test_anchor_rfc3161();
 
         store
-            .store_anchor(100, &anchor)
+            .store_anchor_returning_id(100, &anchor, "confirmed")
             .expect("Failed to store anchor");
 
         let anchors = store.get_anchors(100).expect("Failed to get anchors");
@@ -939,7 +1278,7 @@ mod tests {
         let anchor = create_test_anchor_ots();
 
         store
-            .store_anchor(200, &anchor)
+            .store_anchor_returning_id(200, &anchor, "confirmed")
             .expect("Failed to store anchor");
 
         let anchors = store.get_anchors(200).expect("Failed to get anchors");
@@ -956,7 +1295,7 @@ mod tests {
         let anchor = create_test_anchor_other();
 
         store
-            .store_anchor(300, &anchor)
+            .store_anchor_returning_id(300, &anchor, "confirmed")
             .expect("Failed to store anchor");
 
         let anchors = store.get_anchors(300).expect("Failed to get anchors");
@@ -995,7 +1334,7 @@ mod tests {
         });
 
         store
-            .store_anchor(100, &anchor)
+            .store_anchor_returning_id(100, &anchor, "confirmed")
             .expect("Failed to store anchor");
 
         let anchors = store.get_anchors(100).expect("Failed to get anchors");
@@ -1020,11 +1359,12 @@ mod tests {
             .store_anchor(100, &anchor)
             .expect("Failed to store anchor");
 
-        // Manually corrupt metadata in DB
+        // Manually corrupt metadata in DB, and promote to 'confirmed' since
+        // that is now required for `get_anchors` to return the row at all.
         store
             .connection()
             .execute(
-                "UPDATE anchors SET metadata = 'invalid json' WHERE tree_size = 100",
+                "UPDATE anchors SET metadata = 'invalid json', status = 'confirmed' WHERE tree_size = 100",
                 [],
             )
             .expect("Failed to corrupt metadata");
@@ -1034,6 +1374,67 @@ mod tests {
         assert_eq!(anchors.len(), 1);
         // Default metadata should be empty object or null
         assert!(anchors[0].metadata.is_null() || anchors[0].metadata == serde_json::json!({}));
+    }
+
+    // -------------------------------------------------------------------
+    // Regression: `row_to_anchor` / `row_to_anchor_with_id` must load a
+    // row whose `metadata` is not even valid UTF-8, degrading to default
+    // metadata the same way they already do for merely-invalid JSON,
+    // rather than making the whole query fail. A row that can't be loaded
+    // can't be re-verified or rejected, and can't be picked up for
+    // confirmation.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_row_to_anchor_non_utf8_metadata_defaults_to_empty() {
+        let store = create_test_store();
+        let anchor = create_test_anchor_rfc3161();
+
+        store
+            .store_anchor_returning_id(100, &anchor, "confirmed")
+            .expect("Failed to store anchor");
+
+        store
+            .connection()
+            .execute(
+                "UPDATE anchors SET metadata = CAST(X'FF80' AS TEXT) WHERE tree_size = 100",
+                [],
+            )
+            .expect("Failed to corrupt metadata");
+
+        let anchors = store
+            .get_anchors(100)
+            .expect("get_anchors must not fail on non-UTF-8 metadata");
+        assert_eq!(anchors.len(), 1);
+        assert!(anchors[0].metadata.is_null() || anchors[0].metadata == serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_row_to_anchor_with_id_non_utf8_metadata_defaults_to_empty() {
+        let store = create_test_store();
+        let anchor = create_test_anchor_ots();
+
+        let anchor_id = store
+            .store_anchor_returning_id(200, &anchor, "pending")
+            .expect("Failed to store anchor");
+
+        store
+            .connection()
+            .execute(
+                "UPDATE anchors SET metadata = CAST(X'FF80' AS TEXT) WHERE id = ?1",
+                rusqlite::params![anchor_id],
+            )
+            .expect("Failed to corrupt metadata");
+
+        let pending = store
+            .get_pending_ots_anchors()
+            .expect("get_pending_ots_anchors must not fail on non-UTF-8 metadata");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, anchor_id);
+        assert!(
+            pending[0].anchor.metadata.is_null()
+                || pending[0].anchor.metadata == serde_json::json!({})
+        );
     }
 
     #[test]
@@ -1057,10 +1458,14 @@ mod tests {
         let ots = create_test_anchor_ots();
         let other = create_test_anchor_other();
 
-        store.store_anchor(100, &rfc).expect("Failed to store RFC");
-        store.store_anchor(200, &ots).expect("Failed to store OTS");
         store
-            .store_anchor(300, &other)
+            .store_anchor_returning_id(100, &rfc, "confirmed")
+            .expect("Failed to store RFC");
+        store
+            .store_anchor_returning_id(200, &ots, "confirmed")
+            .expect("Failed to store OTS");
+        store
+            .store_anchor_returning_id(300, &other, "confirmed")
             .expect("Failed to store Other");
 
         // Verify all types stored correctly
@@ -1094,16 +1499,208 @@ mod tests {
         assert_eq!(pending.len(), 0);
     }
 
+    // -------------------------------------------------------------------
+    // Regression: `confirm_ots_anchor_atomic` must go through to
+    // completion no matter what `metadata` currently holds. It used to
+    // merge the Bitcoin block info via SQLite's `json_set`, which raises
+    // "malformed JSON" (and rolls back the whole transaction -- token
+    // upgrade, status, and metadata all revert) if `metadata` is not
+    // itself well-formed JSON. Unlike the `reject_anchor_atomic` failure
+    // mode (a bad anchor stays in circulation), this one silently and
+    // permanently prevents a *good* Bitcoin anchor from ever confirming.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_confirm_ots_anchor_atomic_survives_non_json_metadata() {
+        let mut store = create_test_store();
+
+        let anchor = create_test_anchor_ots();
+        let anchor_id = store
+            .store_anchor_returning_id(200, &anchor, "pending")
+            .expect("Failed to store anchor");
+
+        // Corrupt metadata to a string that is not valid JSON at all.
+        let garbage = "not json at all {{{";
+        store
+            .connection()
+            .execute(
+                "UPDATE anchors SET metadata = ?1 WHERE id = ?2",
+                rusqlite::params![garbage, anchor_id],
+            )
+            .expect("Failed to corrupt metadata");
+
+        let upgraded_proof = vec![0xFF, 0xEE, 0xDD];
+        let block_height = 700_000;
+        let block_time = 1_600_000_000;
+
+        store
+            .confirm_ots_anchor_atomic(anchor_id, &upgraded_proof, block_height, block_time)
+            .expect("confirmation must succeed even with unparseable metadata");
+
+        let (status, token, metadata_json): (String, Vec<u8>, Option<String>) = store
+            .connection()
+            .query_row(
+                "SELECT status, token, metadata FROM anchors WHERE id = ?1",
+                rusqlite::params![anchor_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("row must still exist");
+        assert_eq!(status, "confirmed", "status must become confirmed");
+        assert_eq!(token, upgraded_proof, "token must be upgraded");
+
+        let metadata: serde_json::Value =
+            serde_json::from_str(&metadata_json.expect("metadata must be set"))
+                .expect("resulting metadata must itself be valid JSON");
+        assert_eq!(
+            metadata["bitcoin_block_height"],
+            serde_json::json!(block_height)
+        );
+        assert_eq!(
+            metadata["bitcoin_block_time"],
+            serde_json::json!(block_time)
+        );
+        assert_eq!(metadata["status"], "confirmed");
+        assert_eq!(
+            metadata["legacy_metadata_raw"], garbage,
+            "the original unparseable content must be preserved, not discarded"
+        );
+    }
+
+    #[test]
+    fn test_confirm_ots_anchor_atomic_survives_non_object_json_metadata() {
+        let mut store = create_test_store();
+
+        let anchor = create_test_anchor_ots();
+        let anchor_id = store
+            .store_anchor_returning_id(200, &anchor, "pending")
+            .expect("Failed to store anchor");
+
+        // `metadata` is valid JSON, but an array, not an object.
+        let non_object = "[1,2,3]";
+        store
+            .connection()
+            .execute(
+                "UPDATE anchors SET metadata = ?1 WHERE id = ?2",
+                rusqlite::params![non_object, anchor_id],
+            )
+            .expect("Failed to corrupt metadata");
+
+        let upgraded_proof = vec![0x11, 0x22];
+        let block_height = 800_000;
+        let block_time = 1_650_000_000;
+
+        store
+            .confirm_ots_anchor_atomic(anchor_id, &upgraded_proof, block_height, block_time)
+            .expect("confirmation must succeed even with non-object JSON metadata");
+
+        let (status, token, metadata_json): (String, Vec<u8>, Option<String>) = store
+            .connection()
+            .query_row(
+                "SELECT status, token, metadata FROM anchors WHERE id = ?1",
+                rusqlite::params![anchor_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("row must still exist");
+        assert_eq!(status, "confirmed", "status must become confirmed");
+        assert_eq!(token, upgraded_proof, "token must be upgraded");
+
+        let metadata: serde_json::Value =
+            serde_json::from_str(&metadata_json.expect("metadata must be set"))
+                .expect("resulting metadata must itself be valid JSON");
+        assert_eq!(
+            metadata["bitcoin_block_height"],
+            serde_json::json!(block_height)
+        );
+        assert_eq!(
+            metadata["bitcoin_block_time"],
+            serde_json::json!(block_time)
+        );
+        assert_eq!(metadata["status"], "confirmed");
+        assert_eq!(
+            metadata["legacy_metadata_raw"], non_object,
+            "the original non-object JSON content must be preserved, not discarded"
+        );
+    }
+
+    #[test]
+    fn test_confirm_ots_anchor_atomic_survives_non_utf8_metadata() {
+        let mut store = create_test_store();
+
+        let anchor = create_test_anchor_ots();
+        let anchor_id = store
+            .store_anchor_returning_id(200, &anchor, "pending")
+            .expect("Failed to store anchor");
+
+        // Invalid UTF-8 bytes stored directly into the TEXT column. Before
+        // this fix, `rusqlite` would refuse to fetch this as a `String`
+        // and the whole confirmation transaction would roll back --
+        // silently and permanently blocking this anchor's Bitcoin
+        // confirmation.
+        store
+            .connection()
+            .execute(
+                "UPDATE anchors SET metadata = CAST(X'FF80' AS TEXT) WHERE id = ?1",
+                rusqlite::params![anchor_id],
+            )
+            .expect("Failed to corrupt metadata");
+
+        let upgraded_proof = vec![0x33, 0x44];
+        let block_height = 900_000;
+        let block_time = 1_700_000_000;
+
+        store
+            .confirm_ots_anchor_atomic(anchor_id, &upgraded_proof, block_height, block_time)
+            .expect("confirmation must succeed even with non-UTF-8 metadata");
+
+        let (status, token, metadata_json): (String, Vec<u8>, Option<String>) = store
+            .connection()
+            .query_row(
+                "SELECT status, token, metadata FROM anchors WHERE id = ?1",
+                rusqlite::params![anchor_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("row must still exist");
+        assert_eq!(status, "confirmed", "status must become confirmed");
+        assert_eq!(token, upgraded_proof, "token must be upgraded");
+
+        let metadata: serde_json::Value =
+            serde_json::from_str(&metadata_json.expect("metadata must be set"))
+                .expect("resulting metadata must itself be valid JSON (and therefore valid UTF-8)");
+        assert_eq!(
+            metadata["bitcoin_block_height"],
+            serde_json::json!(block_height)
+        );
+        assert_eq!(
+            metadata["bitcoin_block_time"],
+            serde_json::json!(block_time)
+        );
+        assert_eq!(metadata["status"], "confirmed");
+
+        use base64::Engine;
+        let expected_b64 = base64::engine::general_purpose::STANDARD.encode([0xFFu8, 0x80u8]);
+        assert_eq!(
+            metadata["legacy_metadata_raw_base64"], expected_b64,
+            "non-UTF-8 original content must be preserved losslessly as base64"
+        );
+        assert!(
+            metadata.get("legacy_metadata_raw").is_none(),
+            "non-UTF-8 content must not be mixed into the plain-text legacy field"
+        );
+    }
+
     #[test]
     fn test_row_to_anchor_invalid_hash_length() {
         let store = create_test_store();
 
-        // Insert anchor with invalid hash length (not 32 bytes)
+        // Insert anchor with invalid hash length (not 32 bytes). Must be
+        // 'confirmed' or `get_anchors` would simply not find the row at all
+        // (returning an empty, not erroring, result) instead of exercising
+        // the row-parsing failure this test is about.
         store
             .connection()
             .execute(
-                "INSERT INTO anchors (tree_size, anchor_type, target, anchored_hash, timestamp, token, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO anchors (tree_size, anchor_type, target, anchored_hash, timestamp, token, status, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 rusqlite::params![
                     100i64,
                     "rfc3161",
@@ -1111,6 +1708,7 @@ mod tests {
                     vec![0x01u8, 0x02, 0x03], // Invalid: only 3 bytes instead of 32
                     1_234_567_890_000_000_000i64,
                     vec![0xDEu8, 0xAD],
+                    "confirmed",
                     chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
                 ],
             )
@@ -1174,8 +1772,8 @@ mod tests {
         store
             .connection()
             .execute(
-                "INSERT INTO anchors (tree_size, anchor_type, target, anchored_hash, timestamp, token, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO anchors (tree_size, anchor_type, target, anchored_hash, timestamp, token, status, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 rusqlite::params![
                     100i64,
                     "unknown_future_type", // Unknown anchor type
@@ -1183,6 +1781,7 @@ mod tests {
                     [0x42u8; 32].as_slice(),
                     1_234_567_890_000_000_000i64,
                     vec![0xDEu8, 0xAD],
+                    "confirmed",
                     chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
                 ],
             )
@@ -1241,6 +1840,16 @@ mod tests {
 
         let result = store.store_anchor(100, &anchor);
         assert!(result.is_ok());
+
+        // `store_anchor` defaults to status='pending'; promote so
+        // `get_anchors` (now 'confirmed'-only) can see it.
+        store
+            .connection()
+            .execute(
+                "UPDATE anchors SET status = 'confirmed' WHERE tree_size = 100",
+                [],
+            )
+            .expect("Failed to promote anchor to confirmed");
 
         let anchors = store.get_anchors(100).expect("Failed to get anchors");
         assert_eq!(anchors.len(), 1);
@@ -1538,5 +2147,342 @@ mod tests {
         let anchors = store.get_anchors(50).expect("Failed to get anchors");
         assert!(!anchors.is_empty());
         assert!(anchors.iter().any(|a| a.target == "super_root"));
+    }
+
+    // -------------------------------------------------------------------
+    // Regression: rejecting an anchor must hide it from every read path
+    // and atomically release the tree pointing at it, so the tree is
+    // re-queued for anchoring instead of being stuck forever with a
+    // non-NULL `tsa_anchor_id` that resolves to nothing usable.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_reject_anchor_atomic_hides_row_and_requeues_tree() {
+        let store = create_test_store();
+        let hash = [9u8; 32];
+        let origin_id = [0u8; 32];
+
+        let mut anchor = create_test_anchor_rfc3161();
+        anchor.anchored_hash = hash;
+        anchor.tree_size = 100;
+
+        let anchor_id = store
+            .store_anchor_returning_id(100, &anchor, "confirmed")
+            .expect("Failed to store anchor");
+
+        let tree_id = store
+            .create_active_tree(&origin_id, 0)
+            .expect("Failed to create tree");
+        store
+            .connection()
+            .execute(
+                "UPDATE trees SET status = 'pending_bitcoin', end_size = ?1, root_hash = ?2, tsa_anchor_id = ?3 WHERE id = ?4",
+                rusqlite::params![100i64, hash.as_slice(), anchor_id, tree_id],
+            )
+            .expect("Failed to link tree to anchor");
+
+        // Sanity: everything is visible/linked before rejection, and the
+        // tree is NOT in the anchoring queue (it already has an anchor).
+        assert_eq!(store.get_anchors(100).unwrap().len(), 1);
+        assert_eq!(store.get_latest_anchored_size().unwrap(), Some(100));
+        assert_eq!(store.get_latest_tsa_anchored_size().unwrap(), Some(100));
+        assert_eq!(
+            store.get_tsa_anchor_for_hash(&hash).unwrap(),
+            Some(anchor_id)
+        );
+        assert!(store
+            .get_tsa_anchor_with_token_for_hash(&hash)
+            .unwrap()
+            .is_some());
+        assert!(store
+            .get_trees_pending_tsa()
+            .unwrap()
+            .iter()
+            .all(|t| t.id != tree_id));
+
+        store
+            .reject_anchor_atomic(anchor_id, REJECTION_REASON_MESSAGE_IMPRINT_MISMATCH)
+            .expect("Failed to reject anchor");
+
+        // The row must be gone from every read path...
+        assert!(
+            store.get_anchors(100).unwrap().is_empty(),
+            "rejected anchor must not be served in a receipt"
+        );
+        assert_eq!(
+            store.get_latest_anchored_size().unwrap(),
+            None,
+            "rejected anchor must not count toward the latest anchored size"
+        );
+        assert_eq!(
+            store.get_latest_tsa_anchored_size().unwrap(),
+            None,
+            "rejected anchor must not count toward the latest TSA anchored size"
+        );
+        assert_eq!(
+            store.get_tsa_anchor_for_hash(&hash).unwrap(),
+            None,
+            "rejected anchor must not be found for reuse by hash"
+        );
+        assert!(
+            store
+                .get_tsa_anchor_with_token_for_hash(&hash)
+                .unwrap()
+                .is_none(),
+            "rejected anchor must not be found for reuse by hash (with token)"
+        );
+
+        // ...but the row itself must still exist, as an auditable record.
+        let (status, metadata_json): (String, Option<String>) = store
+            .connection()
+            .query_row(
+                "SELECT status, metadata FROM anchors WHERE id = ?1",
+                rusqlite::params![anchor_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("rejected row must still exist");
+        assert_eq!(status, "rejected");
+        let metadata: serde_json::Value =
+            serde_json::from_str(&metadata_json.expect("metadata must be set")).unwrap();
+        assert_eq!(
+            metadata["rejection_reason"],
+            REJECTION_REASON_MESSAGE_IMPRINT_MISMATCH
+        );
+        assert!(metadata["rejected_at"].is_number());
+        // Pre-existing metadata fields (a normal JSON object) must survive
+        // the merge, not be discarded.
+        assert_eq!(metadata["tsa_url"], "https://example.com");
+
+        // The tree must be detached and back in the anchoring queue.
+        let tree = store
+            .get_tree(tree_id)
+            .expect("query should succeed")
+            .expect("tree must still exist");
+        assert!(
+            tree.tsa_anchor_id.is_none(),
+            "tree must be detached from the rejected anchor"
+        );
+        assert!(
+            store
+                .get_trees_pending_tsa()
+                .unwrap()
+                .iter()
+                .any(|t| t.id == tree_id),
+            "tree must be re-queued for TSA anchoring after its anchor is rejected"
+        );
+    }
+
+    #[test]
+    fn test_reject_anchor_atomic_is_idempotent() {
+        let store = create_test_store();
+        let anchor = create_test_anchor_rfc3161();
+        let anchor_id = store
+            .store_anchor_returning_id(100, &anchor, "confirmed")
+            .expect("Failed to store anchor");
+
+        store
+            .reject_anchor_atomic(anchor_id, REJECTION_REASON_MESSAGE_IMPRINT_MISMATCH)
+            .expect("first rejection should succeed");
+        // Calling it again (e.g. the admin audit re-running) must not
+        // error and must leave the row rejected.
+        store
+            .reject_anchor_atomic(anchor_id, REJECTION_REASON_MESSAGE_IMPRINT_MISMATCH)
+            .expect("second rejection should also succeed");
+
+        let status: String = store
+            .connection()
+            .query_row(
+                "SELECT status FROM anchors WHERE id = ?1",
+                rusqlite::params![anchor_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "rejected");
+    }
+
+    // -------------------------------------------------------------------
+    // Regression: `reject_anchor_atomic` must go through to completion no
+    // matter what `metadata` currently holds. It used to build the merged
+    // metadata via SQLite's `json_set`, which raises "malformed JSON" (and
+    // rolls back the whole transaction, including the tree detach) if
+    // `metadata` is not itself well-formed JSON -- leaving exactly the row
+    // this method exists to reject sitting at `status = 'confirmed'`.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_reject_anchor_atomic_survives_non_json_metadata() {
+        let store = create_test_store();
+        let anchor = create_test_anchor_rfc3161();
+        let anchor_id = store
+            .store_anchor_returning_id(100, &anchor, "confirmed")
+            .expect("Failed to store anchor");
+
+        // Corrupt metadata to a string that is not valid JSON at all.
+        let garbage = "not json at all {{{";
+        store
+            .connection()
+            .execute(
+                "UPDATE anchors SET metadata = ?1 WHERE id = ?2",
+                rusqlite::params![garbage, anchor_id],
+            )
+            .expect("Failed to corrupt metadata");
+
+        store
+            .reject_anchor_atomic(anchor_id, REJECTION_REASON_MESSAGE_IMPRINT_MISMATCH)
+            .expect("rejection must succeed even with unparseable metadata");
+
+        let (status, metadata_json): (String, Option<String>) = store
+            .connection()
+            .query_row(
+                "SELECT status, metadata FROM anchors WHERE id = ?1",
+                rusqlite::params![anchor_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("row must still exist");
+        assert_eq!(status, "rejected");
+
+        let metadata: serde_json::Value =
+            serde_json::from_str(&metadata_json.expect("metadata must be set"))
+                .expect("resulting metadata must itself be valid JSON");
+        assert_eq!(
+            metadata["rejection_reason"],
+            REJECTION_REASON_MESSAGE_IMPRINT_MISMATCH
+        );
+        assert!(metadata["rejected_at"].is_number());
+        assert_eq!(
+            metadata["legacy_metadata_raw"], garbage,
+            "the original unparseable content must be preserved, not discarded"
+        );
+    }
+
+    #[test]
+    fn test_reject_anchor_atomic_survives_non_object_json_metadata() {
+        let store = create_test_store();
+        let anchor = create_test_anchor_rfc3161();
+        let anchor_id = store
+            .store_anchor_returning_id(100, &anchor, "confirmed")
+            .expect("Failed to store anchor");
+
+        // `metadata` is valid JSON, but a number, not an object.
+        let non_object = "42";
+        store
+            .connection()
+            .execute(
+                "UPDATE anchors SET metadata = ?1 WHERE id = ?2",
+                rusqlite::params![non_object, anchor_id],
+            )
+            .expect("Failed to corrupt metadata");
+
+        store
+            .reject_anchor_atomic(anchor_id, REJECTION_REASON_MESSAGE_IMPRINT_MISMATCH)
+            .expect("rejection must succeed even with non-object JSON metadata");
+
+        let (status, metadata_json): (String, Option<String>) = store
+            .connection()
+            .query_row(
+                "SELECT status, metadata FROM anchors WHERE id = ?1",
+                rusqlite::params![anchor_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("row must still exist");
+        assert_eq!(status, "rejected");
+
+        let metadata: serde_json::Value =
+            serde_json::from_str(&metadata_json.expect("metadata must be set"))
+                .expect("resulting metadata must itself be valid JSON");
+        assert_eq!(
+            metadata["rejection_reason"],
+            REJECTION_REASON_MESSAGE_IMPRINT_MISMATCH
+        );
+        assert!(metadata["rejected_at"].is_number());
+        assert_eq!(
+            metadata["legacy_metadata_raw"], non_object,
+            "the original non-object JSON content must be preserved, not discarded"
+        );
+    }
+
+    #[test]
+    fn test_reject_anchor_atomic_survives_non_utf8_metadata() {
+        let store = create_test_store();
+        let anchor = create_test_anchor_rfc3161();
+        let anchor_id = store
+            .store_anchor_returning_id(100, &anchor, "confirmed")
+            .expect("Failed to store anchor");
+
+        // Invalid UTF-8 bytes stored directly into the TEXT column --
+        // SQLite's TEXT affinity does not enforce valid UTF-8, so this can
+        // happen from outside Rust entirely (a manual DB edit, a buggy
+        // migration, etc). `rusqlite` itself would refuse to fetch this as
+        // a `String`, which is exactly the failure mode this test guards
+        // against.
+        store
+            .connection()
+            .execute(
+                "UPDATE anchors SET metadata = CAST(X'FF80' AS TEXT) WHERE id = ?1",
+                rusqlite::params![anchor_id],
+            )
+            .expect("Failed to corrupt metadata");
+
+        store
+            .reject_anchor_atomic(anchor_id, REJECTION_REASON_MESSAGE_IMPRINT_MISMATCH)
+            .expect("rejection must succeed even with non-UTF-8 metadata");
+
+        let (status, metadata_json): (String, Option<String>) = store
+            .connection()
+            .query_row(
+                "SELECT status, metadata FROM anchors WHERE id = ?1",
+                rusqlite::params![anchor_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("row must still exist");
+        assert_eq!(status, "rejected");
+
+        let metadata: serde_json::Value =
+            serde_json::from_str(&metadata_json.expect("metadata must be set"))
+                .expect("resulting metadata must itself be valid JSON (and therefore valid UTF-8)");
+        assert_eq!(
+            metadata["rejection_reason"],
+            REJECTION_REASON_MESSAGE_IMPRINT_MISMATCH
+        );
+        assert!(metadata["rejected_at"].is_number());
+
+        use base64::Engine;
+        let expected_b64 = base64::engine::general_purpose::STANDARD.encode([0xFFu8, 0x80u8]);
+        assert_eq!(
+            metadata["legacy_metadata_raw_base64"], expected_b64,
+            "non-UTF-8 original content must be preserved losslessly as base64"
+        );
+        assert!(
+            metadata.get("legacy_metadata_raw").is_none(),
+            "non-UTF-8 content must not be mixed into the plain-text legacy field"
+        );
+    }
+
+    #[test]
+    fn test_get_anchors_excludes_pending_ots() {
+        let store = create_test_store();
+        let ots_anchor = create_test_anchor_ots();
+
+        // An in-flight (not yet Bitcoin-confirmed) OTS anchor.
+        store
+            .store_anchor_returning_id(200, &ots_anchor, "pending")
+            .expect("Failed to store pending OTS anchor");
+
+        let anchors = store.get_anchors(200).expect("Failed to get anchors");
+        assert!(
+            anchors.is_empty(),
+            "an unconfirmed OTS anchor must never be served in a receipt"
+        );
+
+        // Once confirmed, it becomes visible.
+        store
+            .connection()
+            .execute(
+                "UPDATE anchors SET status = 'confirmed' WHERE tree_size = 200",
+                [],
+            )
+            .expect("Failed to confirm anchor");
+        let anchors = store.get_anchors(200).expect("Failed to get anchors");
+        assert_eq!(anchors.len(), 1);
     }
 }

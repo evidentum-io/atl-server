@@ -15,7 +15,7 @@ pub mod lifecycle;
 pub mod queries;
 pub mod schema;
 
-pub use anchors::AnchorWithId;
+pub use anchors::{AnchorWithId, AuditableAnchor, REJECTION_REASON_MESSAGE_IMPRINT_MISMATCH};
 pub use lifecycle::{ClosedTreeInfo, TreeRecord, TreeStatus};
 pub use queries::{BatchInsert, IndexEntry, IndexStore};
 pub use schema::{MIGRATE_V2_TO_V3, SCHEMA_V3, SCHEMA_VERSION};

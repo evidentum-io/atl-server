@@ -303,6 +303,66 @@ mod tests {
         assert_eq!(pending.len(), 0);
     }
 
+    /// End-to-end regression: before the row mappers were made
+    /// byte-resilient, an OTS anchor whose `metadata` was not valid UTF-8
+    /// would make `get_pending_ots_anchors` itself fail (rusqlite rejects
+    /// invalid UTF-8 when a column is fetched as `String`), so the poll
+    /// loop would never even see this anchor -- `confirm_ots_anchor_atomic`
+    /// (hardened in an earlier round) was never reached. This proves the
+    /// whole path -- select, map, upgrade, confirm -- now goes through.
+    #[tokio::test]
+    async fn test_poll_anchor_confirmed_survives_non_utf8_metadata() {
+        let index = Arc::new(Mutex::new(create_test_index_store()));
+
+        let anchor_id = {
+            let mut idx = index.lock().await;
+            let id = idx
+                .submit_super_root_ots_anchor(&[0u8; 32], "http://calendar.example", &[0u8; 32], 1)
+                .unwrap();
+            idx.connection()
+                .execute(
+                    "UPDATE anchors SET metadata = CAST(X'FF80' AS TEXT) WHERE id = ?1",
+                    rusqlite::params![id],
+                )
+                .unwrap();
+            id
+        };
+
+        let block_height = 800000u64;
+        let block_time = 1700000000u64;
+        let client: Arc<dyn OtsClient> =
+            Arc::new(MockOtsClient::new_confirmed(block_height, block_time));
+
+        let result = poll_pending_anchors(&index, &client, 100).await;
+        assert!(
+            result.is_ok(),
+            "poll must reach and confirm an anchor with non-UTF-8 metadata: {:?}",
+            result
+        );
+
+        // Anchor should be confirmed and removed from pending.
+        let idx = index.lock().await;
+        let pending = idx.get_pending_ots_anchors().unwrap();
+        assert_eq!(pending.len(), 0);
+
+        let (status, metadata_json): (String, Option<String>) = idx
+            .connection()
+            .query_row(
+                "SELECT status, metadata FROM anchors WHERE id = ?1",
+                rusqlite::params![anchor_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "confirmed");
+        let metadata: serde_json::Value =
+            serde_json::from_str(&metadata_json.expect("metadata must be set"))
+                .expect("resulting metadata must itself be valid JSON");
+        assert!(
+            metadata["legacy_metadata_raw_base64"].is_string(),
+            "the original non-UTF-8 content must be preserved losslessly"
+        );
+    }
+
     #[tokio::test]
     async fn test_poll_anchor_upgrade_error() {
         let index = Arc::new(Mutex::new(create_test_index_store()));

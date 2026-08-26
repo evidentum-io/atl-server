@@ -56,7 +56,21 @@ impl TsaService {
                 .await
             {
                 Ok(response) => {
-                    tracing::info!(tsa_url = %tsa_url, "TSA request succeeded");
+                    // Verify the token's messageImprint matches the requested
+                    // hash before trusting it. A response that does not match
+                    // (wrong hash, malformed token) is treated the same as a
+                    // failed request: move on to the next configured TSA.
+                    if let Err(e) = self.client.verify(&response, hash) {
+                        tracing::warn!(
+                            tsa_url = %tsa_url,
+                            error = %e,
+                            "TSA response failed messageImprint verification, trying next"
+                        );
+                        last_error = Some(e);
+                        continue;
+                    }
+
+                    tracing::info!(tsa_url = %tsa_url, "TSA request succeeded and verified");
                     return Ok(TsaAnchor {
                         tsa_url: tsa_url.clone(),
                         tsa_response: response.token_der,
@@ -386,5 +400,140 @@ mod tests {
 
         let result = service.timestamp_with_fallback(&hash).await;
         assert!(result.is_ok());
+    }
+
+    // -------------------------------------------------------------------
+    // Regression: a response whose messageImprint fails verification must
+    // be treated the same as a failed request, so the fallback loop moves
+    // on to the next configured TSA URL instead of returning it to the
+    // caller.
+    // -------------------------------------------------------------------
+
+    /// Mock client whose `timestamp()` always succeeds but whose `verify()`
+    /// rejects a specific "bad" token, letting tests control per-attempt
+    /// verification outcome independently of the HTTP call succeeding.
+    struct MockVerifyGateClient {
+        responses: std::sync::Mutex<std::collections::VecDeque<TsaResponse>>,
+        bad_token: Vec<u8>,
+    }
+
+    #[async_trait]
+    impl TsaClient for MockVerifyGateClient {
+        async fn timestamp(
+            &self,
+            _tsa_url: &str,
+            _hash: &[u8; 32],
+            _timeout_ms: u64,
+        ) -> Result<TsaResponse, AnchorError> {
+            let mut queue = self.responses.lock().unwrap();
+            queue
+                .pop_front()
+                .ok_or_else(|| AnchorError::ServiceError("no more mock responses".to_string()))
+        }
+
+        fn verify(
+            &self,
+            response: &TsaResponse,
+            _expected_hash: &[u8; 32],
+        ) -> Result<(), AnchorError> {
+            if response.token_der == self.bad_token {
+                Err(AnchorError::TokenInvalid(
+                    "mock messageImprint mismatch".to_string(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_timestamp_with_fallback_verify_failure_tries_next() {
+        let bad_token = vec![0xBA, 0xD0, 0x00];
+        let good_token = vec![0x60, 0x0D, 0x00];
+
+        let config = TsaConfig {
+            urls: vec![
+                "https://tsa1.example.com/tsr".to_string(),
+                "https://tsa2.example.com/tsr".to_string(),
+            ],
+            timeout_ms: 5000,
+            username: None,
+            password: None,
+            ca_cert: None,
+        };
+
+        let mut responses = std::collections::VecDeque::new();
+        responses.push_back(TsaResponse {
+            token_der: bad_token.clone(),
+            timestamp: 1,
+        });
+        responses.push_back(TsaResponse {
+            token_der: good_token.clone(),
+            timestamp: 2,
+        });
+
+        let client = Arc::new(MockVerifyGateClient {
+            responses: std::sync::Mutex::new(responses),
+            bad_token,
+        });
+        let service = TsaService::with_client(config, client);
+        let hash = [42u8; 32];
+
+        let result = service.timestamp_with_fallback(&hash).await;
+
+        assert!(
+            result.is_ok(),
+            "verify failure on the first TSA must fall back to the next one: {:?}",
+            result
+        );
+        let anchor = result.unwrap();
+        assert_eq!(anchor.tsa_url, "https://tsa2.example.com/tsr");
+        assert_eq!(anchor.tsa_response, good_token);
+    }
+
+    #[tokio::test]
+    async fn test_timestamp_with_fallback_all_verify_failures_returns_err() {
+        let bad_token = vec![0xBA, 0xD0, 0x00];
+
+        let config = TsaConfig {
+            urls: vec![
+                "https://tsa1.example.com/tsr".to_string(),
+                "https://tsa2.example.com/tsr".to_string(),
+            ],
+            timeout_ms: 5000,
+            username: None,
+            password: None,
+            ca_cert: None,
+        };
+
+        let mut responses = std::collections::VecDeque::new();
+        responses.push_back(TsaResponse {
+            token_der: bad_token.clone(),
+            timestamp: 1,
+        });
+        responses.push_back(TsaResponse {
+            token_der: bad_token.clone(),
+            timestamp: 2,
+        });
+
+        let client = Arc::new(MockVerifyGateClient {
+            responses: std::sync::Mutex::new(responses),
+            bad_token,
+        });
+        let service = TsaService::with_client(config, client);
+        let hash = [42u8; 32];
+
+        let result = service.timestamp_with_fallback(&hash).await;
+
+        assert!(
+            result.is_err(),
+            "a token that never verifies must not be returned to the caller"
+        );
+        match result.unwrap_err() {
+            AnchorError::TokenInvalid(msg) => {
+                assert!(msg.contains("messageImprint"));
+            }
+            other => panic!("expected TokenInvalid, got {:?}", other),
+        }
     }
 }
