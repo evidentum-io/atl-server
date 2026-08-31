@@ -37,6 +37,30 @@ pub enum ServerError {
     #[error("Entry's tree is still active, not yet in Super-Tree")]
     TreeNotClosed,
 
+    /// The parts of a receipt would not describe one and the same tree state.
+    ///
+    /// A receipt is only meaningful if every part of it -- inclusion proof,
+    /// checkpoint and every anchor -- commits to the same Merkle root
+    /// (ATL Protocol §5.2 steps 3-4, §5.3 step 2, §5.5.1 step 2, §5.5.2
+    /// step 2).  When the server cannot assemble such a receipt, because
+    /// two of its own records disagree about the root at a tree size, it
+    /// refuses to issue one instead of shipping evidence that will fail
+    /// verification.
+    #[error(
+        "receipt state inconsistent at tree_size {tree_size}: {source_name} ({found}) does not \
+         match the Merkle state ({expected})"
+    )]
+    ReceiptStateMismatch {
+        /// Tree size the receipt would have described.
+        tree_size: u64,
+        /// Which record disagreed with the Merkle data (for operators).
+        source_name: &'static str,
+        /// Hex-encoded hash held by that record.
+        found: String,
+        /// Hex-encoded hash the Merkle data actually commits to.
+        expected: String,
+    },
+
     // ========== Validation Errors ==========
     /// Invalid argument
     #[error("invalid argument: {0}")]
@@ -213,6 +237,7 @@ impl ServerError {
             | ServerError::Internal(_)
             | ServerError::Config(_)
             | ServerError::Core(_)
+            | ServerError::ReceiptStateMismatch { .. }
             | ServerError::Anchoring(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -227,6 +252,7 @@ impl ServerError {
             ServerError::TreeSizeMismatch { .. } => "TREE_SIZE_MISMATCH",
             ServerError::SuperTreeNotInitialized => "SUPER_TREE_NOT_INITIALIZED",
             ServerError::TreeNotClosed => "TREE_NOT_CLOSED",
+            ServerError::ReceiptStateMismatch { .. } => "RECEIPT_STATE_MISMATCH",
             ServerError::InvalidArgument(_) => "INVALID_ARGUMENT",
             ServerError::InvalidHash(_) => "INVALID_HASH",
             ServerError::InvalidSignature(_) => "INVALID_SIGNATURE",
