@@ -922,4 +922,174 @@ mod tests {
             "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
     }
+
+    /// Store a confirmed RFC 3161 anchor committing to `root`.
+    async fn store_tsa_anchor(engine: &StorageEngine, root: [u8; 32], tree_size: u64) {
+        use crate::traits::anchor::{Anchor, AnchorType};
+        let index_store = engine.index_store();
+        let index = index_store.lock().await;
+        index
+            .store_anchor_returning_id(
+                tree_size,
+                &Anchor {
+                    anchor_type: AnchorType::Rfc3161,
+                    target: "data_tree_root".to_string(),
+                    anchored_hash: root,
+                    tree_size,
+                    super_tree_size: None,
+                    timestamp: 1_000_000,
+                    token: vec![],
+                    metadata: serde_json::json!({"tsa_url": "https://tsa.example.com"}),
+                },
+                "confirmed",
+            )
+            .unwrap();
+    }
+
+    async fn append_leaf(engine: &StorageEngine, seed: u8) -> Uuid {
+        engine
+            .append_batch(vec![AppendParams {
+                payload_hash: [seed; 32],
+                metadata_hash: [0u8; 32],
+                metadata_cleartext: None,
+                external_id: None,
+            }])
+            .await
+            .unwrap()
+            .entries[0]
+            .id
+    }
+
+    fn state_over(engine: Arc<StorageEngine>) -> Arc<AppState> {
+        let dispatcher = Arc::new(MockSequencerClient::new_success(engine.clone()));
+        create_test_state(
+            ServerMode::Standalone,
+            dispatcher,
+            None,
+            Some(engine),
+            Some(Arc::new(CheckpointSigner::from_bytes(&[42u8; 32]))),
+        )
+    }
+
+    /// Assert the served receipt describes one tree state: every RFC 3161
+    /// anchor commits to `proof.root_hash`, which the checkpoint also signs
+    /// (ATL Protocol Section 5.2 steps 3-4, Section 5.5.1 step 2).
+    fn assert_served_receipt_is_single_state(receipt: &serde_json::Value) -> usize {
+        let proof = &receipt["proof"];
+        assert_eq!(proof["root_hash"], proof["checkpoint"]["root_hash"]);
+        assert_eq!(proof["tree_size"], proof["checkpoint"]["tree_size"]);
+
+        // `anchors` is omitted from the JSON when empty.
+        let anchors = receipt["anchors"].as_array().cloned().unwrap_or_default();
+        let mut tsa_anchors = 0;
+        for anchor in &anchors {
+            if anchor["type"] == "rfc3161" {
+                tsa_anchors += 1;
+                assert_eq!(
+                    anchor["target_hash"], proof["root_hash"],
+                    "rfc3161 anchor.target_hash must equal proof.root_hash"
+                );
+            }
+        }
+        tsa_anchors
+    }
+
+    /// End-to-end through the served endpoint: an entry whose leaf index is
+    /// below an anchored tree size gets its own state's anchor, not another
+    /// state's.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_get_anchor_serves_a_single_consistent_state() {
+        let dir = TempDir::new().unwrap();
+        let engine = Arc::new(
+            StorageEngine::new(
+                StorageConfig {
+                    data_dir: dir.path().to_path_buf(),
+                    ..Default::default()
+                },
+                [7u8; 32],
+            )
+            .await
+            .unwrap(),
+        );
+
+        let entry_id = append_leaf(&engine, 0x01).await;
+        append_leaf(&engine, 0x02).await;
+
+        let closed = engine.tree_head();
+        engine
+            .rotate_tree(&engine.origin_id(), closed.tree_size, &closed.root_hash)
+            .await
+            .unwrap();
+        store_tsa_anchor(&engine, closed.root_hash, closed.tree_size).await;
+
+        // Grow the log past the anchored state.
+        append_leaf(&engine, 0x03).await;
+        append_leaf(&engine, 0x04).await;
+        append_leaf(&engine, 0x05).await;
+        assert_ne!(engine.tree_head().root_hash, closed.root_hash);
+
+        let receipt = get_anchor(State(state_over(engine)), Path(entry_id))
+            .await
+            .expect("receipt must be served")
+            .0;
+
+        assert_eq!(receipt["proof"]["tree_size"], closed.tree_size);
+        assert_eq!(
+            assert_served_receipt_is_single_state(&receipt),
+            1,
+            "the entry's own state is anchored, so its receipt carries that anchor"
+        );
+    }
+
+    /// End-to-end through the served endpoint: when the entry's own state
+    /// was never timestamped, a later state's anchor must not be served with
+    /// it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_get_anchor_does_not_serve_another_states_anchor() {
+        let dir = TempDir::new().unwrap();
+        let engine = Arc::new(
+            StorageEngine::new(
+                StorageConfig {
+                    data_dir: dir.path().to_path_buf(),
+                    ..Default::default()
+                },
+                [8u8; 32],
+            )
+            .await
+            .unwrap(),
+        );
+
+        let entry_id = append_leaf(&engine, 0x01).await;
+        append_leaf(&engine, 0x02).await;
+        let first = engine.tree_head();
+        engine
+            .rotate_tree(&engine.origin_id(), first.tree_size, &first.root_hash)
+            .await
+            .unwrap();
+        // No anchor for the first closed tree.
+
+        append_leaf(&engine, 0x03).await;
+        let second = engine.tree_head();
+        engine
+            .rotate_tree(&engine.origin_id(), second.tree_size, &second.root_hash)
+            .await
+            .unwrap();
+        store_tsa_anchor(&engine, second.root_hash, second.tree_size).await;
+
+        let receipt = get_anchor(State(state_over(engine)), Path(entry_id))
+            .await
+            .expect("receipt must be served")
+            .0;
+
+        assert_eq!(receipt["proof"]["tree_size"], first.tree_size);
+        assert_eq!(
+            assert_served_receipt_is_single_state(&receipt),
+            0,
+            "the entry's own state has no timestamp, so no rfc3161 anchor may be served"
+        );
+        assert!(
+            receipt["upgrade_url"].is_string(),
+            "an unanchored state must advertise the upgrade path"
+        );
+    }
 }

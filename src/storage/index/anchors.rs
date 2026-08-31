@@ -347,6 +347,18 @@ impl IndexStore {
     ///
     /// Returns the RFC 3161 anchor with the smallest tree_size >= `tree_size`,
     /// or None if no such anchor exists.
+    ///
+    /// "Covering" orders by tree size, not by time: a smaller `tree_size` is
+    /// not evidence of an earlier timestamp on its own -- only the verified
+    /// time inside the returned token is.
+    ///
+    /// This must NOT be used to pick the anchor for a receipt. The anchor a
+    /// receipt carries has to commit to that receipt's own `proof.root_hash`
+    /// (ATL Protocol Section 5.5.1 step 2), and an anchor merely covering the
+    /// leaf can belong to a different tree state -- which produces a receipt
+    /// that fails verification. Receipt assembly selects the anchor by root
+    /// hash, via
+    /// [`get_tsa_anchor_with_token_for_hash`](Self::get_tsa_anchor_with_token_for_hash).
     pub fn get_tsa_anchor_covering(&self, tree_size: u64) -> rusqlite::Result<Option<Anchor>> {
         self.connection()
             .query_row(

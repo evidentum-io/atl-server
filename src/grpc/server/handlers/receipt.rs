@@ -115,7 +115,17 @@ pub async fn handle_get_receipt(
 
 /// Handle UpgradeReceipt request
 ///
-/// Upgrades a receipt with Bitcoin proof (Tier-2 evidence) if available.
+/// Re-issues the receipt for the entry. When the entry's Data Tree has been
+/// closed, appended to the Super-Tree and that Super Root has a confirmed
+/// Bitcoin anchor, the re-issued receipt carries `super_proof` plus both
+/// anchors (Receipt-Full, ATL Protocol Section 5.5.3); otherwise the caller
+/// is told the upgrade is still pending.
+///
+/// The receipt is produced entirely by `generate_receipt`, which binds
+/// every part of it to one tree state. Anchors are never appended here:
+/// an anchor added after the fact is not bound to the state the proof was
+/// built for, and Section 5.5.1 step 2 / Section 5.5.2 step 2 compare
+/// exactly that binding.
 pub async fn handle_upgrade_receipt(
     server: &SequencerGrpcServer,
     request: Request<UpgradeReceiptRequest>,
@@ -138,107 +148,48 @@ pub async fn handle_upgrade_receipt(
         .leaf_index
         .ok_or_else(|| Status::internal("entry has no leaf_index"))?;
 
-    let receipt_tree_size = leaf_index + 1;
+    let options = crate::receipt::ReceiptOptions {
+        include_anchors: true,
+        ..Default::default()
+    };
 
-    let bitcoin_anchor = find_bitcoin_anchor_covering(server, &entry_id)
-        .map_err(|e| Status::internal(e.to_string()))?;
-
-    match bitcoin_anchor {
-        Some(anchor) => {
-            let options = crate::receipt::ReceiptOptions {
-                at_tree_size: Some(receipt_tree_size),
-                include_anchors: true,
-                consistency_from: Some(receipt_tree_size),
-                ..Default::default()
-            };
-
-            let mut receipt = crate::receipt::generate_receipt(
-                &entry_id,
-                server.storage(),
-                server.signer(),
-                options,
-            )
+    let receipt =
+        crate::receipt::generate_receipt(&entry_id, server.storage(), server.signer(), options)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-            receipt
-                .anchors
-                .push(crate::receipt::convert_anchor_to_receipt(&anchor));
+    let has_bitcoin_anchor = receipt
+        .anchors
+        .iter()
+        .any(|a| matches!(a, atl_core::ReceiptAnchor::BitcoinOts { .. }));
 
-            let consistency_proof = server
-                .storage()
-                .get_consistency_proof(receipt_tree_size, anchor.tree_size)
-                .map_err(|e| Status::internal(e.to_string()))?;
+    if has_bitcoin_anchor {
+        let receipt_json =
+            serde_json::to_vec(&receipt).map_err(|e| Status::internal(e.to_string()))?;
 
-            receipt.proof.consistency_proof = Some(atl_core::ReceiptConsistencyProof {
-                from_tree_size: consistency_proof.from_size,
-                path: consistency_proof.path.iter().map(hex::encode).collect(),
-            });
-
-            let receipt_json =
-                serde_json::to_vec(&receipt).map_err(|e| Status::internal(e.to_string()))?;
-
-            Ok(Response::new(UpgradeReceiptResponse {
-                status: UpgradeStatus::Upgraded as i32,
-                upgraded_receipt_json: receipt_json,
-                receipt_tree_size: 0,
-                last_anchor_tree_size: 0,
-                estimated_completion_unix: 0,
-            }))
-        }
-        None => {
-            let last_anchor_tree_size = server
-                .storage()
-                .get_latest_anchored_size()
-                .map_err(|e| Status::internal(e.to_string()))?
-                .unwrap_or(0);
-
-            let estimated_completion = chrono::Utc::now() + chrono::Duration::hours(1);
-            let estimated_completion_unix =
-                estimated_completion.timestamp_nanos_opt().unwrap_or(0) as u64;
-
-            Ok(Response::new(UpgradeReceiptResponse {
-                status: UpgradeStatus::Pending as i32,
-                upgraded_receipt_json: vec![],
-                receipt_tree_size,
-                last_anchor_tree_size,
-                estimated_completion_unix,
-            }))
-        }
+        return Ok(Response::new(UpgradeReceiptResponse {
+            status: UpgradeStatus::Upgraded as i32,
+            upgraded_receipt_json: receipt_json,
+            receipt_tree_size: receipt.proof.tree_size,
+            last_anchor_tree_size: 0,
+            estimated_completion_unix: 0,
+        }));
     }
-}
 
-fn find_bitcoin_anchor_covering(
-    server: &SequencerGrpcServer,
-    entry_id: &uuid::Uuid,
-) -> crate::error::ServerResult<Option<crate::traits::anchor::Anchor>> {
-    // Get entry's tree info to find data_tree_index
-    let index_store = server.storage().index_store();
-    let index = tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(async { index_store.lock().await })
-    });
+    let last_anchor_tree_size = server
+        .storage()
+        .get_latest_anchored_size()
+        .map_err(|e| Status::internal(e.to_string()))?
+        .unwrap_or(0);
 
-    let entry = index
-        .get_entry(entry_id)
-        .map_err(|e| {
-            crate::error::ServerError::Storage(crate::error::StorageError::Database(e.to_string()))
-        })?
-        .ok_or_else(|| crate::error::ServerError::EntryNotFound(entry_id.to_string()))?;
+    let estimated_completion = chrono::Utc::now() + chrono::Duration::hours(1);
+    let estimated_completion_unix = estimated_completion.timestamp_nanos_opt().unwrap_or(0) as u64;
 
-    let tree_id = match entry.tree_id {
-        Some(id) => id,
-        None => return Ok(None), // Active tree, no OTS anchor possible
-    };
-
-    let data_tree_index = match index.get_tree_data_tree_index(tree_id).map_err(|e| {
-        crate::error::ServerError::Storage(crate::error::StorageError::Database(e.to_string()))
-    })? {
-        Some(idx) => idx,
-        None => return Ok(None), // Tree not in super tree yet
-    };
-
-    drop(index); // Release lock before calling storage method
-
-    // Query OTS anchor covering this data_tree_index
-    server.storage().get_ots_anchor_covering(data_tree_index)
+    Ok(Response::new(UpgradeReceiptResponse {
+        status: UpgradeStatus::Pending as i32,
+        upgraded_receipt_json: vec![],
+        receipt_tree_size: leaf_index + 1,
+        last_anchor_tree_size,
+        estimated_completion_unix,
+    }))
 }

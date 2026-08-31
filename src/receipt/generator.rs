@@ -152,22 +152,206 @@ impl std::fmt::Debug for CheckpointSigner {
     }
 }
 
-/// Generate a receipt for an entry (v2.0 with super_proof)
+/// One tree state, resolved once and shared by every part of a receipt.
+///
+/// ATL Protocol Section 5.2 (steps 3-4), Section 5.3 (step 2), Section
+/// 5.5.1 (step 2) and Section 5.5.2 (step 2) each compare a different part
+/// of the receipt against `proof.root_hash`. A receipt is therefore only
+/// verifiable when the inclusion path, the checkpoint and every anchor were
+/// built against one and the same tree size `N` and its root `root(N)`.
+#[derive(Debug, Clone, Copy)]
+struct ReceiptState {
+    /// `N` -- the tree size the whole receipt describes.
+    tree_size: u64,
+
+    /// `root(N)`, read back from the Merkle slab: the same structure the
+    /// inclusion path is generated from, so the two cannot disagree.
+    root_hash: [u8; 32],
+
+    /// Position of this state's Data Tree in the Super-Tree. Present only
+    /// when `N` is the end size of a closed tree that was appended to the
+    /// Super-Tree; `None` for an intermediate state, which is why an
+    /// intermediate state can never carry a `super_proof`.
+    data_tree_index: Option<u64>,
+}
+
+/// Resolve the single tree state a receipt for `entry_id` must describe.
+///
+/// The chosen `N` is the end size of the closed Data Tree the entry belongs
+/// to. Super-Tree leaves are the roots of *closed* Data Trees (ATL Protocol
+/// Section 3.3), so that state is the only one that can carry a
+/// `super_proof` and therefore the only one that can ever become a
+/// Receipt-Full. While the entry's tree is still open there is no frozen
+/// state yet, so `N` is the current head: an intermediate state that no
+/// RFC 3161 anchor covers and that is served as a Receipt-Lite.
+///
+/// `options.at_tree_size` overrides the choice for callers that ask for a
+/// specific state. No special-casing is needed for such a state: anchors
+/// and the Super-Tree position are both derived from `root(N)` below, so an
+/// arbitrary intermediate size simply yields a receipt with no anchor and
+/// no `super_proof` instead of a mismatched one.
+///
+/// # Errors
+/// * [`ServerError::EntryNotFound`] if the entry or its tree is missing
+/// * [`ServerError::LeafIndexOutOfBounds`] if the entry is not in state `N`
+/// * [`ServerError::ReceiptStateMismatch`] if the closed tree's recorded
+///   root disagrees with the Merkle root at `N`
+/// * [`ServerError::Storage`] for storage errors
+async fn resolve_receipt_state(
+    entry_id: &Uuid,
+    leaf_index: u64,
+    storage: &StorageEngine,
+    options: &ReceiptOptions,
+) -> ServerResult<ReceiptState> {
+    // Closed-tree bookkeeping: (end_size, recorded root, Super-Tree position).
+    let closed = {
+        let index_store = storage.index_store();
+        let index = index_store.lock().await;
+        let entry = index
+            .get_entry(entry_id)?
+            .ok_or_else(|| ServerError::EntryNotFound(entry_id.to_string()))?;
+
+        match entry.tree_id {
+            None => None,
+            Some(tree_id) => {
+                let tree = index
+                    .get_tree(tree_id)?
+                    .ok_or_else(|| ServerError::EntryNotFound(entry_id.to_string()))?;
+                match (tree.end_size, tree.root_hash) {
+                    (Some(end_size), Some(recorded_root)) => Some((
+                        end_size,
+                        recorded_root,
+                        index.get_tree_data_tree_index(tree_id)?,
+                    )),
+                    // Still open, or closed without a recorded root: there is
+                    // no frozen state to describe.
+                    _ => None,
+                }
+            }
+        }
+    };
+
+    let tree_size = options
+        .at_tree_size
+        .or_else(|| closed.map(|(end_size, _, _)| end_size))
+        .unwrap_or_else(|| storage.tree_head().tree_size);
+
+    if leaf_index >= tree_size {
+        return Err(ServerError::LeafIndexOutOfBounds {
+            index: leaf_index,
+            tree_size,
+        });
+    }
+
+    // The Merkle slab is the source of truth for `root(N)`: it is what the
+    // inclusion path is computed from, so binding the checkpoint and the
+    // anchors to it is what makes Section 5.2 step 3 and Section 5.3 step 2
+    // hold by construction.
+    let root_hash = storage.get_root_at_size(tree_size)?;
+
+    match closed {
+        Some((end_size, recorded_root, data_tree_index)) if end_size == tree_size => {
+            // The closed tree carries its own copy of the root. When that
+            // copy disagrees with the Merkle data, two of the server's own
+            // records contradict each other and there is no safe way to pick
+            // a winner: refuse rather than issue evidence that cannot verify.
+            if recorded_root != root_hash {
+                return Err(ServerError::ReceiptStateMismatch {
+                    tree_size,
+                    source_name: "closed tree record",
+                    found: hex::encode(recorded_root),
+                    expected: hex::encode(root_hash),
+                });
+            }
+            Ok(ReceiptState {
+                tree_size,
+                root_hash,
+                data_tree_index,
+            })
+        }
+        // Any other `N` is an intermediate state: it is not a root that was
+        // appended to the Super-Tree, so it has no Super-Tree position.
+        _ => Ok(ReceiptState {
+            tree_size,
+            root_hash,
+            data_tree_index: None,
+        }),
+    }
+}
+
+/// Find the RFC 3161 anchor that commits to exactly this state's root.
+///
+/// ATL Protocol Section 5.5.1 step 2 requires `anchor.target_hash` to equal
+/// `proof.root_hash`, so the anchor is selected *by that root hash*, not by
+/// any tree-size relation. A smaller `tree_size` is not by itself evidence
+/// of an earlier time -- only the verified time inside the token is -- and
+/// an anchor taken from a different tree state does not make a weaker
+/// receipt, it makes an invalid one.
+///
+/// The returned row is re-checked against `root(N)`. The lookup predicate
+/// and the re-checked field read the same column today, but a receipt's
+/// validity must not rest on one column having been written correctly: an
+/// anchor that does not commit to `root(N)` is refused, never quietly
+/// swapped for a different one.
+///
+/// Returning `Ok(None)` is not a failure: an entry whose state has not been
+/// timestamped yet is served as a Receipt-Lite (Section 5.5.3), with
+/// `upgrade_url` pointing at the state that will carry the anchor.
+///
+/// # Errors
+/// * [`ServerError::ReceiptStateMismatch`] if a returned anchor does not
+///   commit to `root(N)`
+/// * [`ServerError::Storage`] for storage errors
+async fn find_tsa_anchor_for_state(
+    storage: &StorageEngine,
+    state: &ReceiptState,
+) -> ServerResult<Option<crate::traits::anchor::Anchor>> {
+    let found = {
+        let index_store = storage.index_store();
+        let index = index_store.lock().await;
+        index.get_tsa_anchor_with_token_for_hash(&state.root_hash)?
+    };
+
+    let Some(found) = found else {
+        return Ok(None);
+    };
+
+    if found.anchor.anchored_hash != state.root_hash {
+        return Err(ServerError::ReceiptStateMismatch {
+            tree_size: state.tree_size,
+            source_name: "rfc3161 anchor",
+            found: hex::encode(found.anchor.anchored_hash),
+            expected: hex::encode(state.root_hash),
+        });
+    }
+
+    Ok(Some(found.anchor))
+}
+
+/// Generate a receipt for an entry (v2.0 with `super_proof`)
+///
+/// Every part of the returned receipt describes one tree state `N`
+/// (see [`ReceiptState`]): `proof.tree_size` is `N`, `proof.root_hash` and
+/// `checkpoint.root_hash` are `root(N)`, the inclusion path is computed at
+/// `N`, and an anchor is attached only when it commits to `root(N)`
+/// (RFC 3161, ATL Protocol Section 5.5.1 step 2) or to the Super-Tree root
+/// the `super_proof` carries (Bitcoin OTS, Section 5.5.2 step 2).
 ///
 /// # Arguments
 /// * `entry_id` - UUID of the entry
-/// * `storage` - StorageEngine with access to super_slabs
+/// * `storage` - `StorageEngine` with access to `super_slabs`
 /// * `signer` - Checkpoint signing key
 /// * `options` - Generation options
 ///
 /// # Returns
-/// * `Receipt` on success with super_proof
+/// * `Receipt` on success
 ///
 /// # Errors
 /// * `ServerError::EntryNotFound` if entry doesn't exist
 /// * `ServerError::EntryNotInTree` if entry not yet indexed
-/// * `ServerError::TreeNotClosed` if entry's tree not yet in Super-Tree
-/// * `ServerError::SuperTreeNotInitialized` if no trees closed yet
+/// * `ServerError::LeafIndexOutOfBounds` if the entry is not in state `N`
+/// * `ServerError::ReceiptStateMismatch` if the server's own records
+///   disagree about `root(N)`, in which case no receipt is issued
 /// * `ServerError::Storage` for storage errors
 #[allow(dead_code)]
 pub async fn generate_receipt(
@@ -184,69 +368,24 @@ pub async fn generate_receipt(
         .leaf_index
         .ok_or_else(|| ServerError::EntryNotInTree(entry_id.to_string()))?;
 
-    // 3. Determine tree_size and root_hash:
-    //    - For entries in closed trees: use the closed tree's end_size and root_hash
-    //    - For entries in the active tree: use the current tree_head
-    let (tree_size, root_hash) = {
-        // Look up the entry's tree_id via index_store (Entry trait type does not carry tree_id)
-        let index_entry = {
-            let index_store = storage.index_store();
-            let index = index_store.lock().await;
-            index
-                .get_entry(entry_id)?
-                .ok_or_else(|| ServerError::EntryNotFound(entry_id.to_string()))?
-        };
+    // 3. Resolve the one state the whole receipt will describe
+    let state = resolve_receipt_state(entry_id, leaf_index, storage, &options).await?;
 
-        if let Some(tree_id) = index_entry.tree_id {
-            // Entry belongs to a known tree — check if it is closed
-            let tree_record = {
-                let index_store = storage.index_store();
-                let index = index_store.lock().await;
-                index
-                    .get_tree(tree_id)?
-                    .ok_or_else(|| ServerError::EntryNotFound(entry_id.to_string()))?
-            };
+    // 4. Generate inclusion proof at that state
+    let inclusion_proof = storage.get_inclusion_proof(entry_id, Some(state.tree_size))?;
 
-            match (tree_record.end_size, tree_record.root_hash) {
-                (Some(end_size), Some(closed_root)) => {
-                    // Closed tree: receipt must use the frozen end_size and root_hash
-                    (end_size, closed_root)
-                }
-                _ => {
-                    // Active tree: fall back to the current tree_head
-                    let tree_head = storage.tree_head();
-                    (
-                        options.at_tree_size.unwrap_or(tree_head.tree_size),
-                        tree_head.root_hash,
-                    )
-                }
-            }
-        } else {
-            // No tree_id assigned yet (entry in active tree before any rotation)
-            let tree_head = storage.tree_head();
-            (
-                options.at_tree_size.unwrap_or(tree_head.tree_size),
-                tree_head.root_hash,
-            )
-        }
-    };
-
-    // Validate tree size
-    if leaf_index >= tree_size {
-        return Err(ServerError::LeafIndexOutOfBounds {
-            index: leaf_index,
-            tree_size,
-        });
-    }
-
-    // 4. Generate inclusion proof
-    let inclusion_proof = storage.get_inclusion_proof(entry_id, Some(tree_size))?;
-
-    // 5. Create and sign checkpoint
+    // 5. Create and sign the checkpoint for that state
+    //
+    // The timestamp is the moment of issue (Section 4.1, field 4: "the time
+    // the checkpoint was generated"), not a reconstructed time for `N`. The
+    // temporal claim about `N` is made by the RFC 3161 token, not by this
+    // signature, so a historical checkpoint is signed on the fly and never
+    // stored.
     let timestamp = options.timestamp.unwrap_or_else(current_timestamp_nanos);
     let origin = storage.origin_id();
 
-    let checkpoint = create_signed_checkpoint(origin, tree_size, root_hash, timestamp, signer);
+    let checkpoint =
+        create_signed_checkpoint(origin, state.tree_size, state.root_hash, timestamp, signer);
 
     let checkpoint_json = CheckpointJson {
         origin: format_hash(&checkpoint.origin),
@@ -257,53 +396,61 @@ pub async fn generate_receipt(
         key_id: format_hash(&checkpoint.key_id),
     };
 
-    // 6. Resolve data_tree_index (needed for OTS anchor selection before super_proof)
-    let data_tree_index = resolve_data_tree_index(entry_id, storage).await?;
-
-    // 7. Get covering anchors
-    let (filtered_anchors, ots_super_tree_size, has_confirmed_ots) = if options.include_anchors {
-        let mut result = Vec::new();
-
-        // TSA anchor: covers if tree_size >= leaf_index + 1
-        if let Some(tsa) = storage.get_tsa_anchor_covering(leaf_index + 1)? {
-            result.push(tsa);
-        }
-
-        // OTS anchor: only if data_tree_index is available.
-        // `get_ots_anchor_covering` already filters `status = 'confirmed'`
-        // at the SQL column level, so finding an anchor at all *is*
-        // "there is a confirmed OTS anchor" -- this must not be
-        // re-derived from `anchor.metadata.get("status")`, a redundant,
-        // historically-written copy of the same fact that carries no
-        // guarantee of being present or in sync with the source-of-truth
-        // `status` column (e.g. for anchors confirmed before that
-        // metadata field existed, or by any future insert path that
-        // forgets to set it).
-        let (ots_size, has_confirmed_ots) = if let Some(idx) = data_tree_index {
-            if let Some(ots) = storage.get_ots_anchor_covering(idx)? {
-                let size = ots.super_tree_size;
-                result.push(ots);
-                (size, true)
-            } else {
-                (None, false)
-            }
-        } else {
-            (None, false)
-        };
-
-        (result, ots_size, has_confirmed_ots)
-    } else {
-        (Vec::new(), None, false)
+    // 6. Super-Tree proof, then anchors.
+    //
+    // The order is load-bearing: a Bitcoin OTS anchor targets
+    // `super_proof.super_root` (Section 5.5.2 step 2), so it can only be
+    // attached to a receipt that actually carries a `super_proof`. The
+    // candidate anchor is looked up first only to pin the Super-Tree size
+    // the proof is built at, so that the proof matches the anchored root.
+    //
+    // `get_ots_anchor_covering` already filters `status = 'confirmed'` at
+    // the SQL column level, so finding an anchor at all *is* "there is a
+    // confirmed OTS anchor" -- this must not be re-derived from
+    // `anchor.metadata.get("status")`, a redundant, historically-written
+    // copy of the same fact that carries no guarantee of being present or
+    // in sync with the source-of-truth `status` column.
+    let ots_candidate = match (options.include_anchors, state.data_tree_index) {
+        (true, Some(data_tree_index)) => storage.get_ots_anchor_covering(data_tree_index)?,
+        _ => None,
     };
 
-    // 8. Generate super_proof at OTS anchor's super_tree_size (or current if no OTS anchor)
-    let super_proof = generate_super_proof(data_tree_index, storage, ots_super_tree_size).await?;
+    let super_proof = generate_super_proof(
+        &state,
+        storage,
+        ots_candidate
+            .as_ref()
+            .and_then(|anchor| anchor.super_tree_size),
+    )
+    .await?;
 
-    // 9. Generate upgrade_url logic
-    let has_super_proof = super_proof.is_some();
+    let mut anchors = Vec::new();
+    let mut has_confirmed_ots = false;
 
+    if options.include_anchors {
+        if let Some(tsa) = find_tsa_anchor_for_state(storage, &state).await? {
+            anchors.push(tsa);
+        }
+
+        if let (Some(ots), Some((_, super_root))) = (ots_candidate, super_proof.as_ref()) {
+            if ots.anchored_hash != *super_root {
+                return Err(ServerError::ReceiptStateMismatch {
+                    tree_size: state.tree_size,
+                    source_name: "bitcoin_ots anchor",
+                    found: hex::encode(ots.anchored_hash),
+                    expected: hex::encode(super_root),
+                });
+            }
+            anchors.push(ots);
+            has_confirmed_ots = true;
+        }
+    }
+
+    let super_proof = super_proof.map(|(proof, _)| proof);
+
+    // 7. Generate upgrade_url logic
     // upgrade_url: show when no super_proof OR no confirmed OTS
-    let upgrade_url = if !has_super_proof || !has_confirmed_ots {
+    let upgrade_url = if super_proof.is_none() || !has_confirmed_ots {
         options.upgrade_url_template.as_ref().map(|template| {
             // Support both {entry_id} and {} placeholders via sequential replace
             template
@@ -314,37 +461,42 @@ pub async fn generate_receipt(
         None
     };
 
-    // 10. Generate consistency proof (Split-View protection)
-    let consistency_proof = determine_consistency_proof(storage, tree_size, &options)?;
+    // 8. Generate consistency proof (Split-View protection)
+    let consistency_proof = determine_consistency_proof(storage, state.tree_size, &options)?;
 
-    // 11. Assemble receipt
+    // 9. Publish the entry's metadata document.
+    //
+    //    An absent metadata document is published as the empty object -- the
+    //    same value the HTTP ingress hashes into the leaf (`hash_metadata`)
+    //    and the value Section 4.2 shows in the schema. Publishing `null`
+    //    instead made the verifier canonicalize a different document than the
+    //    one the tree committed to, so Section 5.1 step 4 could never pass
+    //    for an entry anchored without metadata.
+    let published_metadata = entry
+        .metadata_cleartext
+        .clone()
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    // 10. Assemble receipt
     Ok(Receipt {
         spec_version: "2.0.0".to_string(),
         upgrade_url,
         entry: ReceiptEntry {
             id: entry.id,
             payload_hash: format_hash(&entry.payload_hash),
-            metadata_hash: format_hash(&canonicalize_and_hash(
-                &entry
-                    .metadata_cleartext
-                    .clone()
-                    .unwrap_or(serde_json::json!({})),
-            )),
-            metadata: entry.metadata_cleartext.unwrap_or(serde_json::Value::Null),
+            metadata_hash: format_hash(&canonicalize_and_hash(&published_metadata)),
+            metadata: published_metadata,
         },
         proof: ReceiptProof {
-            tree_size,
-            root_hash: format_hash(&root_hash),
+            tree_size: state.tree_size,
+            root_hash: format_hash(&state.root_hash),
             inclusion_path: inclusion_proof.path.iter().map(format_hash).collect(),
             leaf_index,
             checkpoint: checkpoint_json,
             consistency_proof,
         },
         super_proof,
-        anchors: filtered_anchors
-            .iter()
-            .map(convert_anchor_to_receipt)
-            .collect(),
+        anchors: anchors.iter().map(convert_anchor_to_receipt).collect(),
     })
 }
 
@@ -376,91 +528,61 @@ fn create_signed_checkpoint(
     checkpoint
 }
 
-/// Resolve the data_tree_index for an entry (if it belongs to a closed tree in the Super-Tree).
+/// Generate the Super-Tree proof for a receipt state.
+///
+/// A `super_proof` is only meaningful for a state whose root is a
+/// Super-Tree leaf, i.e. the root of a *closed* Data Tree (ATL Protocol
+/// Section 3.3). For any intermediate state `state.data_tree_index` is
+/// `None` and this returns `Ok(None)`, which is what keeps an intermediate
+/// receipt at the Receipt-TSA tier instead of emitting a `super_proof` that
+/// Section 5.4.1 could not verify.
 ///
 /// # Arguments
-/// * `entry_id` - UUID of the entry
-/// * `storage` - StorageEngine with access to index_store
+/// * `state` - The one state the receipt describes
+/// * `storage` - `StorageEngine` with access to `super_slabs` and `index_store`
+/// * `target_super_tree_size` - If `Some`, build the proof at this exact
+///   `super_tree_size` (used to match the OTS anchor's size). If `None`,
+///   uses the current `super_tree_size`.
 ///
 /// # Returns
-/// * `Ok(Some(idx))` - Entry's tree is closed and has a position in the Super-Tree
-/// * `Ok(None)` - Entry is in the active tree or its tree is not yet in the Super-Tree
+/// * `Ok(Some((proof, super_root)))` - state's tree is in the Super-Tree
+/// * `Ok(None)` - state has no Super-Tree position
 ///
 /// # Errors
-/// * `ServerError::EntryNotFound` if entry doesn't exist in index
-/// * `ServerError::Storage` for storage errors
-async fn resolve_data_tree_index(
-    entry_id: &Uuid,
-    storage: &StorageEngine,
-) -> ServerResult<Option<u64>> {
-    // 1. Get entry's tree info
-    let entry = {
-        let index_store = storage.index_store();
-        let index = index_store.lock().await;
-        index
-            .get_entry(entry_id)?
-            .ok_or_else(|| ServerError::EntryNotFound(entry_id.to_string()))?
-    };
-
-    // 2. Check if entry has tree_id
-    let tree_id = match entry.tree_id {
-        Some(id) => id,
-        None => return Ok(None),
-    };
-
-    // 3. Check if tree has data_tree_index
-    let index_store = storage.index_store();
-    let index = index_store.lock().await;
-    Ok(index.get_tree_data_tree_index(tree_id)?)
-}
-
-/// Generate SuperProof for an entry (uses super_slabs directly)
-///
-/// # Arguments
-/// * `data_tree_index` - The index of the entry's data tree in the Super-Tree. `None` means
-///   the entry's tree is still active (not yet closed into the Super-Tree), in which case
-///   `Ok(None)` is returned immediately without any storage access.
-/// * `storage` - StorageEngine with access to super_slabs and index_store
-/// * `target_super_tree_size` - If `Some`, build the proof at this exact super_tree_size
-///   (used to match the OTS anchor's size). If `None`, uses the current super_tree_size.
-///
-/// # Returns
-/// * `Ok(Some(proof))` - Entry's tree is closed and in Super-Tree
-/// * `Ok(None)` - Entry's tree is active (not yet in Super-Tree)
-/// * `Err(...)` - Only for real errors (DB failure, etc.)
-///
-/// # Errors
+/// * [`ServerError::ReceiptStateMismatch`] if the Super-Tree leaf at
+///   `data_tree_index` is not `root(N)`
 /// * `ServerError::Storage` for storage errors
 async fn generate_super_proof(
-    data_tree_index: Option<u64>,
+    state: &ReceiptState,
     storage: &StorageEngine,
     target_super_tree_size: Option<u64>,
-) -> ServerResult<Option<atl_core::SuperProof>> {
-    let data_tree_index = match data_tree_index {
-        Some(idx) => idx,
-        None => return Ok(None),
+) -> ServerResult<Option<(atl_core::SuperProof, [u8; 32])>> {
+    let Some(data_tree_index) = state.data_tree_index else {
+        return Ok(None);
     };
 
-    // 4. Get Super-Tree state
-    let (genesis_super_root, super_tree_size) = {
+    // The audit copy of the genesis root is read first and on its own, so no
+    // task ever holds the Super-Tree lock while waiting for the index lock.
+    let recorded_genesis = {
         let index_store = storage.index_store();
         let index = index_store.lock().await;
-        let genesis = match index.get_super_genesis_root()? {
-            Some(g) => g,
-            None => {
-                // Super-Tree not initialized (should not happen after first tree close)
-                tracing::warn!("Super-Tree genesis root not found");
-                return Ok(None);
-            }
-        };
-        let size = match target_super_tree_size {
-            Some(target) => target,
-            None => index.get_super_tree_size()?,
-        };
-        (genesis, size)
+        index.get_super_genesis_root()?
     };
 
-    // 5. Validate data_tree_index is within bounds
+    let super_slab = storage.super_slab().read().await;
+
+    // The Super-Tree's own leaf count is the source of truth for its size:
+    // `rotate_tree` appends to the slab first and only then writes the SQLite
+    // copy, explicitly as a best-effort audit record, so the slab is the one
+    // that cannot lag.
+    let super_tree_size = target_super_tree_size.unwrap_or_else(|| super_slab.leaf_count());
+
+    if super_tree_size == 0 {
+        // Super-Tree not initialized (no Data Tree closed yet)
+        return Ok(None);
+    }
+
+    // Validate data_tree_index is within bounds
     if data_tree_index >= super_tree_size {
         // Data corruption or race condition
         tracing::error!(
@@ -471,40 +593,87 @@ async fn generate_super_proof(
         return Ok(None);
     }
 
-    // 6. Get inclusion proof (direct PinnedSuperTreeSlab call)
-    let inclusion_path = {
-        let super_slab = storage.super_slab().read().await;
-        super_slab
-            .get_inclusion_path(data_tree_index, super_tree_size)
-            .map_err(|e| ServerError::Storage(crate::error::StorageError::Io(e)))?
-    };
+    // `genesis_super_root` is "the immutable identifier for the log instance"
+    // (Section 3.3.2), and Section 5.4.2 feeds it to the verifier as the root
+    // at Super-Tree size 1 in a consistency check that Receipt-Full MUST
+    // pass. It is therefore computed from the Super-Tree itself -- the same
+    // data the verifier's recomputation runs over -- and never taken from the
+    // SQLite copy, whose write path is best-effort by construction and which
+    // would hand a client a Receipt-Full that fails at Section 5.4.2.
+    let genesis_super_root = super_slab
+        .get_root(1)
+        .map_err(|e| ServerError::Storage(crate::error::StorageError::Io(e)))?;
 
-    // 5. Get super_root
-    let super_root = {
-        let super_slab = storage.super_slab().read().await;
-        super_slab
-            .get_root(super_tree_size)
-            .map_err(|e| ServerError::Storage(crate::error::StorageError::Io(e)))?
-    };
+    // The audit copy is read to be checked, not to be trusted. The genesis is
+    // immutable by definition, so a stored value that differs is not
+    // staleness -- it is a corrupted record of the log's identity, and no
+    // receipt is issued while the server's two records of that identity
+    // disagree. A missing copy is the known best-effort failure mode and is
+    // only worth a warning.
+    match recorded_genesis {
+        Some(recorded) if recorded != genesis_super_root => {
+            return Err(ServerError::ReceiptStateMismatch {
+                tree_size: state.tree_size,
+                source_name: "super-tree genesis root",
+                found: hex::encode(recorded),
+                expected: hex::encode(genesis_super_root),
+            });
+        }
+        Some(_) => {}
+        None => tracing::warn!(
+            "super_genesis_root audit record missing; using the Super-Tree root at size 1"
+        ),
+    }
 
-    // 6. Get consistency proof to origin (from size 1 to current)
-    let consistency_path = {
-        let super_slab = storage.super_slab().read().await;
+    // Section 5.4.1 step 1: the verifier recomputes the Super Root from
+    // `proof.root_hash` placed at `data_tree_index`. If the leaf actually
+    // stored there is a different root, that recomputation cannot succeed,
+    // so the proof must not be issued at all.
+    match super_slab.get_node(0, data_tree_index) {
+        Some(leaf) if leaf == state.root_hash => {}
+        Some(leaf) => {
+            return Err(ServerError::ReceiptStateMismatch {
+                tree_size: state.tree_size,
+                source_name: "super-tree leaf",
+                found: hex::encode(leaf),
+                expected: hex::encode(state.root_hash),
+            });
+        }
+        None => {
+            tracing::error!(
+                data_tree_index = data_tree_index,
+                "Super-Tree leaf missing for data_tree_index"
+            );
+            return Ok(None);
+        }
+    }
+
+    let inclusion_path = super_slab
+        .get_inclusion_path(data_tree_index, super_tree_size)
+        .map_err(|e| ServerError::Storage(crate::error::StorageError::Io(e)))?;
+
+    let super_root = super_slab
+        .get_root(super_tree_size)
+        .map_err(|e| ServerError::Storage(crate::error::StorageError::Io(e)))?;
+
+    // Consistency proof to origin (from size 1 to super_tree_size)
+    let consistency_path =
         atl_core::generate_consistency_proof(1, super_tree_size, |level, index| {
             super_slab.get_node(level, index)
         })?
-        .path
-    };
+        .path;
 
-    // 7. Assemble atl_core::SuperProof (uses existing type)
-    Ok(Some(atl_core::SuperProof {
-        genesis_super_root: format_hash(&genesis_super_root),
-        data_tree_index,
-        super_tree_size,
-        super_root: format_hash(&super_root),
-        inclusion: inclusion_path.iter().map(format_hash).collect(),
-        consistency_to_origin: consistency_path.iter().map(format_hash).collect(),
-    }))
+    Ok(Some((
+        atl_core::SuperProof {
+            genesis_super_root: format_hash(&genesis_super_root),
+            data_tree_index,
+            super_tree_size,
+            super_root: format_hash(&super_root),
+            inclusion: inclusion_path.iter().map(format_hash).collect(),
+            consistency_to_origin: consistency_path.iter().map(format_hash).collect(),
+        },
+        super_root,
+    )))
 }
 
 /// Build an immediate receipt from dispatch result
@@ -570,16 +739,20 @@ pub fn build_immediate_receipt(
     // Generate upgrade URL (REQUIRED for immediate receipts)
     let upgrade_url = Some(format!("{}/v1/anchor/{}", base_url, entry_id));
 
+    let published_metadata = metadata.unwrap_or_else(|| serde_json::json!({}));
+
     Ok(Receipt {
         spec_version: "2.0.0".to_string(),
         upgrade_url,
         entry: ReceiptEntry {
+            // An absent metadata document is published as the empty object,
+            // matching what `hash_metadata` hashed into the leaf and what
+            // Section 4.2 shows in the schema, so that Section 5.1 step 4 can
+            // pass for an entry anchored without metadata.
             id: entry_id,
             payload_hash: format_hash(&payload_hash),
-            metadata_hash: format_hash(&canonicalize_and_hash(
-                &metadata.clone().unwrap_or(serde_json::json!({})),
-            )),
-            metadata: metadata.unwrap_or(serde_json::Value::Null),
+            metadata_hash: format_hash(&canonicalize_and_hash(&published_metadata)),
+            metadata: published_metadata,
         },
         proof: ReceiptProof {
             tree_size,
@@ -878,14 +1051,16 @@ mod tests {
         let batch = engine.append_batch(params).await.unwrap();
         let entry_id = batch.entries[0].id;
 
-        // Store a confirmed TSA anchor covering tree_size=1
+        // Store a confirmed TSA anchor committing to root(1) -- the root the
+        // receipt will be built against.
+        let anchored_root = engine.tree_head().root_hash;
         {
             let index_store = engine.index_store();
             let index = index_store.lock().await;
             let anchor = Anchor {
                 anchor_type: AnchorType::Rfc3161,
                 target: "data_tree_root".to_string(),
-                anchored_hash: [0u8; 32],
+                anchored_hash: anchored_root,
                 tree_size: 1,
                 super_tree_size: None,
                 timestamp: 1_000_000,
@@ -1118,7 +1293,7 @@ mod tests {
             let anchor = Anchor {
                 anchor_type: AnchorType::BitcoinOts,
                 target: "super_root".to_string(),
-                anchored_hash: [0xAAu8; 32],
+                anchored_hash: rotation.super_root,
                 tree_size: 0,
                 super_tree_size: Some(ots_super_tree_size),
                 timestamp: 1_000_000,
@@ -1191,7 +1366,7 @@ mod tests {
             let anchor = Anchor {
                 anchor_type: AnchorType::BitcoinOts,
                 target: "super_root".to_string(),
-                anchored_hash: [0xBBu8; 32],
+                anchored_hash: rotation.super_root,
                 tree_size: 0,
                 super_tree_size: Some(ots_super_tree_size),
                 timestamp: 1_000_000,
@@ -1220,6 +1395,537 @@ mod tests {
             receipt.upgrade_url.is_none(),
             "a column-confirmed OTS anchor must suppress upgrade_url even when \
              metadata.status is absent/out of sync"
+        );
+    }
+
+    // =====================================================================
+    // Receipt state consistency (ATL Protocol Section 5.2 steps 3-4,
+    // Section 5.3 step 2, Section 5.5.1 step 2, Section 5.5.2 step 2)
+    // =====================================================================
+
+    /// Assert the receipt describes exactly one tree state: the checkpoint,
+    /// the inclusion proof and every anchor must all commit to the same root.
+    fn assert_single_state(receipt: &atl_core::Receipt) {
+        assert_eq!(
+            receipt.proof.checkpoint.tree_size, receipt.proof.tree_size,
+            "checkpoint.tree_size must equal proof.tree_size"
+        );
+        assert_eq!(
+            receipt.proof.checkpoint.root_hash, receipt.proof.root_hash,
+            "checkpoint.root_hash must equal proof.root_hash"
+        );
+
+        for anchor in &receipt.anchors {
+            match anchor {
+                atl_core::ReceiptAnchor::Rfc3161 {
+                    target,
+                    target_hash,
+                    ..
+                } => {
+                    assert_eq!(target, "data_tree_root");
+                    assert_eq!(
+                        target_hash, &receipt.proof.root_hash,
+                        "rfc3161 anchor.target_hash must equal proof.root_hash"
+                    );
+                }
+                atl_core::ReceiptAnchor::BitcoinOts {
+                    target,
+                    target_hash,
+                    ..
+                } => {
+                    assert_eq!(target, "super_root");
+                    let super_proof = receipt
+                        .super_proof
+                        .as_ref()
+                        .expect("a bitcoin_ots anchor requires a super_proof to target");
+                    assert_eq!(
+                        target_hash, &super_proof.super_root,
+                        "bitcoin_ots anchor.target_hash must equal super_proof.super_root"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Helper: store a confirmed RFC 3161 anchor committing to `root`.
+    async fn store_tsa_anchor(engine: &StorageEngine, root: &[u8; 32], tree_size: u64) {
+        use crate::traits::anchor::{Anchor, AnchorType};
+        let index_store = engine.index_store();
+        let index = index_store.lock().await;
+        index
+            .store_anchor_returning_id(
+                tree_size,
+                &Anchor {
+                    anchor_type: AnchorType::Rfc3161,
+                    target: "data_tree_root".to_string(),
+                    anchored_hash: *root,
+                    tree_size,
+                    super_tree_size: None,
+                    timestamp: 1_000_000,
+                    token: vec![],
+                    metadata: serde_json::json!({"tsa_url": "https://tsa.example.com"}),
+                },
+                "confirmed",
+            )
+            .unwrap();
+    }
+
+    /// Helper: close the active tree at the current head, returning the
+    /// closed state (end size and root).
+    async fn close_tree(engine: &StorageEngine) -> (u64, [u8; 32]) {
+        let origin = engine.origin_id();
+        let head = engine.tree_head();
+        engine
+            .rotate_tree(&origin, head.tree_size, &head.root_hash)
+            .await
+            .unwrap();
+        (head.tree_size, head.root_hash)
+    }
+
+    /// Regression for the production defect: an entry whose leaf index sits
+    /// below an already anchored tree size must not be handed that anchor
+    /// when its receipt describes a different state.
+    ///
+    /// The entry's own Data Tree was closed but never timestamped, while a
+    /// later tree was. Selecting "the smallest confirmed anchor whose
+    /// tree_size still covers this leaf" hands the later tree's anchor to
+    /// this receipt, so `anchor.target_hash` and `proof.root_hash` name two
+    /// different tree states and Section 5.5.1 step 2 rejects the receipt.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_unanchored_tree_does_not_borrow_a_later_anchor() {
+        let (engine, _dir) = make_engine([20u8; 32]).await;
+
+        let entry_id = append_one(&engine, 0x01).await;
+        append_one(&engine, 0x02).await;
+        let (size_a, root_a) = close_tree(&engine).await;
+        // Deliberately no anchor for tree A.
+
+        append_one(&engine, 0x03).await;
+        append_one(&engine, 0x04).await;
+        let (size_b, root_b) = close_tree(&engine).await;
+        store_tsa_anchor(&engine, &root_b, size_b).await;
+
+        assert_ne!(root_a, root_b);
+        assert!(size_a < size_b);
+
+        let signer = CheckpointSigner::from_bytes(&[20u8; 32]);
+        let receipt = generate_receipt(&entry_id, &engine, &signer, opts_with_anchors())
+            .await
+            .expect("receipt for an unanchored closed tree is a Receipt-Lite, not an error");
+
+        assert_eq!(
+            receipt.proof.tree_size, size_a,
+            "receipt must describe the entry's own closed tree"
+        );
+        assert_eq!(receipt.proof.root_hash, format_hash(&root_a));
+        assert!(
+            !receipt
+                .anchors
+                .iter()
+                .any(|a| matches!(a, atl_core::ReceiptAnchor::Rfc3161 { .. })),
+            "tree A has no timestamp; tree B's anchor must not be attached"
+        );
+        assert_single_state(&receipt);
+    }
+
+    /// Regression for the production shape: the proof is built against the
+    /// current head while an anchor for an earlier, smaller tree size still
+    /// "covers" this leaf index.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_head_state_does_not_borrow_an_earlier_anchor() {
+        let (engine, _dir) = make_engine([21u8; 32]).await;
+
+        let entry_id = append_one(&engine, 0x01).await;
+        append_one(&engine, 0x02).await;
+        let (anchored_size, anchored_root) = close_tree(&engine).await;
+        store_tsa_anchor(&engine, &anchored_root, anchored_size).await;
+
+        append_one(&engine, 0x03).await;
+        append_one(&engine, 0x04).await;
+        append_one(&engine, 0x05).await;
+
+        // Detach the entry from its closed tree so the receipt state falls
+        // back to the current head, which is what the affected production
+        // receipts show: leaf index below the anchored size, proof against a
+        // later root.
+        {
+            let index_store = engine.index_store();
+            let index = index_store.lock().await;
+            index
+                .connection()
+                .execute(
+                    "UPDATE entries SET tree_id = NULL WHERE id = ?1",
+                    rusqlite::params![entry_id.to_string()],
+                )
+                .unwrap();
+        }
+
+        let head = engine.tree_head();
+        assert!(head.tree_size > anchored_size);
+        assert_ne!(head.root_hash, anchored_root);
+
+        let signer = CheckpointSigner::from_bytes(&[21u8; 32]);
+        let receipt = generate_receipt(&entry_id, &engine, &signer, opts_with_anchors())
+            .await
+            .expect("receipt generation must succeed");
+
+        assert_eq!(receipt.proof.tree_size, head.tree_size);
+        assert_eq!(receipt.proof.root_hash, format_hash(&head.root_hash));
+        assert!(
+            receipt.anchors.is_empty(),
+            "no anchor commits to the head root, so none may be attached"
+        );
+        assert_single_state(&receipt);
+    }
+
+    /// Every leaf, wherever it sits relative to the anchored tree sizes,
+    /// yields a receipt whose anchor, proof and checkpoint name one state.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_single_state_holds_for_every_leaf_position() {
+        let (engine, _dir) = make_engine([22u8; 32]).await;
+
+        let mut entries = Vec::new();
+        for seed in 0..3u8 {
+            entries.push(append_one(&engine, seed).await);
+        }
+        let (size_a, root_a) = close_tree(&engine).await;
+        store_tsa_anchor(&engine, &root_a, size_a).await;
+
+        for seed in 3..6u8 {
+            entries.push(append_one(&engine, seed).await);
+        }
+        let (size_b, root_b) = close_tree(&engine).await;
+        store_tsa_anchor(&engine, &root_b, size_b).await;
+
+        // Tail entries still in the open tree.
+        for seed in 6..8u8 {
+            entries.push(append_one(&engine, seed).await);
+        }
+
+        let signer = CheckpointSigner::from_bytes(&[22u8; 32]);
+        for (leaf_index, entry_id) in entries.iter().enumerate() {
+            let receipt = generate_receipt(entry_id, &engine, &signer, opts_with_anchors())
+                .await
+                .unwrap_or_else(|e| panic!("leaf {leaf_index}: {e}"));
+
+            assert_single_state(&receipt);
+            assert_eq!(receipt.proof.leaf_index, leaf_index as u64);
+
+            let expected_root = if (leaf_index as u64) < size_a {
+                format_hash(&root_a)
+            } else if (leaf_index as u64) < size_b {
+                format_hash(&root_b)
+            } else {
+                format_hash(&engine.tree_head().root_hash)
+            };
+            assert_eq!(
+                receipt.proof.root_hash, expected_root,
+                "leaf {leaf_index} must be proved against its own tree state"
+            );
+
+            let has_tsa = receipt
+                .anchors
+                .iter()
+                .any(|a| matches!(a, atl_core::ReceiptAnchor::Rfc3161 { .. }));
+            assert_eq!(
+                has_tsa,
+                (leaf_index as u64) < size_b,
+                "leaf {leaf_index}: only closed, anchored states carry a TSA anchor"
+            );
+        }
+    }
+
+    /// A leaf that lands exactly on the boundary -- the last leaf of a tree
+    /// whose end size is the anchored size -- carries that tree's anchor.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_leaf_on_anchored_boundary_carries_its_own_anchor() {
+        let (engine, _dir) = make_engine([23u8; 32]).await;
+
+        append_one(&engine, 0x01).await;
+        let boundary_entry = append_one(&engine, 0x02).await; // leaf_index + 1 == end size
+        let (size_a, root_a) = close_tree(&engine).await;
+        store_tsa_anchor(&engine, &root_a, size_a).await;
+
+        append_one(&engine, 0x03).await;
+
+        let signer = CheckpointSigner::from_bytes(&[23u8; 32]);
+        let receipt = generate_receipt(&boundary_entry, &engine, &signer, opts_with_anchors())
+            .await
+            .expect("receipt generation must succeed");
+
+        assert_eq!(receipt.proof.leaf_index + 1, size_a);
+        assert_eq!(receipt.proof.tree_size, size_a);
+        assert!(
+            receipt
+                .anchors
+                .iter()
+                .any(|a| matches!(a, atl_core::ReceiptAnchor::Rfc3161 { .. })),
+            "the boundary leaf's own state is anchored, so the anchor belongs on the receipt"
+        );
+        assert_single_state(&receipt);
+    }
+
+    /// An intermediate state is not a Super-Tree leaf, so it must never
+    /// carry a `super_proof` (Section 3.3, Section 5.4.1 step 1).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_intermediate_state_carries_no_super_proof() {
+        let (engine, _dir) = make_engine([24u8; 32]).await;
+
+        let entry_id = append_one(&engine, 0x01).await;
+        append_one(&engine, 0x02).await;
+        append_one(&engine, 0x03).await;
+        let (size_a, root_a) = close_tree(&engine).await;
+        store_tsa_anchor(&engine, &root_a, size_a).await;
+
+        let signer = CheckpointSigner::from_bytes(&[24u8; 32]);
+
+        // The closed state does carry a super_proof.
+        let closed_receipt = generate_receipt(&entry_id, &engine, &signer, opts_with_anchors())
+            .await
+            .unwrap();
+        assert!(closed_receipt.super_proof.is_some());
+        assert_single_state(&closed_receipt);
+
+        // The same entry asked for at an intermediate size does not.
+        let mut options = opts_with_anchors();
+        options.at_tree_size = Some(1);
+        let intermediate = generate_receipt(&entry_id, &engine, &signer, options)
+            .await
+            .unwrap();
+
+        assert_eq!(intermediate.proof.tree_size, 1);
+        assert!(
+            intermediate.super_proof.is_none(),
+            "an intermediate root is not a Super-Tree leaf"
+        );
+        assert!(
+            intermediate.anchors.is_empty(),
+            "no anchor commits to an intermediate root"
+        );
+        assert_single_state(&intermediate);
+    }
+
+    /// A closed tree whose recorded root disagrees with the Merkle root at
+    /// its end size must produce a refusal, not a receipt.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_refuses_when_closed_tree_root_disagrees_with_merkle_root() {
+        let (engine, _dir) = make_engine([25u8; 32]).await;
+
+        let entry_id = append_one(&engine, 0x01).await;
+        append_one(&engine, 0x02).await;
+        let (_size_a, root_a) = close_tree(&engine).await;
+        store_tsa_anchor(&engine, &root_a, 2).await;
+
+        // Corrupt the bookkeeping copy of the root.
+        {
+            let index_store = engine.index_store();
+            let index = index_store.lock().await;
+            index
+                .connection()
+                .execute(
+                    "UPDATE trees SET root_hash = ?1 WHERE root_hash = ?2",
+                    rusqlite::params![[0x99u8; 32].as_slice(), root_a.as_slice()],
+                )
+                .unwrap();
+        }
+
+        let signer = CheckpointSigner::from_bytes(&[25u8; 32]);
+        let err = generate_receipt(&entry_id, &engine, &signer, opts_with_anchors())
+            .await
+            .expect_err("a receipt must not be issued from contradictory records");
+
+        match err {
+            ServerError::ReceiptStateMismatch { source_name, .. } => {
+                assert_eq!(source_name, "closed tree record");
+            }
+            other => panic!("expected ReceiptStateMismatch, got {other:?}"),
+        }
+    }
+
+    /// A confirmed OTS anchor that does not commit to the Super Root the
+    /// receipt carries must produce a refusal (Section 5.5.2 step 2).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_refuses_when_ots_anchor_does_not_commit_to_super_root() {
+        use crate::traits::anchor::{Anchor, AnchorType};
+
+        let (engine, _dir) = make_engine([26u8; 32]).await;
+
+        let entry_id = append_one(&engine, 0x01).await;
+        let origin = engine.origin_id();
+        let head = engine.tree_head();
+        let rotation = engine
+            .rotate_tree(&origin, head.tree_size, &head.root_hash)
+            .await
+            .unwrap();
+
+        {
+            let index_store = engine.index_store();
+            let index = index_store.lock().await;
+            index
+                .store_anchor_returning_id(
+                    0,
+                    &Anchor {
+                        anchor_type: AnchorType::BitcoinOts,
+                        target: "super_root".to_string(),
+                        anchored_hash: [0x77u8; 32],
+                        tree_size: 0,
+                        super_tree_size: Some(rotation.data_tree_index + 1),
+                        timestamp: 1_000_000,
+                        token: vec![],
+                        metadata: serde_json::json!({}),
+                    },
+                    "confirmed",
+                )
+                .unwrap();
+        }
+
+        let signer = CheckpointSigner::from_bytes(&[26u8; 32]);
+        let err = generate_receipt(&entry_id, &engine, &signer, opts_with_anchors())
+            .await
+            .expect_err("an OTS anchor for a foreign Super Root must be refused");
+
+        match err {
+            ServerError::ReceiptStateMismatch { source_name, .. } => {
+                assert_eq!(source_name, "bitcoin_ots anchor");
+            }
+            other => panic!("expected ReceiptStateMismatch, got {other:?}"),
+        }
+    }
+
+    /// A Data Tree whose recorded Super-Tree position holds a different root
+    /// must produce a refusal: the verifier's recomputation in Section 5.4.1
+    /// step 1 could not succeed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_refuses_when_super_tree_leaf_is_not_the_state_root() {
+        let (engine, _dir) = make_engine([27u8; 32]).await;
+
+        let entry_id = append_one(&engine, 0x01).await;
+        close_tree(&engine).await;
+        append_one(&engine, 0x02).await;
+        close_tree(&engine).await;
+
+        // Point the first closed tree at the second tree's Super-Tree leaf.
+        {
+            let index_store = engine.index_store();
+            let index = index_store.lock().await;
+            let conn = index.connection();
+            conn.execute(
+                "UPDATE trees SET data_tree_index = 9 WHERE data_tree_index = 1",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE trees SET data_tree_index = 1 WHERE data_tree_index = 0",
+                [],
+            )
+            .unwrap();
+        }
+
+        let signer = CheckpointSigner::from_bytes(&[27u8; 32]);
+        let err = generate_receipt(&entry_id, &engine, &signer, opts_no_anchors())
+            .await
+            .expect_err("a super_proof that cannot verify must not be issued");
+
+        match err {
+            ServerError::ReceiptStateMismatch { source_name, .. } => {
+                assert_eq!(source_name, "super-tree leaf");
+            }
+            other => panic!("expected ReceiptStateMismatch, got {other:?}"),
+        }
+    }
+
+    /// `genesis_super_root` is the log instance's immutable identity
+    /// (Section 3.3.2) and the verifier feeds it into the mandatory
+    /// consistency check of Section 5.4.2. It is computed from the Super-Tree
+    /// itself, so a foreign value in the SQLite audit copy can never reach a
+    /// receipt -- and, because the genesis cannot legitimately change, that
+    /// disagreement is refused rather than ignored.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_refuses_when_stored_genesis_super_root_is_foreign() {
+        let (engine, _dir) = make_engine([28u8; 32]).await;
+
+        let entry_id = append_one(&engine, 0x01).await;
+        close_tree(&engine).await;
+
+        // Well-formed but foreign: 32 bytes, right key, wrong log.
+        // `set_super_genesis_root` is INSERT OR IGNORE (write-once), so the
+        // row is overwritten directly, the way a corrupted or hand-edited
+        // database would present.
+        {
+            let index_store = engine.index_store();
+            let index = index_store.lock().await;
+            assert!(
+                index.get_super_genesis_root().unwrap().is_some(),
+                "rotation must have written the audit copy for this test to mean anything"
+            );
+            index
+                .connection()
+                .execute(
+                    "UPDATE atl_config SET value = ?1 WHERE key = 'super_genesis_root'",
+                    rusqlite::params![hex::encode([0x5Au8; 32])],
+                )
+                .unwrap();
+        }
+
+        let signer = CheckpointSigner::from_bytes(&[28u8; 32]);
+        let err = generate_receipt(&entry_id, &engine, &signer, opts_no_anchors())
+            .await
+            .expect_err("a foreign genesis root must not be served in a receipt");
+
+        match err {
+            ServerError::ReceiptStateMismatch {
+                source_name,
+                found,
+                expected,
+                ..
+            } => {
+                assert_eq!(source_name, "super-tree genesis root");
+                assert_eq!(found, hex::encode([0x5Au8; 32]));
+                assert_ne!(found, expected);
+            }
+            other => panic!("expected ReceiptStateMismatch, got {other:?}"),
+        }
+    }
+
+    /// The Super-Tree's own root at size 1 is what the receipt publishes, not
+    /// the SQLite copy: a receipt built while the audit copy is missing (the
+    /// documented best-effort failure) still carries the correct identity.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_genesis_super_root_comes_from_the_super_tree() {
+        let (engine, _dir) = make_engine([29u8; 32]).await;
+
+        let entry_id = append_one(&engine, 0x01).await;
+        close_tree(&engine).await;
+        append_one(&engine, 0x02).await;
+        close_tree(&engine).await;
+
+        let expected_genesis = {
+            let super_slab = engine.super_slab().read().await;
+            super_slab.get_root(1).unwrap()
+        };
+
+        // Drop the audit copy entirely.
+        {
+            let index_store = engine.index_store();
+            let index = index_store.lock().await;
+            index
+                .connection()
+                .execute(
+                    "DELETE FROM atl_config WHERE key = 'super_genesis_root'",
+                    [],
+                )
+                .unwrap();
+        }
+
+        let signer = CheckpointSigner::from_bytes(&[29u8; 32]);
+        let receipt = generate_receipt(&entry_id, &engine, &signer, opts_no_anchors())
+            .await
+            .expect("a missing audit copy must not block receipt generation");
+
+        let super_proof = receipt.super_proof.expect("super_proof must be present");
+        assert_eq!(
+            super_proof.genesis_super_root,
+            format_hash(&expected_genesis)
         );
     }
 }

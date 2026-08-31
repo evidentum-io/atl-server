@@ -232,6 +232,11 @@ pub trait Storage: Send + Sync + 'static {
     fn get_latest_anchored_size(&self) -> crate::error::ServerResult<Option<u64>>;
 
     /// Get the minimum confirmed TSA anchor covering a data tree position
+    ///
+    /// Ordered by tree size, not by time. Not suitable for choosing the
+    /// anchor a receipt carries: that anchor must commit to the receipt's own
+    /// `proof.root_hash` (ATL Protocol Section 5.5.1 step 2), so it is
+    /// selected by root hash instead.
     fn get_tsa_anchor_covering(
         &self,
         tree_size: u64,

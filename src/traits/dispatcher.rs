@@ -286,6 +286,22 @@ impl SequencerClient for LocalDispatcher {
         let (target_tree_size, target_root_hash) = if let Some(anchor) = anchors.first() {
             // Build receipt at anchor's tree_size
             let root = self.storage.get_root_at_size(anchor.tree_size)?;
+
+            // ATL Protocol Section 5.5.1 step 2 requires the anchor to commit
+            // to the very root the rest of the receipt is built against. The
+            // anchor's own `tree_size` column decides which root that is, so
+            // the anchor is not trusted on that column alone: a row whose
+            // `tree_size` and `anchored_hash` disagree would otherwise yield a
+            // receipt that cannot verify. Refuse instead of issuing one.
+            if anchor.anchored_hash != root {
+                return Err(crate::error::ServerError::ReceiptStateMismatch {
+                    tree_size: anchor.tree_size,
+                    source_name: "rfc3161 anchor",
+                    found: hex::encode(anchor.anchored_hash),
+                    expected: hex::encode(root),
+                });
+            }
+
             (anchor.tree_size, root)
         } else {
             // No anchors - use current tree state
@@ -382,6 +398,7 @@ pub struct GrpcDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traits::Storage;
 
     #[test]
     fn test_dispatch_result_creation() {
@@ -555,5 +572,134 @@ mod tests {
         assert_eq!(response.inclusion_proof.len(), 1);
         assert!(response.consistency_proof.is_none());
         assert_eq!(response.anchors.len(), 0);
+    }
+
+    /// Build a `LocalDispatcher` over a real storage engine.
+    ///
+    /// `get_receipt` never touches the sequencer handle, so the sequencer is
+    /// created but not run.
+    async fn make_local_dispatcher(
+        origin: [u8; 32],
+    ) -> (
+        LocalDispatcher,
+        std::sync::Arc<crate::storage::engine::StorageEngine>,
+        tempfile::TempDir,
+    ) {
+        use crate::sequencer::{Sequencer, SequencerConfig};
+        use crate::storage::config::StorageConfig;
+        use crate::storage::engine::StorageEngine;
+
+        let dir = tempfile::tempdir().unwrap();
+        let engine = std::sync::Arc::new(
+            StorageEngine::new(
+                StorageConfig {
+                    data_dir: dir.path().to_path_buf(),
+                    ..Default::default()
+                },
+                origin,
+            )
+            .await
+            .unwrap(),
+        );
+
+        let storage: Arc<dyn Storage> = engine.clone();
+        let (_sequencer, handle) = Sequencer::new(storage.clone(), SequencerConfig::default());
+        let signer = crate::receipt::CheckpointSigner::from_bytes(&origin);
+
+        (LocalDispatcher::new(handle, signer, storage), engine, dir)
+    }
+
+    async fn append_leaf(engine: &crate::storage::engine::StorageEngine, seed: u8) -> uuid::Uuid {
+        let batch = engine
+            .append_batch(vec![AppendParams {
+                payload_hash: [seed; 32],
+                metadata_hash: [0u8; 32],
+                metadata_cleartext: None,
+                external_id: None,
+            }])
+            .await
+            .unwrap();
+        batch.entries[0].id
+    }
+
+    async fn store_tsa_anchor(
+        engine: &crate::storage::engine::StorageEngine,
+        anchored_hash: [u8; 32],
+        tree_size: u64,
+    ) {
+        use crate::traits::anchor::{Anchor, AnchorType};
+        let index_store = engine.index_store();
+        let index = index_store.lock().await;
+        index
+            .store_anchor_returning_id(
+                tree_size,
+                &Anchor {
+                    anchor_type: AnchorType::Rfc3161,
+                    target: "data_tree_root".to_string(),
+                    anchored_hash,
+                    tree_size,
+                    super_tree_size: None,
+                    timestamp: 1_000_000,
+                    token: vec![],
+                    metadata: serde_json::json!({"tsa_url": "https://tsa.example.com"}),
+                },
+                "confirmed",
+            )
+            .unwrap();
+    }
+
+    /// The receipt is built at the anchor's tree size, so the anchor must
+    /// commit to the root at that size (ATL Protocol Section 5.5.1 step 2).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_local_get_receipt_binds_checkpoint_to_the_anchored_root() {
+        let (dispatcher, engine, _dir) = make_local_dispatcher([40u8; 32]).await;
+
+        let entry_id = append_leaf(&engine, 0x01).await;
+        append_leaf(&engine, 0x02).await;
+        let head = engine.tree_head();
+        store_tsa_anchor(&engine, head.root_hash, head.tree_size).await;
+
+        let response = dispatcher
+            .get_receipt(GetReceiptRequest {
+                entry_id,
+                include_anchors: true,
+            })
+            .await
+            .expect("receipt generation must succeed");
+
+        assert_eq!(response.anchors.len(), 1);
+        assert_eq!(response.checkpoint.tree_size, head.tree_size);
+        assert_eq!(response.checkpoint.root_hash, head.root_hash);
+        assert_eq!(
+            response.anchors[0].anchored_hash,
+            response.checkpoint.root_hash
+        );
+    }
+
+    /// An anchor row whose `tree_size` and `anchored_hash` name different
+    /// states must be refused, not turned into an unverifiable receipt.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_local_get_receipt_refuses_anchor_that_does_not_match_root() {
+        let (dispatcher, engine, _dir) = make_local_dispatcher([41u8; 32]).await;
+
+        let entry_id = append_leaf(&engine, 0x01).await;
+        append_leaf(&engine, 0x02).await;
+        let head = engine.tree_head();
+        store_tsa_anchor(&engine, [0x66u8; 32], head.tree_size).await;
+
+        let err = dispatcher
+            .get_receipt(GetReceiptRequest {
+                entry_id,
+                include_anchors: true,
+            })
+            .await
+            .expect_err("a foreign anchored hash must be refused");
+
+        match err {
+            crate::error::ServerError::ReceiptStateMismatch { source_name, .. } => {
+                assert_eq!(source_name, "rfc3161 anchor");
+            }
+            other => panic!("expected ReceiptStateMismatch, got {other:?}"),
+        }
     }
 }
