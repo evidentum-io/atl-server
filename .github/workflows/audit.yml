@@ -7,6 +7,8 @@ on:
     paths:
       - '**/Cargo.toml'
       - '**/Cargo.lock'
+      # An ignore added here silences an advisory, so it must re-run the audit.
+      - '.cargo/audit.toml'
   workflow_dispatch:
 
 jobs:
