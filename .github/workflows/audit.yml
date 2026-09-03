@@ -7,14 +7,41 @@ on:
     paths:
       - '**/Cargo.toml'
       - '**/Cargo.lock'
+      # An ignore added here silences an advisory, so it must re-run the audit.
+      - '.cargo/audit.toml'
   workflow_dispatch:
 
 jobs:
   audit:
     name: Audit
     runs-on: ubuntu-latest
+    # The action publishes its result as a check run, which the default token
+    # cannot create on a workflow_dispatch run without this.
+    permissions:
+      checks: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
+      # Install cargo-audit ourselves, with --locked. Left to the action it
+      # resolves cargo-audit's dependencies to latest, which as of 2026-09-03
+      # picks a tinyvec that does not compile, so the job fails before any
+      # advisory is read. --locked uses cargo-audit's own lockfile instead.
+      # The action skips its install step when the binary is already present.
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # RUSTSEC-2023-0071 ("Marvin Attack", rsa crate, no fix
+          # available): the advisory covers any operation performed with an
+          # RSA *private* key -- decryption or signing -- whose timing an
+          # attacker can observe. This server has no RSA code path at all;
+          # `rsa` is not a direct dependency and arrives only through
+          # `atl-core`, which uses it for PKCS#1 v1.5 signature
+          # *verification* with a public key (RFC 3161 / CMS SignerInfo).
+          # The only private key this server holds is the Ed25519
+          # checkpoint signing key. Revisit immediately if a private-key
+          # RSA path is ever added. The action does not read
+          # `.cargo/audit.toml`, which carries the identical ignore for
+          # local runs -- both must be changed together.
+          ignore: RUSTSEC-2023-0071

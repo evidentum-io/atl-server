@@ -9,6 +9,7 @@ mod api;
 mod config;
 mod error;
 mod traits;
+mod validation;
 
 mod storage;
 

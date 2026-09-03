@@ -4,6 +4,7 @@ pub mod api;
 pub mod config;
 pub mod error;
 pub mod traits;
+pub mod validation;
 
 pub mod storage;
 

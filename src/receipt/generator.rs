@@ -1,7 +1,8 @@
 //! Receipt generation implementation
 
 use atl_core::{
-    canonicalize_and_hash, Checkpoint, CheckpointJson, Receipt, ReceiptEntry, ReceiptProof,
+    canonicalize_and_hash, Checkpoint, CheckpointJson, Receipt, ReceiptBuilder, ReceiptEntry,
+    ReceiptProof, SourceTextCheck,
 };
 use ed25519_dalek::{Signer, SigningKey};
 use uuid::Uuid;
@@ -478,26 +479,72 @@ pub async fn generate_receipt(
         .unwrap_or_else(|| serde_json::json!({}));
 
     // 10. Assemble receipt
-    Ok(Receipt {
-        spec_version: "2.0.0".to_string(),
-        upgrade_url,
-        entry: ReceiptEntry {
-            id: entry.id,
-            payload_hash: format_hash(&entry.payload_hash),
-            metadata_hash: format_hash(&canonicalize_and_hash(&published_metadata)),
-            metadata: published_metadata,
-        },
-        proof: ReceiptProof {
-            tree_size: state.tree_size,
-            root_hash: format_hash(&state.root_hash),
-            inclusion_path: inclusion_proof.path.iter().map(format_hash).collect(),
-            leaf_index,
-            checkpoint: checkpoint_json,
-            consistency_proof,
-        },
-        super_proof,
-        anchors: anchors.iter().map(convert_anchor_to_receipt).collect(),
-    })
+    let receipt_entry = ReceiptEntry {
+        id: entry.id,
+        payload_hash: format_hash(&entry.payload_hash),
+        metadata_hash: format_hash(&hash_published_metadata(&published_metadata)?),
+        metadata: published_metadata,
+    };
+
+    let receipt_proof = ReceiptProof {
+        tree_size: state.tree_size,
+        root_hash: format_hash(&state.root_hash),
+        inclusion_path: inclusion_proof.path.iter().map(format_hash).collect(),
+        leaf_index,
+        checkpoint: checkpoint_json,
+        consistency_proof,
+    };
+
+    Ok(
+        ReceiptBuilder::new("2.0.0".to_string(), receipt_entry, receipt_proof)
+            .super_proof_option(super_proof)
+            .anchors(anchors.iter().map(convert_anchor_to_receipt).collect())
+            .upgrade_url_option(upgrade_url)
+            .build(issuance_provenance()),
+    )
+}
+
+/// Hash the metadata document that the receipt publishes.
+///
+/// # Errors
+/// [`ServerError::NotCanonicalizable`] if the document has no RFC 8785
+/// canonical form. The refusal is reported as a client error rather than
+/// through `ServerError::Core`, which is a 500: the document is the
+/// depositor's, not the server's state, and no operator action would fix it.
+/// It is never replaced by a default hash -- that would publish a
+/// `metadata_hash` describing nothing.
+fn hash_published_metadata(metadata: &serde_json::Value) -> ServerResult<[u8; 32]> {
+    canonicalize_and_hash(metadata).map_err(|e| ServerError::NotCanonicalizable(e.to_string()))
+}
+
+/// Provenance for a receipt this server assembles at issuance.
+///
+/// [`SourceTextCheck`] states that the receipt's source bytes were checked for
+/// the RFC 8785 Section 3.1 duplicate-property-name constraint. Here there are
+/// no source bytes: the receipt is built field by field in memory and
+/// serialized by this server, and two independent facts make the constraint
+/// hold for the bytes it will become.
+///
+/// 1. **The receipt cannot be given a duplicate name.** Its own properties are
+///    distinct struct fields, and `metadata` is a `serde_json::Value` whose
+///    `Map` cannot hold one key twice. Whatever text `serde_json` produces from
+///    that value repeats no name.
+///
+/// 2. **The metadata document itself was checked as text at ingress.** Every
+///    route that can put a `metadata_cleartext` into the log now runs
+///    `reject_duplicate_property_names` over the raw bytes before parsing them:
+///    `api::handlers::anchor::anchor_json` over the HTTP request body, and both
+///    gRPC anchor handlers over `metadata_json`. Storage does not reintroduce
+///    the hazard either -- the column is written from `Value::to_string()` and
+///    read back with `from_str`.
+///
+/// Fact 1 alone would justify the marker; fact 2 is what makes the
+/// `metadata_hash` the receipt carries a commitment to a document the client
+/// unambiguously sent. Entries written before those checks existed are covered
+/// by fact 1 only: their stored text is duplicate-free because it was written
+/// from a `Value`, but nothing verified the bytes the client originally sent.
+const fn issuance_provenance() -> SourceTextCheck {
+    SourceTextCheck::assume_duplicate_property_names_already_rejected()
 }
 
 /// Create and sign a checkpoint
@@ -741,30 +788,33 @@ pub fn build_immediate_receipt(
 
     let published_metadata = metadata.unwrap_or_else(|| serde_json::json!({}));
 
-    Ok(Receipt {
-        spec_version: "2.0.0".to_string(),
-        upgrade_url,
-        entry: ReceiptEntry {
-            // An absent metadata document is published as the empty object,
-            // matching what `hash_metadata` hashed into the leaf and what
-            // Section 4.2 shows in the schema, so that Section 5.1 step 4 can
-            // pass for an entry anchored without metadata.
-            id: entry_id,
-            payload_hash: format_hash(&payload_hash),
-            metadata_hash: format_hash(&canonicalize_and_hash(&published_metadata)),
-            metadata: published_metadata,
-        },
-        proof: ReceiptProof {
-            tree_size,
-            root_hash: format_hash(&root_hash),
-            inclusion_path: inclusion_proof.path.iter().map(format_hash).collect(),
-            leaf_index,
-            checkpoint: checkpoint_json,
-            consistency_proof: None, // Not needed for immediate receipt
-        },
-        super_proof: None, // Entry in active tree, not yet in Super-Tree
-        anchors: vec![],   // No anchors yet
-    })
+    let receipt_entry = ReceiptEntry {
+        // An absent metadata document is published as the empty object,
+        // matching what `hash_metadata` hashed into the leaf and what
+        // Section 4.2 shows in the schema, so that Section 5.1 step 4 can
+        // pass for an entry anchored without metadata.
+        id: entry_id,
+        payload_hash: format_hash(&payload_hash),
+        metadata_hash: format_hash(&hash_published_metadata(&published_metadata)?),
+        metadata: published_metadata,
+    };
+
+    let receipt_proof = ReceiptProof {
+        tree_size,
+        root_hash: format_hash(&root_hash),
+        inclusion_path: inclusion_proof.path.iter().map(format_hash).collect(),
+        leaf_index,
+        checkpoint: checkpoint_json,
+        consistency_proof: None, // Not needed for immediate receipt
+    };
+
+    // No `super_proof` (entry is in the active tree, not yet in the
+    // Super-Tree) and no anchors yet, so neither is set on the builder.
+    Ok(
+        ReceiptBuilder::new("2.0.0".to_string(), receipt_entry, receipt_proof)
+            .upgrade_url_option(upgrade_url)
+            .build(issuance_provenance()),
+    )
 }
 
 #[cfg(test)]
@@ -1020,8 +1070,16 @@ mod tests {
         );
         let receipt = receipt.unwrap();
         assert!(
-            receipt.anchors.is_empty(),
+            receipt.anchors().is_empty(),
             "anchors should be empty when include_anchors=false"
+        );
+        // The builder must be handed the issuance provenance, not
+        // `SourceTextCheck::default()`: without it `ReceiptVerifier::verify`
+        // reports `SourceTextNotChecked` and refuses to confirm a receipt this
+        // server issued, whatever else checks out.
+        assert!(
+            receipt.source_text_was_checked(),
+            "an issued receipt must carry the source-text provenance"
         );
     }
 
@@ -1093,7 +1151,7 @@ mod tests {
         );
         let receipt = receipt.unwrap();
         assert!(
-            !receipt.anchors.is_empty(),
+            !receipt.anchors().is_empty(),
             "receipt should contain TSA anchor"
         );
     }
@@ -1188,7 +1246,7 @@ mod tests {
             receipt.err()
         );
         assert!(
-            receipt.unwrap().super_proof.is_none(),
+            receipt.unwrap().super_proof().is_none(),
             "super_proof must be None when entry has no tree_id"
         );
     }
@@ -1212,7 +1270,7 @@ mod tests {
             receipt.err()
         );
         assert!(
-            receipt.unwrap().super_proof.is_none(),
+            receipt.unwrap().super_proof().is_none(),
             "super_proof must be None when tree has never been rotated"
         );
     }
@@ -1251,14 +1309,14 @@ mod tests {
         // super_proof is generated using the current super_tree_size.
         // The anchors list must not contain a BitcoinOts entry.
         let has_ots = receipt
-            .anchors
+            .anchors()
             .iter()
             .any(|a| matches!(a, atl_core::ReceiptAnchor::BitcoinOts { .. }));
         assert!(!has_ots, "anchors must not contain OTS when none is stored");
 
         // super_proof should be Some because the entry is in a closed tree.
         assert!(
-            receipt.super_proof.is_some(),
+            receipt.super_proof().is_some(),
             "super_proof must be present after tree rotation"
         );
     }
@@ -1320,13 +1378,13 @@ mod tests {
 
         // OTS anchor must be present in receipt.
         let has_ots = receipt
-            .anchors
+            .anchors()
             .iter()
             .any(|a| matches!(a, atl_core::ReceiptAnchor::BitcoinOts { .. }));
         assert!(has_ots, "receipt must contain the OTS anchor");
 
         // super_proof must exist and use the OTS super_tree_size.
-        let sp = receipt.super_proof.expect("super_proof must be present");
+        let sp = receipt.super_proof().expect("super_proof must be present");
         assert_eq!(
             sp.super_tree_size, ots_super_tree_size,
             "super_proof super_tree_size must match OTS anchor super_tree_size"
@@ -1390,9 +1448,12 @@ mod tests {
         );
         let receipt = receipt.unwrap();
 
-        assert!(receipt.super_proof.is_some(), "super_proof must be present");
         assert!(
-            receipt.upgrade_url.is_none(),
+            receipt.super_proof().is_some(),
+            "super_proof must be present"
+        );
+        assert!(
+            receipt.upgrade_url().is_none(),
             "a column-confirmed OTS anchor must suppress upgrade_url even when \
              metadata.status is absent/out of sync"
         );
@@ -1407,15 +1468,17 @@ mod tests {
     /// the inclusion proof and every anchor must all commit to the same root.
     fn assert_single_state(receipt: &atl_core::Receipt) {
         assert_eq!(
-            receipt.proof.checkpoint.tree_size, receipt.proof.tree_size,
+            receipt.proof().checkpoint.tree_size,
+            receipt.proof().tree_size,
             "checkpoint.tree_size must equal proof.tree_size"
         );
         assert_eq!(
-            receipt.proof.checkpoint.root_hash, receipt.proof.root_hash,
+            receipt.proof().checkpoint.root_hash,
+            receipt.proof().root_hash,
             "checkpoint.root_hash must equal proof.root_hash"
         );
 
-        for anchor in &receipt.anchors {
+        for anchor in receipt.anchors() {
             match anchor {
                 atl_core::ReceiptAnchor::Rfc3161 {
                     target,
@@ -1424,7 +1487,8 @@ mod tests {
                 } => {
                     assert_eq!(target, "data_tree_root");
                     assert_eq!(
-                        target_hash, &receipt.proof.root_hash,
+                        target_hash,
+                        &receipt.proof().root_hash,
                         "rfc3161 anchor.target_hash must equal proof.root_hash"
                     );
                 }
@@ -1435,8 +1499,7 @@ mod tests {
                 } => {
                     assert_eq!(target, "super_root");
                     let super_proof = receipt
-                        .super_proof
-                        .as_ref()
+                        .super_proof()
                         .expect("a bitcoin_ots anchor requires a super_proof to target");
                     assert_eq!(
                         target_hash, &super_proof.super_root,
@@ -1514,13 +1577,14 @@ mod tests {
             .expect("receipt for an unanchored closed tree is a Receipt-Lite, not an error");
 
         assert_eq!(
-            receipt.proof.tree_size, size_a,
+            receipt.proof().tree_size,
+            size_a,
             "receipt must describe the entry's own closed tree"
         );
-        assert_eq!(receipt.proof.root_hash, format_hash(&root_a));
+        assert_eq!(receipt.proof().root_hash, format_hash(&root_a));
         assert!(
             !receipt
-                .anchors
+                .anchors()
                 .iter()
                 .any(|a| matches!(a, atl_core::ReceiptAnchor::Rfc3161 { .. })),
             "tree A has no timestamp; tree B's anchor must not be attached"
@@ -1569,10 +1633,10 @@ mod tests {
             .await
             .expect("receipt generation must succeed");
 
-        assert_eq!(receipt.proof.tree_size, head.tree_size);
-        assert_eq!(receipt.proof.root_hash, format_hash(&head.root_hash));
+        assert_eq!(receipt.proof().tree_size, head.tree_size);
+        assert_eq!(receipt.proof().root_hash, format_hash(&head.root_hash));
         assert!(
-            receipt.anchors.is_empty(),
+            receipt.anchors().is_empty(),
             "no anchor commits to the head root, so none may be attached"
         );
         assert_single_state(&receipt);
@@ -1609,7 +1673,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("leaf {leaf_index}: {e}"));
 
             assert_single_state(&receipt);
-            assert_eq!(receipt.proof.leaf_index, leaf_index as u64);
+            assert_eq!(receipt.proof().leaf_index, leaf_index as u64);
 
             let expected_root = if (leaf_index as u64) < size_a {
                 format_hash(&root_a)
@@ -1619,12 +1683,13 @@ mod tests {
                 format_hash(&engine.tree_head().root_hash)
             };
             assert_eq!(
-                receipt.proof.root_hash, expected_root,
+                receipt.proof().root_hash,
+                expected_root,
                 "leaf {leaf_index} must be proved against its own tree state"
             );
 
             let has_tsa = receipt
-                .anchors
+                .anchors()
                 .iter()
                 .any(|a| matches!(a, atl_core::ReceiptAnchor::Rfc3161 { .. }));
             assert_eq!(
@@ -1653,11 +1718,11 @@ mod tests {
             .await
             .expect("receipt generation must succeed");
 
-        assert_eq!(receipt.proof.leaf_index + 1, size_a);
-        assert_eq!(receipt.proof.tree_size, size_a);
+        assert_eq!(receipt.proof().leaf_index + 1, size_a);
+        assert_eq!(receipt.proof().tree_size, size_a);
         assert!(
             receipt
-                .anchors
+                .anchors()
                 .iter()
                 .any(|a| matches!(a, atl_core::ReceiptAnchor::Rfc3161 { .. })),
             "the boundary leaf's own state is anchored, so the anchor belongs on the receipt"
@@ -1683,7 +1748,7 @@ mod tests {
         let closed_receipt = generate_receipt(&entry_id, &engine, &signer, opts_with_anchors())
             .await
             .unwrap();
-        assert!(closed_receipt.super_proof.is_some());
+        assert!(closed_receipt.super_proof().is_some());
         assert_single_state(&closed_receipt);
 
         // The same entry asked for at an intermediate size does not.
@@ -1693,13 +1758,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(intermediate.proof.tree_size, 1);
+        assert_eq!(intermediate.proof().tree_size, 1);
         assert!(
-            intermediate.super_proof.is_none(),
+            intermediate.super_proof().is_none(),
             "an intermediate root is not a Super-Tree leaf"
         );
         assert!(
-            intermediate.anchors.is_empty(),
+            intermediate.anchors().is_empty(),
             "no anchor commits to an intermediate root"
         );
         assert_single_state(&intermediate);
@@ -1922,7 +1987,7 @@ mod tests {
             .await
             .expect("a missing audit copy must not block receipt generation");
 
-        let super_proof = receipt.super_proof.expect("super_proof must be present");
+        let super_proof = receipt.super_proof().expect("super_proof must be present");
         assert_eq!(
             super_proof.genesis_super_root,
             format_hash(&expected_genesis)

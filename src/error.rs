@@ -82,6 +82,35 @@ pub enum ServerError {
     #[error("unsupported content type: {0}")]
     UnsupportedContentType(String),
 
+    /// Client-supplied JSON repeats a property name.
+    ///
+    /// RFC 8785 §3.1: "JSON objects MUST NOT exhibit duplicate property
+    /// names". RFC 8259 §4 makes the surviving occurrence unpredictable
+    /// across parsers, so two readers can canonicalize two different objects
+    /// out of one byte sequence and both be right. There is no correct value
+    /// to commit to the log, so the request is refused rather than resolved
+    /// by `serde_json`'s last-wins rule.
+    ///
+    /// Detectable only on the raw bytes: by the time a `serde_json::Value`
+    /// exists the losing occurrence is already gone.
+    #[error("duplicate property name in {location}: {reason}")]
+    DuplicatePropertyName {
+        /// Which part of the request the offending text came from.
+        location: &'static str,
+        /// The RFC 6901 pointer and constraint text reported by atl-core.
+        reason: String,
+    },
+
+    /// A JSON value has no RFC 8785 canonical form, so no hash over it can be
+    /// reproduced by any other implementation.
+    ///
+    /// This is the client's data, not the server's state: the value is either
+    /// the payload or the metadata document supplied with the entry, so the
+    /// refusal is reported as a client error even when it surfaces later, on
+    /// receipt generation, rather than at ingress.
+    #[error("value has no RFC 8785 canonical form: {0}")]
+    NotCanonicalizable(String),
+
     // ========== Authentication Errors ==========
     /// Missing authorization header
     #[error("authorization required")]
@@ -207,7 +236,9 @@ impl ServerError {
             | ServerError::TreeSizeMismatch { .. }
             | ServerError::EntryNotInTree(_)
             | ServerError::SuperTreeNotInitialized
-            | ServerError::TreeNotClosed => StatusCode::BAD_REQUEST,
+            | ServerError::TreeNotClosed
+            | ServerError::DuplicatePropertyName { .. }
+            | ServerError::NotCanonicalizable(_) => StatusCode::BAD_REQUEST,
 
             // 401 Unauthorized
             ServerError::AuthMissing | ServerError::AuthInvalid => StatusCode::UNAUTHORIZED,
@@ -258,6 +289,8 @@ impl ServerError {
             ServerError::InvalidSignature(_) => "INVALID_SIGNATURE",
             ServerError::InvalidUuid(_) => "INVALID_UUID",
             ServerError::UnsupportedContentType(_) => "UNSUPPORTED_CONTENT_TYPE",
+            ServerError::DuplicatePropertyName { .. } => "DUPLICATE_PROPERTY_NAME",
+            ServerError::NotCanonicalizable(_) => "NOT_CANONICALIZABLE",
             ServerError::AuthMissing => "AUTH_MISSING",
             ServerError::AuthInvalid => "AUTH_INVALID",
             ServerError::Storage(_) => "STORAGE_ERROR",

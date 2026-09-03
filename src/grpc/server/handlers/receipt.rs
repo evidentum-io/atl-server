@@ -159,7 +159,7 @@ pub async fn handle_upgrade_receipt(
             .map_err(|e| Status::internal(e.to_string()))?;
 
     let has_bitcoin_anchor = receipt
-        .anchors
+        .anchors()
         .iter()
         .any(|a| matches!(a, atl_core::ReceiptAnchor::BitcoinOts { .. }));
 
@@ -170,7 +170,7 @@ pub async fn handle_upgrade_receipt(
         return Ok(Response::new(UpgradeReceiptResponse {
             status: UpgradeStatus::Upgraded as i32,
             upgraded_receipt_json: receipt_json,
-            receipt_tree_size: receipt.proof.tree_size,
+            receipt_tree_size: receipt.proof().tree_size,
             last_anchor_tree_size: 0,
             estimated_completion_unix: 0,
         }));
