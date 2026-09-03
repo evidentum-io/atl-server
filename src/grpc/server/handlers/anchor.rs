@@ -11,6 +11,7 @@ use crate::grpc::proto::*;
 use crate::grpc::server::service::SequencerGrpcServer;
 use crate::traits::AppendParams;
 use crate::traits::Storage;
+use crate::validation::reject_duplicate_property_names;
 
 /// Handle AnchorEntry request
 ///
@@ -33,10 +34,18 @@ pub async fn handle_anchor_entry(
         .try_into()
         .map_err(|_| Status::invalid_argument("metadata_hash must be 32 bytes"))?;
 
-    // Parse metadata JSON
+    // Parse metadata JSON.
+    //
+    // The duplicate-property-name check runs on `metadata_json` itself,
+    // before `from_str`: that string *is* the raw text, and after the parse
+    // the losing occurrence of a repeated name is gone (RFC 8785 Section 3.1,
+    // RFC 8259 Section 4). Unlike the HTTP path there is no envelope to scan,
+    // so the scope is exactly the metadata document.
     let metadata_cleartext = if req.metadata_json.is_empty() {
         None
     } else {
+        reject_duplicate_property_names(&req.metadata_json, "metadata_json")
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
         Some(
             serde_json::from_str(&req.metadata_json)
                 .map_err(|e| Status::invalid_argument(format!("invalid metadata JSON: {e}")))?,
@@ -92,6 +101,10 @@ pub async fn handle_anchor_entry(
 /// Handle AnchorBatch request
 ///
 /// Submits multiple entries to the Sequencer in one request for maximum throughput.
+// `Status` is 176 bytes, over the `result_large_err` threshold. It is tonic's
+// own error type on a trait-shaped signature, so it cannot be boxed here; the
+// helpers below carry the same allowance.
+#[allow(clippy::result_large_err)]
 pub async fn handle_anchor_batch(
     server: &SequencerGrpcServer,
     request: Request<AnchorBatchRequest>,
@@ -118,9 +131,14 @@ pub async fn handle_anchor_batch(
                     .try_into()
                     .map_err(|_| Status::invalid_argument("metadata_hash must be 32 bytes"))?;
 
+                // Same check as the single-entry path: on the raw text, before
+                // the parse. One bad entry fails the whole batch, which is the
+                // existing behaviour for a malformed `metadata_json` too.
                 let metadata_cleartext = if entry.metadata_json.is_empty() {
                     None
                 } else {
+                    reject_duplicate_property_names(&entry.metadata_json, "metadata_json")
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
                     Some(serde_json::from_str(&entry.metadata_json).map_err(|e| {
                         Status::invalid_argument(format!("invalid metadata JSON: {e}"))
                     })?)
@@ -225,5 +243,101 @@ fn get_consistency_proof_from_anchor(
             // No anchor yet or tree hasn't grown since last anchor
             Ok((vec![], 0))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::receipt::CheckpointSigner;
+    use crate::sequencer::{Sequencer, SequencerConfig};
+    use crate::storage::config::StorageConfig;
+    use crate::storage::engine::StorageEngine;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    async fn test_server() -> (SequencerGrpcServer, TempDir) {
+        let dir = TempDir::new().expect("tempdir");
+        let config = StorageConfig {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let storage = Arc::new(
+            StorageEngine::new(config, [7u8; 32])
+                .await
+                .expect("storage engine"),
+        );
+        let (sequencer, handle) = Sequencer::new(storage.clone(), SequencerConfig::default());
+        tokio::spawn(sequencer.run());
+
+        let signer = Arc::new(CheckpointSigner::from_bytes(&[42u8; 32]));
+        (SequencerGrpcServer::new(handle, storage, signer, None), dir)
+    }
+
+    fn anchor_request(metadata_json: &str) -> Request<AnchorRequest> {
+        Request::new(AnchorRequest {
+            payload_hash: vec![1u8; 32],
+            metadata_hash: vec![2u8; 32],
+            metadata_json: metadata_json.to_string(),
+            external_id: String::new(),
+        })
+    }
+
+    /// The text is the defect: `serde_json::from_str` resolves it to
+    /// `{"id":2}` and the entry is stored as a document the client never
+    /// unambiguously sent. Driving the handler rather than
+    /// `reject_duplicate_property_names` is the point -- a test of the helper
+    /// alone would still pass with the call removed from here.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn anchor_entry_refuses_a_duplicate_property_name() {
+        let (server, _dir) = test_server().await;
+
+        let status = handle_anchor_entry(&server, anchor_request(r#"{"id":1,"id":2}"#))
+            .await
+            .expect_err("a duplicate property name must be refused");
+
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(
+            status.message().contains("duplicate property name"),
+            "message should say what was wrong: {}",
+            status.message()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn anchor_entry_accepts_repeated_names_in_sibling_objects() {
+        let (server, _dir) = test_server().await;
+
+        handle_anchor_entry(&server, anchor_request(r#"{"a":{"id":1},"b":{"id":2}}"#))
+            .await
+            .expect("distinct objects may each carry an `id`");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn anchor_batch_refuses_a_duplicate_property_name() {
+        let (server, _dir) = test_server().await;
+
+        let request = Request::new(AnchorBatchRequest {
+            entries: vec![
+                AnchorRequest {
+                    payload_hash: vec![1u8; 32],
+                    metadata_hash: vec![2u8; 32],
+                    metadata_json: r#"{"ok":1}"#.to_string(),
+                    external_id: String::new(),
+                },
+                AnchorRequest {
+                    payload_hash: vec![3u8; 32],
+                    metadata_hash: vec![4u8; 32],
+                    metadata_json: r#"{"id":1,"id":2}"#.to_string(),
+                    external_id: String::new(),
+                },
+            ],
+        });
+
+        let status = handle_anchor_batch(&server, request)
+            .await
+            .expect_err("a duplicate property name must fail the batch");
+
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
     }
 }

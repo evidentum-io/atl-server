@@ -4,6 +4,8 @@ use axum::body::Bytes;
 use futures::Stream;
 use sha2::{Digest, Sha256};
 
+use crate::error::{ServerError, ServerResult};
+
 /// Compute SHA-256 hash from a byte stream without buffering entire content.
 ///
 /// Memory usage is O(1) regardless of stream size.
@@ -36,13 +38,18 @@ where
 ///
 /// According to ATL Protocol, `PayloadHash` is the hash of the original data,
 /// not its JSON representation.
-pub fn hash_payload(value: &serde_json::Value) -> [u8; 32] {
+///
+/// # Errors
+/// [`ServerError::NotCanonicalizable`] if the value has no RFC 8785 canonical
+/// form. A hash is never invented for such a value: it would be a commitment
+/// no other implementation could reproduce.
+pub fn hash_payload(value: &serde_json::Value) -> ServerResult<[u8; 32]> {
     match value {
         serde_json::Value::String(s) => {
             use sha2::{Digest, Sha256};
-            Sha256::digest(s.as_bytes()).into()
+            Ok(Sha256::digest(s.as_bytes()).into())
         }
-        _ => atl_core::canonicalize_and_hash(value),
+        _ => canonical_hash(value),
     }
 }
 
@@ -50,14 +57,20 @@ pub fn hash_payload(value: &serde_json::Value) -> [u8; 32] {
 ///
 /// Uses RFC 8785 JSON Canonicalization Scheme for deterministic hashing.
 /// This is kept for backward compatibility with metadata hashing.
-pub fn hash_json_payload(value: &serde_json::Value) -> [u8; 32] {
-    atl_core::canonicalize_and_hash(value)
+///
+/// # Errors
+/// [`ServerError::NotCanonicalizable`], as [`hash_payload`].
+pub fn hash_json_payload(value: &serde_json::Value) -> ServerResult<[u8; 32]> {
+    canonical_hash(value)
 }
 
 /// Hash metadata (empty object if None)
 ///
 /// Returns SHA-256 hash of canonicalized metadata JSON.
-pub fn hash_metadata(metadata: Option<&serde_json::Value>) -> [u8; 32] {
+///
+/// # Errors
+/// [`ServerError::NotCanonicalizable`], as [`hash_payload`].
+pub fn hash_metadata(metadata: Option<&serde_json::Value>) -> ServerResult<[u8; 32]> {
     match metadata {
         Some(value) => hash_json_payload(value),
         None => {
@@ -65,6 +78,19 @@ pub fn hash_metadata(metadata: Option<&serde_json::Value>) -> [u8; 32] {
             hash_json_payload(&empty)
         }
     }
+}
+
+/// Canonicalize and hash, reporting refusal as a client error.
+///
+/// `canonicalize_and_hash` became fallible in atl-core 0.28. The failure is
+/// deliberately *not* routed through `ServerError::Core`, which is a 500: the
+/// value is the client's, so a 500 would page an operator for a request that
+/// only its sender can fix. It is also deliberately not swallowed by
+/// `unwrap_or_default` -- a zero hash would be committed to the log as though
+/// it described the document.
+fn canonical_hash(value: &serde_json::Value) -> ServerResult<[u8; 32]> {
+    atl_core::canonicalize_and_hash(value)
+        .map_err(|e| ServerError::NotCanonicalizable(e.to_string()))
 }
 
 #[cfg(test)]
@@ -76,7 +102,7 @@ mod tests {
     fn test_hash_payload_string() {
         // String payload should be hashed as raw bytes, not JSON
         let payload = serde_json::json!("TEST");
-        let hash = hash_payload(&payload);
+        let hash = hash_payload(&payload).expect("canonicalizable");
         assert_eq!(hash.len(), 32);
 
         // Verify against expected hash: echo -n 'TEST' | sha256sum
@@ -96,31 +122,31 @@ mod tests {
     fn test_hash_payload_object() {
         // Object payload should use JCS canonicalization
         let payload = serde_json::json!({"test": "data"});
-        let hash = hash_payload(&payload);
+        let hash = hash_payload(&payload).expect("canonicalizable");
         assert_eq!(hash.len(), 32);
 
         // Should be same as hash_json_payload for objects
-        let expected = hash_json_payload(&payload);
+        let expected = hash_json_payload(&payload).expect("canonicalizable");
         assert_eq!(hash, expected);
     }
 
     #[test]
     fn test_hash_json_payload() {
         let payload = serde_json::json!({"test": "data"});
-        let hash = hash_json_payload(&payload);
+        let hash = hash_json_payload(&payload).expect("canonicalizable");
         assert_eq!(hash.len(), 32);
     }
 
     #[test]
     fn test_hash_json_payload_deterministic() {
         let payload = serde_json::json!({"b": 2, "a": 1});
-        let hash1 = hash_json_payload(&payload);
-        let hash2 = hash_json_payload(&payload);
+        let hash1 = hash_json_payload(&payload).expect("canonicalizable");
+        let hash2 = hash_json_payload(&payload).expect("canonicalizable");
         assert_eq!(hash1, hash2, "Hash should be deterministic");
 
         // Same data, different key order - should produce same hash due to canonicalization
         let payload2 = serde_json::json!({"a": 1, "b": 2});
-        let hash3 = hash_json_payload(&payload2);
+        let hash3 = hash_json_payload(&payload2).expect("canonicalizable");
         assert_eq!(
             hash1, hash3,
             "Canonicalization should produce same hash regardless of key order"
@@ -130,10 +156,10 @@ mod tests {
     #[test]
     fn test_hash_json_payload_empty_object() {
         let payload = serde_json::json!({});
-        let hash = hash_json_payload(&payload);
+        let hash = hash_json_payload(&payload).expect("canonicalizable");
         assert_eq!(hash.len(), 32);
         // Should be consistent
-        let hash2 = hash_json_payload(&payload);
+        let hash2 = hash_json_payload(&payload).expect("canonicalizable");
         assert_eq!(hash, hash2);
     }
 
@@ -146,37 +172,37 @@ mod tests {
                 }
             }
         });
-        let hash = hash_json_payload(&payload);
+        let hash = hash_json_payload(&payload).expect("canonicalizable");
         assert_eq!(hash.len(), 32);
     }
 
     #[test]
     fn test_hash_json_payload_array() {
         let payload = serde_json::json!([1, 2, 3, 4, 5]);
-        let hash = hash_json_payload(&payload);
+        let hash = hash_json_payload(&payload).expect("canonicalizable");
         assert_eq!(hash.len(), 32);
     }
 
     #[test]
     fn test_hash_metadata_none() {
-        let hash = hash_metadata(None);
+        let hash = hash_metadata(None).expect("canonicalizable");
         // Should hash empty object
-        let empty_hash = hash_json_payload(&serde_json::json!({}));
+        let empty_hash = hash_json_payload(&serde_json::json!({})).expect("canonicalizable");
         assert_eq!(hash, empty_hash);
     }
 
     #[test]
     fn test_hash_metadata_some() {
         let metadata = serde_json::json!({"source": "test"});
-        let hash = hash_metadata(Some(&metadata));
+        let hash = hash_metadata(Some(&metadata)).expect("canonicalizable");
         assert_eq!(hash.len(), 32);
     }
 
     #[test]
     fn test_hash_metadata_consistency() {
         let metadata = serde_json::json!({"key": "value"});
-        let hash1 = hash_metadata(Some(&metadata));
-        let hash2 = hash_metadata(Some(&metadata));
+        let hash1 = hash_metadata(Some(&metadata)).expect("canonicalizable");
+        let hash2 = hash_metadata(Some(&metadata)).expect("canonicalizable");
         assert_eq!(hash1, hash2, "Hash should be consistent");
     }
 

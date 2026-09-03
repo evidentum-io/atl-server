@@ -16,6 +16,7 @@ use crate::api::streaming::{hash_metadata, hash_payload};
 use crate::config::ServerMode;
 use crate::error::ServerError;
 use crate::traits::AppendParams;
+use crate::validation::{body_as_utf8, reject_duplicate_property_names};
 
 /// Placeholder receipt type (will be implemented by RECEIPT-GEN-1)
 ///
@@ -48,7 +49,12 @@ pub async fn create_anchor(
     if content_type.starts_with("application/json") {
         anchor_json(state, body).await
     } else if content_type.starts_with("multipart/form-data") {
-        // Multipart handling will be added later
+        // No multipart ingress exists: nothing is parsed here, so nothing
+        // reaches the log by this route. Whoever implements it must run
+        // `reject_duplicate_property_names` over each JSON part's raw bytes
+        // before parsing it, exactly as `anchor_json` does -- a multipart
+        // metadata part is client JSON text and carries the same Section 3.1
+        // constraint.
         Err(ServerError::NotSupported(
             "Multipart upload not yet implemented".into(),
         ))
@@ -71,17 +77,30 @@ async fn anchor_json(
         .await
         .map_err(|e| ServerError::InvalidArgument(format!("Failed to read body: {}", e)))?;
 
+    // Refuse duplicate property names *before* the typed parse.
+    //
+    // This is the last point at which the constraint is decidable. RFC 8785
+    // Section 3.1 forbids objects that repeat a property name, and the
+    // typed parse below silently resolves such an object by keeping the
+    // last occurrence -- after which `req.metadata` is
+    // indistinguishable from metadata the client never sent. RFC 8259 Section 4
+    // makes the surviving occurrence unpredictable across parsers, so the
+    // hash committed to the tree would be one of several a conformant reader
+    // could compute from the same bytes.
+    let body_text = body_as_utf8(&bytes, "request body")?;
+    reject_duplicate_property_names(body_text, "request body")?;
+
     // Parse JSON
-    let req: AnchorJsonRequest = serde_json::from_slice(&bytes)
+    let req: AnchorJsonRequest = serde_json::from_str(body_text)
         .map_err(|e| ServerError::InvalidArgument(format!("Invalid JSON: {}", e)))?;
 
     // Compute hashes
     let payload_hash = if req.file.unwrap_or(false) {
         parse_precomputed_hash(&req.payload)?
     } else {
-        hash_payload(&req.payload)
+        hash_payload(&req.payload)?
     };
-    let metadata_hash = hash_metadata(req.metadata.as_ref());
+    let metadata_hash = hash_metadata(req.metadata.as_ref())?;
 
     // Generate and return receipt
     generate_and_return_receipt(
@@ -1090,6 +1109,166 @@ mod tests {
         assert!(
             receipt["upgrade_url"].is_string(),
             "an unanchored state must advertise the upgrade path"
+        );
+    }
+
+    // ================================================================
+    // RFC 8785 Section 3.1 on the ingress bytes
+    //
+    // These drive `create_anchor` with a raw `Body`, not with a constructed
+    // `AnchorJsonRequest`: a `serde_json::Value` cannot hold a repeated key,
+    // so a test built from one would exercise the parser's output instead of
+    // the input the constraint is about, and would pass with the check
+    // removed.
+    // ================================================================
+
+    /// The body this test sends is the defect: `serde_json` resolves it to
+    /// `{"id":2}` and the log would commit to a document the client never
+    /// unambiguously sent.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn duplicate_property_name_in_metadata_is_refused() {
+        let (state, _dir) = create_standalone_state().await;
+
+        let body = Body::from(r#"{"payload":"doc","metadata":{"id":1,"id":2}}"#);
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+
+        let err = create_anchor(State(state), headers, body)
+            .await
+            .expect_err("a duplicate property name must be refused");
+
+        assert!(
+            matches!(err, ServerError::DuplicatePropertyName { .. }),
+            "expected DuplicatePropertyName, got {err:?}"
+        );
+        assert_eq!(
+            err.status_code(),
+            StatusCode::BAD_REQUEST,
+            "a malformed client document is a 4xx, not a 5xx"
+        );
+        assert!(
+            err.to_string().contains("/metadata"),
+            "the message must locate the offending object: {err}"
+        );
+    }
+
+    /// The envelope itself is ambiguous: which `metadata` gets anchored is
+    /// `serde_json`'s choice, not the protocol's.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn duplicate_metadata_key_in_the_envelope_is_refused() {
+        let (state, _dir) = create_standalone_state().await;
+
+        let body = Body::from(r#"{"payload":"doc","metadata":{"a":1},"metadata":{"b":2}}"#);
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+
+        let err = create_anchor(State(state), headers, body)
+            .await
+            .expect_err("an ambiguous envelope must be refused");
+
+        assert!(matches!(err, ServerError::DuplicatePropertyName { .. }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_body_that_is_not_utf8_is_refused() {
+        let (state, _dir) = create_standalone_state().await;
+
+        let body = Body::from(vec![0x7b, 0xff, 0xfe, 0x7d]);
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+
+        let err = create_anchor(State(state), headers, body)
+            .await
+            .expect_err("non-UTF-8 must be refused");
+
+        assert_eq!(err.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Guards against the check being written so broadly that it refuses
+    /// ordinary documents. Repeating a name in *different* objects is legal.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repeated_names_in_sibling_objects_are_accepted() {
+        let (state, _dir) = create_standalone_state().await;
+
+        let body = Body::from(r#"{"payload":"doc","metadata":{"a":{"id":1},"b":{"id":2}}}"#);
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+
+        let (status, _) = create_anchor(State(state), headers, body)
+            .await
+            .expect("distinct objects may each carry an `id`");
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    // ================================================================
+    // Large integers are normalized, never refused
+    // ================================================================
+
+    /// A nanosecond timestamp is past 2^53, so it is not exactly
+    /// representable as a double. RFC 8785 Appendix B notes (1) and (2) put
+    /// that outside the canonicalizer's concern -- the integer is normalized
+    /// to the double it denotes and rendered by ECMA-262 Section 7.1.12.1.
+    ///
+    /// What has to hold is that both ends do the same thing, so this walks
+    /// the whole circle: raw client text -> the hash the server commits ->
+    /// the receipt as bytes -> a verifier's independent recomputation.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_nanosecond_integer_closes_the_circle() {
+        let (state, _dir) = create_standalone_state().await;
+
+        // Raw text. Written as a literal so the u64 never passes through a
+        // Rust f64 on the way in.
+        let raw = r#"{"payload":"doc","metadata":{"ts":1756812345678901234}}"#;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+
+        let (status, receipt_value) = create_anchor(State(state), headers, Body::from(raw))
+            .await
+            .expect("a large integer must be anchored, not refused");
+        assert_eq!(status, StatusCode::CREATED);
+
+        // What the client will actually receive.
+        let receipt_bytes = serde_json::to_vec(&receipt_value.0).expect("receipt must serialize");
+        let receipt_text = String::from_utf8(receipt_bytes).expect("receipt is UTF-8");
+
+        // The receipt carries the client's digits verbatim, not the rounded
+        // spelling: the canonical form is derived at verification time, it is
+        // not what gets published.
+        assert!(
+            receipt_text.contains("1756812345678901234"),
+            "the receipt must republish the literal the client sent: {receipt_text}"
+        );
+
+        // A verifier's path: parse the bytes (which re-runs the Section 3.1
+        // check inside atl-core), then canonicalize the metadata it finds.
+        let parsed = atl_core::Receipt::from_json(&receipt_text)
+            .expect("the receipt we issue must be one atl-core accepts");
+
+        let canonical = atl_core::canonicalize(&parsed.entry().metadata)
+            .expect("metadata must have a canonical form");
+        assert_eq!(
+            canonical, r#"{"ts":1756812345678901200}"#,
+            "the canonical form is the ECMA-262 spelling of the nearest double"
+        );
+
+        let recomputed = atl_core::canonicalize_and_hash(&parsed.entry().metadata)
+            .expect("metadata must have a canonical form");
+        assert_eq!(
+            format!("sha256:{}", hex::encode(recomputed)),
+            parsed.entry().metadata_hash,
+            "the verifier's hash must equal the metadata_hash the receipt states"
+        );
+
+        // And the same value is what the leaf committed to at ingress.
+        let at_ingress = crate::api::streaming::hash_metadata(Some(
+            &serde_json::json!({"ts": 1_756_812_345_678_901_234_u64}),
+        ))
+        .expect("ingress hash");
+        assert_eq!(
+            format!("sha256:{}", hex::encode(at_ingress)),
+            parsed.entry().metadata_hash,
+            "the hash committed at ingress must equal the one the receipt states"
         );
     }
 }
