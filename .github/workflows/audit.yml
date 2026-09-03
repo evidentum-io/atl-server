@@ -15,6 +15,11 @@ jobs:
   audit:
     name: Audit
     runs-on: ubuntu-latest
+    # The action publishes its result as a check run, which the default token
+    # cannot create on a workflow_dispatch run without this.
+    permissions:
+      checks: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
       # Install cargo-audit ourselves, with --locked. Left to the action it
