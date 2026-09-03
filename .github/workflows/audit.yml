@@ -20,3 +20,16 @@ jobs:
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # RUSTSEC-2023-0071 ("Marvin Attack", rsa crate, no fix
+          # available): the advisory covers any operation performed with an
+          # RSA *private* key -- decryption or signing -- whose timing an
+          # attacker can observe. This server has no RSA code path at all;
+          # `rsa` is not a direct dependency and arrives only through
+          # `atl-core`, which uses it for PKCS#1 v1.5 signature
+          # *verification* with a public key (RFC 3161 / CMS SignerInfo).
+          # The only private key this server holds is the Ed25519
+          # checkpoint signing key. Revisit immediately if a private-key
+          # RSA path is ever added. The action does not read
+          # `.cargo/audit.toml`, which carries the identical ignore for
+          # local runs -- both must be changed together.
+          ignore: RUSTSEC-2023-0071
