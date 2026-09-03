@@ -1,0 +1,24 @@
+# cargo-audit configuration.
+#
+# RUSTSEC-2023-0071 ("Marvin Attack: potential key recovery through timing
+# sidechannels", rsa crate) has no fixed version available. It is ignored
+# here deliberately, with a justification narrower than the advisory: the
+# advisory covers *any* operation performed with an RSA *private* key --
+# decryption and signing alike -- because the non-constant-time
+# implementation leaks information about that key whenever an attacker can
+# observe the timing.
+#
+# This server has no RSA code path of its own. `rsa` is not a direct
+# dependency (see Cargo.toml); it arrives transitively through `atl-core`,
+# which uses it exclusively for PKCS#1 v1.5 signature *verification* with a
+# public key taken from a certificate (RFC 3161 TSA / CMS SignerInfo).
+# Verification is modular exponentiation with the public exponent against
+# data anyone can already read, so there is no private key on that path for
+# a side-channel to leak. The only private key this server holds is the
+# Ed25519 checkpoint signing key, which `rsa` never touches.
+#
+# Remove this ignore -- do not extend it -- the moment this server or
+# `atl-core` grows an RSA decryption or RSA signing path, because at that
+# point the advisory applies in full.
+[advisories]
+ignore = ["RUSTSEC-2023-0071"]
