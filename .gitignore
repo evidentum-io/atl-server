@@ -15,6 +15,7 @@ signing.key
 *.db-wal
 *.db-shm
 /.env.example
-/scripts
+/scripts/*
+!/scripts/deploy.sh
 /debug-server.md
 /real-data
